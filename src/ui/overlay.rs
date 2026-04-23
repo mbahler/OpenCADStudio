@@ -204,6 +204,7 @@ pub fn selection_overlay<'a>(
     ucs_icon: Option<UcsIconParams>,
     ost_points: Vec<OstTrackPoint>,
     cursor_screen: Point,
+    show_viewcube: bool,
 ) -> Element<'a, Message> {
     canvas(SelectionCanvas {
         selection,
@@ -213,6 +214,7 @@ pub fn selection_overlay<'a>(
         ucs_icon,
         ost_points,
         cursor_screen,
+        show_viewcube,
     })
     .width(Length::Fill)
     .height(Length::Fill)
@@ -227,6 +229,7 @@ struct SelectionCanvas {
     ucs_icon: Option<UcsIconParams>,
     ost_points: Vec<OstTrackPoint>,
     cursor_screen: Point,
+    show_viewcube: bool,
 }
 
 impl canvas::Program<Message> for SelectionCanvas {
@@ -238,6 +241,18 @@ impl canvas::Program<Message> for SelectionCanvas {
         bounds: iced::Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
+        if self.show_viewcube {
+            if let Some(pos) = cursor.position_in(bounds) {
+                use crate::scene::{VIEWCUBE_DRAW_PX, VIEWCUBE_PAD};
+                let vc_x = bounds.width - VIEWCUBE_DRAW_PX - VIEWCUBE_PAD;
+                let vc_y = VIEWCUBE_PAD;
+                if pos.x >= vc_x && pos.x <= vc_x + VIEWCUBE_DRAW_PX
+                    && pos.y >= vc_y && pos.y <= vc_y + VIEWCUBE_DRAW_PX
+                {
+                    return mouse::Interaction::None;
+                }
+            }
+        }
         if cursor.is_over(bounds) {
             mouse::Interaction::Crosshair
         } else {
@@ -251,7 +266,7 @@ impl canvas::Program<Message> for SelectionCanvas {
         renderer: &iced::Renderer,
         _theme: &Theme,
         bounds: iced::Rectangle,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
 
@@ -506,6 +521,16 @@ impl canvas::Program<Message> for SelectionCanvas {
         }
 
         // ── CAD crosshair cursor ──────────────────────────────────────────────
+        let over_viewcube = self.show_viewcube && {
+            use crate::scene::{VIEWCUBE_DRAW_PX, VIEWCUBE_PAD};
+            cursor.position_in(bounds).map_or(false, |pos| {
+                let vc_x = bounds.width - VIEWCUBE_DRAW_PX - VIEWCUBE_PAD;
+                let vc_y = VIEWCUBE_PAD;
+                pos.x >= vc_x && pos.x <= vc_x + VIEWCUBE_DRAW_PX
+                    && pos.y >= vc_y && pos.y <= vc_y + VIEWCUBE_DRAW_PX
+            })
+        };
+        if !over_viewcube {
         if let Some(cp) = self.selection.last_move_pos {
             let color = Color {
                 r: 0.85,
@@ -551,6 +576,7 @@ impl canvas::Program<Message> for SelectionCanvas {
             frame.stroke(&v_bot, stroke.clone());
             frame.stroke(&square, stroke);
         }
+        } // end !over_viewcube
 
         // ── UCS icon ──────────────────────────────────────────────────────
         if let Some(ref ucs) = self.ucs_icon {

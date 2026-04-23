@@ -78,30 +78,30 @@ impl CubeRegion {
         match self.id() {
             0 => (0.0, FRAC_PI_2),
             1 => (0.0, -FRAC_PI_2),
-            2 => (PI, 0.0),
-            3 => (0.0, 0.0),
-            4 => (FRAC_PI_2, 0.0),
-            5 => (-FRAC_PI_2, 0.0),
-            6 => (PI, FRAC_PI_4),
-            7 => (0.0, FRAC_PI_4),
-            8 => (FRAC_PI_2, FRAC_PI_4),
-            9 => (-FRAC_PI_2, FRAC_PI_4),
-            10 => (PI, -FRAC_PI_4),
-            11 => (0.0, -FRAC_PI_4),
+            2 => (0.0, 0.0),              // FRONT: yaw=0  (eye at -Y)
+            3 => (PI, 0.0),               // BACK:  yaw=PI (eye at +Y)
+            4 => (FRAC_PI_2, 0.0),        // RIGHT
+            5 => (-FRAC_PI_2, 0.0),       // LEFT
+            6 => (0.0, FRAC_PI_4),        // EDGE_TOP_FRONT
+            7 => (PI, FRAC_PI_4),         // EDGE_TOP_BACK
+            8 => (FRAC_PI_2, FRAC_PI_4),  // EDGE_TOP_RIGHT
+            9 => (-FRAC_PI_2, FRAC_PI_4), // EDGE_TOP_LEFT
+            10 => (0.0, -FRAC_PI_4),      // EDGE_BOT_FRONT
+            11 => (PI, -FRAC_PI_4),       // EDGE_BOT_BACK
             12 => (FRAC_PI_2, -FRAC_PI_4),
             13 => (-FRAC_PI_2, -FRAC_PI_4),
-            14 => (FRAC_PI_4, 0.0),
-            15 => (-FRAC_PI_4, 0.0),
-            16 => (PI * 0.75, 0.0),
-            17 => (-PI * 0.75, 0.0),
-            18 => (PI * 0.75, iso),
-            19 => (-PI * 0.75, iso),
-            20 => (FRAC_PI_4, iso),
-            21 => (-FRAC_PI_4, iso),
-            22 => (PI * 0.75, -iso),
-            23 => (-PI * 0.75, -iso),
-            24 => (FRAC_PI_4, -iso),
-            25 => (-FRAC_PI_4, -iso),
+            14 => (FRAC_PI_4, 0.0),       // EDGE_FRONT_RIGHT (between 0 and PI/2)
+            15 => (-FRAC_PI_4, 0.0),      // EDGE_FRONT_LEFT
+            16 => (PI * 0.75, 0.0),       // EDGE_BACK_RIGHT  (between PI and PI/2)
+            17 => (-PI * 0.75, 0.0),      // EDGE_BACK_LEFT
+            18 => (FRAC_PI_4, iso),       // CORNER_TPF_R (FRONT+RIGHT)
+            19 => (-FRAC_PI_4, iso),      // CORNER_TPF_L (FRONT+LEFT)
+            20 => (PI * 0.75, iso),       // CORNER_TBK_R (BACK+RIGHT)
+            21 => (-PI * 0.75, iso),      // CORNER_TBK_L (BACK+LEFT)
+            22 => (FRAC_PI_4, -iso),      // CORNER_BTF_R
+            23 => (-FRAC_PI_4, -iso),     // CORNER_BTF_L
+            24 => (PI * 0.75, -iso),      // CORNER_BBK_R
+            25 => (-PI * 0.75, -iso),     // CORNER_BBK_L
             _ => (0.0, 0.0),
         }
     }
@@ -909,14 +909,14 @@ pub fn build_geometry() -> (Vec<CubeVertex>, Vec<u32>) {
         &mut is,
     );
     for &([sx, sy, sz], region) in &[
-        ([1.0f32, 1.0, 1.0], CORNER_TPF_R),
-        ([-1.0, 1.0, 1.0], CORNER_TPF_L),
-        ([1.0, 1.0, -1.0], CORNER_BTF_R),
-        ([-1.0, 1.0, -1.0], CORNER_BTF_L),
-        ([1.0, -1.0, 1.0], CORNER_TBK_R),
-        ([-1.0, -1.0, 1.0], CORNER_TBK_L),
-        ([1.0, -1.0, -1.0], CORNER_BBK_R),
-        ([-1.0, -1.0, -1.0], CORNER_BBK_L),
+        ([1.0f32, 1.0, 1.0], CORNER_TBK_R),   // sy=+1 = BACK yönü
+        ([-1.0, 1.0, 1.0], CORNER_TBK_L),
+        ([1.0, 1.0, -1.0], CORNER_BBK_R),
+        ([-1.0, 1.0, -1.0], CORNER_BBK_L),
+        ([1.0, -1.0, 1.0], CORNER_TPF_R),     // sy=-1 = FRONT yönü
+        ([-1.0, -1.0, 1.0], CORNER_TPF_L),
+        ([1.0, -1.0, -1.0], CORNER_BTF_R),
+        ([-1.0, -1.0, -1.0], CORNER_BTF_L),
     ] {
         push_tri(
             [sx * F, sy * F, sz * E],
@@ -934,32 +934,32 @@ pub fn build_geometry() -> (Vec<CubeVertex>, Vec<u32>) {
 pub fn region_centroids() -> [[f32; 3]; NUM_REGIONS] {
     let m = (F + E) * 0.5;
     [
-        [0.0, 0.0, E],
-        [0.0, 0.0, -E],
-        [0.0, E, 0.0],
-        [0.0, -E, 0.0],
-        [E, 0.0, 0.0],
-        [-E, 0.0, 0.0],
-        [0.0, m, m],
-        [0.0, -m, m],
-        [m, 0.0, m],
-        [-m, 0.0, m],
-        [0.0, m, -m],
-        [0.0, -m, -m],
-        [m, 0.0, -m],
-        [-m, 0.0, -m],
-        [m, m, 0.0],
-        [-m, m, 0.0],
-        [m, -m, 0.0],
-        [-m, -m, 0.0],
-        [m, m, m],
-        [-m, m, m],
-        [m, -m, m],
-        [-m, -m, m],
-        [m, m, -m],
-        [-m, m, -m],
-        [m, -m, -m],
-        [-m, -m, -m],
+        [0.0, 0.0, E],     // FACE_TOP
+        [0.0, 0.0, -E],    // FACE_BOTTOM
+        [0.0, -E, 0.0],    // FACE_FRONT  (geometry Y=-E)
+        [0.0, E, 0.0],     // FACE_BACK   (geometry Y=+E)
+        [E, 0.0, 0.0],     // FACE_RIGHT
+        [-E, 0.0, 0.0],    // FACE_LEFT
+        [0.0, -m, m],      // EDGE_TOP_FRONT
+        [0.0, m, m],       // EDGE_TOP_BACK
+        [m, 0.0, m],       // EDGE_TOP_RIGHT
+        [-m, 0.0, m],      // EDGE_TOP_LEFT
+        [0.0, -m, -m],     // EDGE_BOT_FRONT
+        [0.0, m, -m],      // EDGE_BOT_BACK
+        [m, 0.0, -m],      // EDGE_BOT_RIGHT
+        [-m, 0.0, -m],     // EDGE_BOT_LEFT
+        [m, -m, 0.0],      // EDGE_FRONT_RIGHT
+        [-m, -m, 0.0],     // EDGE_FRONT_LEFT
+        [m, m, 0.0],       // EDGE_BACK_RIGHT
+        [-m, m, 0.0],      // EDGE_BACK_LEFT
+        [m, -m, m],        // CORNER_TPF_R  (geometry sy=-1 = FRONT)
+        [-m, -m, m],       // CORNER_TPF_L
+        [m, m, m],         // CORNER_TBK_R  (geometry sy=+1 = BACK)
+        [-m, m, m],        // CORNER_TBK_L
+        [m, -m, -m],       // CORNER_BTF_R  (geometry sy=-1 = FRONT)
+        [-m, -m, -m],      // CORNER_BTF_L
+        [m, m, -m],        // CORNER_BBK_R  (geometry sy=+1 = BACK)
+        [-m, m, -m],       // CORNER_BBK_L
     ]
 }
 

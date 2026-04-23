@@ -189,7 +189,7 @@ impl H7CAD {
                 vec![]
             };
 
-            overlay::selection_overlay(sel, snap_info, grips, grid, ucs_icon, ost_points, tab.last_cursor_screen)
+            overlay::selection_overlay(sel, snap_info, grips, grid, ucs_icon, ost_points, tab.last_cursor_screen, !is_paper)
         };
 
         let nav = container(overlay::nav_toolbar())

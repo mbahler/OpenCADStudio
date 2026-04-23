@@ -26,7 +26,9 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let is_hovered = abs(in.region_f - u.hover_region.x) < 0.001 && u.hover_region.x >= 0.0;
     var final_rgb = in.color;
     if is_hovered {
-        final_rgb = mix(final_rgb, vec3<f32>(0.55, 0.78, 1.0), 0.45);
+        let glow = vec3<f32>(0.68, 0.88, 1.0);
+        final_rgb = mix(final_rgb, glow, 0.60);
+        final_rgb = clamp(final_rgb * 1.30, vec3<f32>(0.0), vec3<f32>(1.0));
     }
     return vec4<f32>(final_rgb, 1.0);
 }
