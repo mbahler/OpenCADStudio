@@ -457,61 +457,22 @@ impl H7CAD {
 
 // ── Paper canvas ──────────────────────────────────────────────────────────
 //
-// In paper space, the main canvas is composed of:
-//   1. A full-size PaperSheet layer — renders paper-space entities (title blocks,
-//      frames, borders) with the paper-space camera.
-//   2. One ViewportPane::Paper widget per Viewport entity, positioned at its
-//      paper-space coordinates and sized to its paper-space dimensions.
-//      Each renders model-space content through its own viewport camera.
-//   3. The existing selection_overlay / viewport_mouse / nav stack on top
-//      (unchanged — mouse event routing stays the same).
+// Renders the full paper canvas as a single full-size shader widget using the
+// PaperSheet mode, which includes both paper-space entities (title blocks,
+// frames, borders) and model-space content projected through each viewport's
+// view matrix into paper-space coordinates.
+//
+// Note: A per-viewport widget approach (ViewportPane::Paper) was attempted but
+// does not work correctly because Iced 0.14 batches all shader prepare() calls
+// before any render() calls, causing widgets that share the same Pipeline type
+// to overwrite each other's GPU buffers. The CPU-projection approach used here
+// is the correct solution within Iced's shader framework.
 
 fn paper_canvas_view<'a>(tab: &'a super::document::DocumentTab) -> Element<'a, Message> {
-    let scene = &tab.scene;
-
-    // Layer 1: paper-space entities (title blocks, frames, paper boundary).
-    let paper_sheet = shader(ViewportPane::paper_sheet(scene))
+    shader(ViewportPane::paper_sheet(&tab.scene))
         .width(Fill)
-        .height(Fill);
-
-    // Use the last-rendered canvas size to compute pixel positions.
-    // On the very first frame this is (0,0); correct positions appear from
-    // the second frame onward (imperceptible in practice).
-    let (canvas_w, canvas_h) = scene.selection.borrow().vp_size;
-    let vp_list = scene.viewport_list();
-
-    let mut layers = stack![paper_sheet];
-
-    for (handle, _, _) in &vp_list {
-        let Some(rect) = scene.viewport_screen_rect(*handle, (canvas_w, canvas_h)) else {
-            continue;
-        };
-
-        // Clamp to avoid zero-size or negative widgets.
-        let w = rect.width.max(1.0);
-        let h = rect.height.max(1.0);
-        let x = rect.x.max(0.0);
-        let y = rect.y.max(0.0);
-
-        // Layer 2+: one shader widget per viewport, positioned with Space offsets.
-        let vp_widget = shader(ViewportPane::paper(scene, *handle))
-            .width(iced::Length::Fixed(w))
-            .height(iced::Length::Fixed(h));
-
-        let positioned = column![
-            Space::new().height(iced::Length::Fixed(y)),
-            row![
-                Space::new().width(iced::Length::Fixed(x)),
-                vp_widget,
-            ],
-        ]
-        .width(Fill)
-        .height(Fill);
-
-        layers = layers.push(positioned);
-    }
-
-    layers.width(Fill).height(Fill).into()
+        .height(Fill)
+        .into()
 }
 
 // ── Document tab bar ───────────────────────────────────────────────────────

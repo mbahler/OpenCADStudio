@@ -2103,9 +2103,9 @@ impl Scene {
     /// `Rectangle` relative to the top-left of the paper canvas.
     ///
     /// `canvas_px`  — the pixel dimensions of the area that shows the paper.
-    /// Paper limits from the current layout define the paper-space extent;
-    /// the viewport is mapped linearly into that area (Y-axis flipped).
-    /// Returns `None` if the viewport handle is invalid or paper limits are missing.
+    /// Map a paper-space viewport into screen-pixel coordinates.
+    /// Needed when per-viewport shader widgets are revived (see `ViewportPaneMode::Paper`).
+    #[allow(dead_code)]
     pub fn viewport_screen_rect(
         &self,
         vp_handle: Handle,

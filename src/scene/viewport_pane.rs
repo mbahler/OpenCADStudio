@@ -9,10 +9,17 @@ use iced::{mouse, Event, Rectangle};
 pub enum ViewportPaneMode {
     /// Full model space — fills whatever bounds Iced assigns.
     Model,
-    /// Paper-space entities only (title blocks, frames, borders) using the
-    /// paper-space camera. No viewport content projection.
+    /// Paper-space entities plus model content projected through viewports.
+    /// Used for the full paper canvas (single widget, no per-viewport widgets).
     PaperSheet,
-    /// Model-space content seen through a specific paper-space Viewport entity.
+    /// Model-space content rendered through a specific viewport's 3-D camera.
+    ///
+    /// NOTE: Currently unused because Iced 0.14 batches all shader `prepare()`
+    /// calls before any `render()` calls. Multiple widgets sharing the same
+    /// `Pipeline` type overwrite each other's GPU buffers.  A per-viewport
+    /// wgpu sub-renderer that accumulates data across frames would be needed to
+    /// revive this path.
+    #[allow(dead_code)]
     Paper { handle: Handle },
 }
 
@@ -34,6 +41,8 @@ impl<'a> ViewportPane<'a> {
     }
 
     /// One paper-space viewport: model content rendered through its own camera.
+    /// See [`ViewportPaneMode::Paper`] for why this is currently unused.
+    #[allow(dead_code)]
     pub fn paper(scene: &'a Scene, handle: Handle) -> Self {
         Self { scene, mode: ViewportPaneMode::Paper { handle } }
     }

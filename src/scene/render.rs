@@ -196,10 +196,9 @@ impl Scene {
         }
     }
 
-    /// Build a Primitive for the paper-sheet background: paper-space entities
-    /// (title blocks, frames, borders) using the paper-space camera.
-    /// Viewport content is NOT included — it is rendered by separate
-    /// `ViewportPane::Paper` widgets stacked on top.
+    /// Build a Primitive for the full paper canvas: paper-space entities
+    /// (title blocks, frames, borders) plus model-space content projected
+    /// through each viewport's view matrix into paper-space coordinates.
     pub(super) fn build_paper_sheet_primitive(
         &self,
         hover_region: Option<usize>,
@@ -208,7 +207,9 @@ impl Scene {
         let cam = self.camera.borrow();
         self.selection.borrow_mut().vp_size = (bounds.width, bounds.height);
 
+        let layout_block = self.current_layout_block_handle();
         let mut wires = self.paper_sheet_wires();
+        wires.extend(self.viewport_content_wires(layout_block, None));
         if let Some(iw) = &self.interim_wire {
             wires.push(iw.clone());
         }
