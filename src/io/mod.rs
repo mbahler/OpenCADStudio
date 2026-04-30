@@ -58,8 +58,12 @@ pub fn load_file(path: &Path) -> Result<CadDocument, String> {
 
     match ext.as_str() {
         "dwg" => {
-            let mut reader = DwgReader::from_file(path).map_err(|e| e.to_string())?;
-            reader.read().map_err(|e| e.to_string())
+            let mut doc = DwgReader::from_file(path)
+                .map_err(|e| e.to_string())?
+                .read()
+                .map_err(|e| e.to_string())?;
+            fix_viewport_status_flags(&mut doc);
+            Ok(doc)
         }
         "dxf" => {
             let mut doc = DxfReader::from_file(path)
@@ -67,6 +71,7 @@ pub fn load_file(path: &Path) -> Result<CadDocument, String> {
                 .read()
                 .map_err(|e| e.to_string())?;
             fix_dxf_dimension_rotations(&mut doc);
+            fix_viewport_status_flags(&mut doc);
             Ok(doc)
         }
         _ => Err(format!("Unsupported file format: .{ext}")),
@@ -168,7 +173,25 @@ pub fn save_dxf(doc: &CadDocument, path: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-// ── DXF post-load fixups ──────────────────────────────────────────────────
+// ── Post-load fixups ──────────────────────────────────────────────────────
+
+/// acadrust's ViewportStatusFlags::from_bits() maps bit 0 → is_on and bit 15 → locked,
+/// but the real DXF/DWG spec uses bit 15 (0x8000) → viewport on and bit 14 (0x4000) → locked.
+/// Files from AutoCAD and other tools always set bit 15 for active viewports, leaving bit 0
+/// clear, so acadrust reads every such viewport as off.  Correct that here after loading.
+fn fix_viewport_status_flags(doc: &mut CadDocument) {
+    for entity in doc.entities_mut() {
+        if let EntityType::Viewport(vp) = entity {
+            let bits = vp.status.to_bits();
+            // If bit 0 is not set but bit 15 is, this is an external-format viewport:
+            // treat bit 15 as "on" and bit 14 as "locked".
+            if (bits & 0x0001) == 0 && (bits & 0x8000) != 0 {
+                vp.status.is_on = true;
+                vp.status.locked = (bits & 0x4000) != 0;
+            }
+        }
+    }
+}
 
 /// The acadrust DXF reader stores several rotation fields directly from DXF
 /// group code 50 in degrees, while DWG and our own creation code store radians.

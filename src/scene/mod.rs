@@ -196,6 +196,14 @@ impl Scene {
         }
     }
 
+    /// Returns true if this viewport ID identifies a user viewport (not the
+    /// sheet/overall viewport).  The standard sheet viewport has id=1; id=0
+    /// means "unset".  External DXF exporters sometimes use id=-1 for all
+    /// viewports, so any negative id is also treated as a user viewport.
+    pub fn is_user_viewport_id(id: i16) -> bool {
+        id != 0 && id != 1
+    }
+
     /// Public accessor for the block-record handle of the current layout.
     /// Used by external callers (e.g. `commit_entity`) that need the handle
     /// without going through private API.
@@ -325,7 +333,7 @@ impl Scene {
         }
         self.document.entities().find_map(|e| {
             if let EntityType::Viewport(vp) = e {
-                if vp.id > 1 && vp.common.owner_handle == layout_block {
+                if Self::is_user_viewport_id(vp.id) && vp.common.owner_handle == layout_block {
                     let scale = if vp.custom_scale.abs() > 1e-9 {
                         vp.custom_scale
                     } else if vp.view_height.abs() > 1e-9 {
@@ -354,7 +362,7 @@ impl Scene {
             .entities()
             .filter_map(|e| {
                 if let EntityType::Viewport(vp) = e {
-                    if vp.id > 1 && vp.common.owner_handle == layout_block {
+                    if Self::is_user_viewport_id(vp.id) && vp.common.owner_handle == layout_block {
                         Some((vp.common.handle, vp.id, vp.frozen_layers.clone()))
                     } else {
                         None
@@ -365,7 +373,15 @@ impl Scene {
             })
             .collect::<Vec<_>>()
             .into_iter()
-            .map(|(h, id, frozen)| (h, format!("VP {}", id - 1), frozen))
+            .enumerate()
+            .map(|(i, (h, id, frozen))| {
+                let label = if id > 1 {
+                    format!("VP {}", id - 1)
+                } else {
+                    format!("VP {}", i + 1)
+                };
+                (h, label, frozen)
+            })
             .collect();
         result.sort_by_key(|(_, label, _)| label.clone());
         result
@@ -382,7 +398,7 @@ impl Scene {
         }
         self.document.entities().filter(|e| {
             if let EntityType::Viewport(vp) = e {
-                vp.id > 1 && vp.common.owner_handle == layout_block
+                Self::is_user_viewport_id(vp.id) && vp.common.owner_handle == layout_block
             } else {
                 false
             }
@@ -786,7 +802,7 @@ impl Scene {
                 if let EntityType::Viewport(vp) = e { Some(vp) } else { None }
             })
             .filter(|vp| {
-                vp.id > 1
+                Self::is_user_viewport_id(vp.id)
                     && vp.common.owner_handle == paper_block
                     && vp.status.is_on
                     && only_vp.map_or(true, |h| vp.common.handle == h)
@@ -1126,7 +1142,7 @@ impl Scene {
             .entities()
             .find_map(|e| {
                 let EntityType::Viewport(vp) = e else { return None; };
-                if vp.id <= 1 || vp.common.owner_handle != layout_block || !vp.status.is_on {
+                if !Self::is_user_viewport_id(vp.id) || vp.common.owner_handle != layout_block || !vp.status.is_on {
                     return None;
                 }
                 let hw = (vp.width / 2.0) as f32;
@@ -1147,7 +1163,7 @@ impl Scene {
         let layout_block = self.current_layout_block_handle();
         self.document.entities().find_map(|e| {
             let EntityType::Viewport(vp) = e else { return None; };
-            if vp.id > 1 && vp.common.owner_handle == layout_block && vp.status.is_on {
+            if Self::is_user_viewport_id(vp.id) && vp.common.owner_handle == layout_block && vp.status.is_on {
                 Some(vp.common.handle)
             } else {
                 None
