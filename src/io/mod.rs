@@ -78,39 +78,33 @@ pub fn load_file(path: &Path) -> Result<CadDocument, String> {
     }
 }
 
-// ── Save dialog ───────────────────────────────────────────────────────────
+// ── Folder picker (used by the custom Save As dialog) ────────────────────
 
-/// Show a save-file dialog listing all DWG and DXF version filters.
-/// DWG versions appear first; format is auto-detected from the returned extension.
-pub async fn pick_save_path() -> Option<PathBuf> {
-    let dwg_filters: &[(&str, &[&str])] = &[
-        ("DWG Files (2018)", &["dwg"]),
-        ("DWG Files (2013)", &["dwg"]),
-        ("DWG Files (2010)", &["dwg"]),
-        ("DWG Files (2007)", &["dwg"]),
-        ("DWG Files (2004)", &["dwg"]),
-        ("DWG Files (2000)", &["dwg"]),
-        ("DWG Files (R14)", &["dwg"]),
-        ("DWG Files (R13)", &["dwg"]),
-    ];
-    let dxf_filters: &[(&str, &[&str])] = &[
-        ("DXF Files (2018)", &["dxf"]),
-        ("DXF Files (2013)", &["dxf"]),
-        ("DXF Files (2010)", &["dxf"]),
-        ("DXF Files (2007)", &["dxf"]),
-        ("DXF Files (2004)", &["dxf"]),
-        ("DXF Files (2000)", &["dxf"]),
-        ("DXF Files (R14)", &["dxf"]),
-        ("DXF Files (R13)", &["dxf"]),
-    ];
-
-    let mut dlg = rfd::AsyncFileDialog::new()
-        .set_title("Save As")
-        .set_file_name("drawing.dwg");
-    for (label, exts) in dwg_filters.iter().chain(dxf_filters.iter()) {
-        dlg = dlg.add_filter(*label, *exts);
+pub async fn pick_folder(start: &str) -> Option<PathBuf> {
+    let mut dlg = rfd::AsyncFileDialog::new().set_title("Choose folder");
+    if !start.is_empty() {
+        dlg = dlg.set_directory(start);
     }
-    dlg.save_file().await.map(|h| h.path().to_path_buf())
+    dlg.pick_folder().await.map(|h| h.path().to_path_buf())
+}
+
+// ── Save ──────────────────────────────────────────────────────────────────
+
+/// Parse a format string like "DWG 2013" or "DXF 2007" into
+/// `(extension, DxfVersion)`.  Falls back to ("dwg", AC1032) for unknown strings.
+pub fn parse_save_format(format: &str) -> (&'static str, acadrust::DxfVersion) {
+    use acadrust::DxfVersion;
+    let f = format.to_ascii_uppercase();
+    let is_dxf = f.starts_with("DXF");
+    let ext = if is_dxf { "dxf" } else { "dwg" };
+    let version = if f.contains("2013") { DxfVersion::AC1027 }
+        else if f.contains("2010")      { DxfVersion::AC1024 }
+        else if f.contains("2007")      { DxfVersion::AC1021 }
+        else if f.contains("2004")      { DxfVersion::AC1018 }
+        else if f.contains("2000")      { DxfVersion::AC1015 }
+        else if f.contains("R14")       { DxfVersion::AC1014 }
+        else                            { DxfVersion::AC1032 }; // 2018
+    (ext, version)
 }
 
 // ── Plot Style Table ──────────────────────────────────────────────────────
@@ -148,19 +142,28 @@ pub async fn pick_image_file() -> Result<(PathBuf, u32, u32), String> {
     Ok((path, w, h))
 }
 
-// ── Save ──────────────────────────────────────────────────────────────────
-
-/// Save the document to the given path.
+/// Save `doc` to `path` with the given DXF version, overriding `doc.version`.
 /// Format is auto-detected from the extension (dwg / dxf).
-pub fn save(doc: &CadDocument, path: &Path) -> Result<(), String> {
+pub fn save_as_version(
+    doc: &CadDocument,
+    path: &Path,
+    version: acadrust::DxfVersion,
+) -> Result<(), String> {
+    let mut doc = doc.clone();
+    doc.version = version;
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
     match ext.as_str() {
-        "dxf" => save_dxf(doc, path),
-        _ => save_dwg(doc, path),
+        "dxf" => DxfWriter::new(&doc).write_to_file(path).map_err(|e| e.to_string()),
+        _     => DwgWriter::write_to_file(path, &doc).map_err(|e| e.to_string()),
     }
+}
+
+/// Save using the document's existing version.
+pub fn save(doc: &CadDocument, path: &Path) -> Result<(), String> {
+    save_as_version(doc, path, doc.version)
 }
 
 pub fn save_dwg(doc: &CadDocument, path: &Path) -> Result<(), String> {

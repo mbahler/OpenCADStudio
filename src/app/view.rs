@@ -7,7 +7,7 @@ use crate::scene::grip::{grips_to_screen, grips_to_screen_paper};
 use crate::scene::paper_canvas::PaperCanvas;
 use crate::scene::viewport_pane::{PaperViewportPane, ViewportPane};
 use crate::ui::overlay;
-use iced::widget::{button, canvas, column, container, mouse_area, row, shader, stack, text, Row, Space};
+use iced::widget::{button, canvas, column, container, mouse_area, pick_list, row, shader, stack, text, text_input, Row, Space};
 use iced::window;
 use iced::{keyboard, Background, Border, Color, Element, Fill, Subscription, Task, Theme};
 
@@ -114,6 +114,13 @@ impl H7CAD {
                 None => String::new(),
             };
             return unsaved_changes_dialog_window(&tab_name);
+        }
+        if Some(window_id) == self.save_dialog_window {
+            return save_as_dialog_window(
+                &self.save_dialog_filename,
+                &self.save_dialog_folder,
+                &self.save_dialog_format,
+            );
         }
 
         let i = self.active_tab;
@@ -842,6 +849,107 @@ fn layout_context_menu_overlay(name: &str) -> Element<'_, Message> {
 }
 
 /// Content for the floating "Unsaved Changes" OS window.
+const SAVE_FORMAT_OPTIONS: &[&str] = &[
+    "DWG 2018", "DWG 2013", "DWG 2010", "DWG 2007", "DWG 2004", "DWG 2000", "DWG R14",
+    "DXF 2018", "DXF 2013", "DXF 2010", "DXF 2007", "DXF 2004", "DXF 2000", "DXF R14",
+];
+
+fn save_as_dialog_window<'a>(
+    filename: &'a str,
+    folder: &'a str,
+    format: &'a str,
+) -> Element<'a, Message> {
+    const BG:        Color = Color { r: 0.18, g: 0.18, b: 0.20, a: 1.0 };
+    const BORDER_COL:Color = Color { r: 0.38, g: 0.38, b: 0.42, a: 1.0 };
+    const TEXT_COL:  Color = Color { r: 0.90, g: 0.90, b: 0.90, a: 1.0 };
+    const INPUT_BG:  Color = Color { r: 0.12, g: 0.12, b: 0.14, a: 1.0 };
+    const BTN_OK:    Color = Color { r: 0.20, g: 0.46, b: 0.80, a: 1.0 };
+    const BTN_HOV:   Color = Color { r: 0.26, g: 0.55, b: 0.92, a: 1.0 };
+    const BTN_DISC:  Color = Color { r: 0.28, g: 0.28, b: 0.30, a: 1.0 };
+    const BTN_DHOV:  Color = Color { r: 0.36, g: 0.36, b: 0.40, a: 1.0 };
+
+    let input_style = |_: &Theme, _status: iced::widget::text_input::Status| {
+        iced::widget::text_input::Style {
+            background: Background::Color(INPUT_BG),
+            border: Border { color: BORDER_COL, width: 1.0, radius: 4.0.into() },
+            icon: TEXT_COL,
+            placeholder: Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 },
+            value: TEXT_COL,
+            selection: Color { r: 0.20, g: 0.46, b: 0.80, a: 0.5 },
+        }
+    };
+
+    let btn = |label: &'static str, msg: Message, base: Color, hov: Color| {
+        button(text(label).size(13).color(TEXT_COL))
+            .on_press(msg)
+            .style(move |_: &Theme, status| button::Style {
+                background: Some(Background::Color(match status {
+                    button::Status::Hovered | button::Status::Pressed => hov,
+                    _ => base,
+                })),
+                text_color: TEXT_COL,
+                border: Border { color: BORDER_COL, width: 1.0, radius: 4.0.into() },
+                shadow: iced::Shadow::default(),
+                snap: false,
+            })
+            .padding([5, 14])
+    };
+
+    let sel_static = SAVE_FORMAT_OPTIONS.iter().copied().find(|&s| s == format);
+
+    let label = |s: &'static str| text(s).size(12).color(Color { r: 0.65, g: 0.65, b: 0.68, a: 1.0 });
+
+    container(
+        column![
+            label("File name"),
+            iced::widget::Space::new().height(4),
+            iced::widget::text_input("drawing.dwg", filename)
+                .on_input(Message::SaveDialogFilenameChanged)
+                .style(input_style)
+                .size(13)
+                .padding([6, 8]),
+            iced::widget::Space::new().height(10),
+            label("Save in"),
+            iced::widget::Space::new().height(4),
+            row![
+                iced::widget::text_input("/home/...", folder)
+                    .on_input(Message::SaveDialogFolderChanged)
+                    .style(input_style)
+                    .size(13)
+                    .padding([6, 8])
+                    .width(Fill),
+                iced::widget::Space::new().width(6),
+                btn("Browse…", Message::SaveDialogBrowse, BTN_DISC, BTN_DHOV),
+            ],
+            iced::widget::Space::new().height(10),
+            label("Format"),
+            iced::widget::Space::new().height(4),
+            pick_list(
+                SAVE_FORMAT_OPTIONS,
+                sel_static,
+                |s: &str| Message::SaveDialogFormatChanged(s.to_string()),
+            )
+            .width(Fill),
+            iced::widget::Space::new().height(16),
+            row![
+                iced::widget::Space::new().width(Fill),
+                btn("Save",   Message::SaveDialogConfirm, BTN_OK,   BTN_HOV),
+                iced::widget::Space::new().width(8),
+                btn("Cancel", Message::SaveDialogCancel,  BTN_DISC, BTN_DHOV),
+            ],
+        ]
+        .spacing(0),
+    )
+    .style(move |_: &Theme| container::Style {
+        background: Some(Background::Color(BG)),
+        ..Default::default()
+    })
+    .padding([20, 24])
+    .width(Fill)
+    .height(Fill)
+    .into()
+}
+
 fn unsaved_changes_dialog_window(name: &str) -> Element<'static, Message> {
     const BG:         Color = Color { r: 0.18, g: 0.18, b: 0.20, a: 1.0 };
     const BORDER_COL: Color = Color { r: 0.38, g: 0.38, b: 0.42, a: 1.0 };

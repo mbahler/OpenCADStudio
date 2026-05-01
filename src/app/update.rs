@@ -181,7 +181,7 @@ impl H7CAD {
                 let name = block_name.clone();
                 Task::perform(
                     async move {
-                        let path = crate::io::pick_save_path().await;
+                        let path = crate::io::pick_folder("").await.map(|f| f.join("drawing.dwg"));
                         (name, path)
                     },
                     |(name, path)| Message::WblockSaveResult(name, path),
@@ -411,29 +411,94 @@ impl H7CAD {
                         }
                         Err(e) => self.command_line.push_error(&format!("Save failed: {e}")),
                     }
+                    Task::none()
                 } else {
-                    return Task::perform(crate::io::pick_save_path(), Message::PickedSavePath);
+                    self.save_dialog_for_unsaved = false;
+                    self.open_save_dialog_window(i)
                 }
-                Task::none()
             }
 
-            Message::SaveAs => Task::perform(crate::io::pick_save_path(), Message::PickedSavePath),
-
-            Message::PickedSavePath(Some(path)) => {
+            Message::SaveAs => {
                 let i = self.active_tab;
-                match crate::io::save(&self.tabs[i].scene.document, &path) {
-                    Ok(()) => {
-                        self.command_line
-                            .push_output(&format!("Saved: {}", path.display()));
-                        self.tabs[i].current_path = Some(path);
-                        self.tabs[i].dirty = false;
-                    }
-                    Err(e) => self.command_line.push_error(&format!("Save failed: {e}")),
-                }
+                self.save_dialog_for_unsaved = false;
+                self.open_save_dialog_window(i)
+            }
+
+            Message::SaveDialogFormatChanged(fmt) => {
+                // Keep filename extension in sync with format choice.
+                let (ext, _) = crate::io::parse_save_format(&fmt);
+                let stem = std::path::Path::new(&self.save_dialog_filename)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "drawing".to_string());
+                self.save_dialog_filename = format!("{stem}.{ext}");
+                self.save_dialog_format = fmt;
                 Task::none()
             }
 
-            Message::PickedSavePath(None) => Task::none(),
+            Message::SaveDialogFilenameChanged(name) => {
+                self.save_dialog_filename = name;
+                Task::none()
+            }
+
+            Message::SaveDialogFolderChanged(folder) => {
+                self.save_dialog_folder = folder;
+                Task::none()
+            }
+
+            Message::SaveDialogBrowse => {
+                let folder = self.save_dialog_folder.clone();
+                Task::perform(
+                    async move { crate::io::pick_folder(&folder).await },
+                    Message::SaveDialogFolderPicked,
+                )
+            }
+
+            Message::SaveDialogFolderPicked(Some(p)) => {
+                self.save_dialog_folder = p.to_string_lossy().into_owned();
+                Task::none()
+            }
+
+            Message::SaveDialogFolderPicked(None) => Task::none(),
+
+            Message::SaveDialogConfirm => {
+                let folder = std::path::Path::new(&self.save_dialog_folder);
+                let path = folder.join(&self.save_dialog_filename);
+                let (_, version) = crate::io::parse_save_format(&self.save_dialog_format);
+                let close = self.close_save_dialog_window();
+                if self.save_dialog_for_unsaved {
+                    let result = crate::io::save_as_version(
+                        &self.tabs[self.active_tab].scene.document, &path, version,
+                    );
+                    match result {
+                        Ok(()) => {
+                            let i = self.active_tab;
+                            self.command_line.push_output(&format!("Saved: {}", path.display()));
+                            self.tabs[i].current_path = Some(path.clone());
+                            self.tabs[i].dirty = false;
+                            let close_tab_or_quit = self.update(Message::UnsavedPickedSavePath(Some(path)));
+                            return Task::batch([close, close_tab_or_quit]);
+                        }
+                        Err(e) => self.command_line.push_error(&format!("Save failed: {e}")),
+                    }
+                    close
+                } else {
+                    let i = self.active_tab;
+                    match crate::io::save_as_version(&self.tabs[i].scene.document, &path, version) {
+                        Ok(()) => {
+                            self.command_line.push_output(&format!("Saved: {}", path.display()));
+                            self.tabs[i].current_path = Some(path);
+                            self.tabs[i].dirty = false;
+                        }
+                        Err(e) => self.command_line.push_error(&format!("Save failed: {e}")),
+                    }
+                    close
+                }
+            }
+
+            Message::SaveDialogCancel => self.close_save_dialog_window(),
+
+            Message::PickedSavePath(Some(_)) | Message::PickedSavePath(None) => Task::none(),
 
             Message::ClearScene => {
                 let i = self.active_tab;
@@ -729,6 +794,10 @@ impl H7CAD {
                     // User closed the dialog window via OS ✕ — treat as Cancel.
                     self.unsaved_dialog_window = None;
                     self.pending_close = None;
+                    return Task::none();
+                }
+                if self.save_dialog_window == Some(id) {
+                    self.save_dialog_window = None;
                     return Task::none();
                 }
                 if self.layer_window         == Some(id) { self.layer_window         = None; }
@@ -2756,13 +2825,12 @@ impl H7CAD {
                                 }
                             }
                         } else {
-                            // No path — close dialog, show save-as, then come back.
+                            // No path — close unsaved dialog, open custom Save As dialog.
                             self.pending_close = Some(super::PendingClose::Tab(idx));
+                            self.save_dialog_for_unsaved = true;
                             let close_win = self.close_unsaved_dialog_window();
-                            return Task::batch(vec![
-                                close_win,
-                                Task::perform(crate::io::pick_save_path(), Message::UnsavedPickedSavePath),
-                            ]);
+                            let open_save = self.open_save_dialog_window(idx);
+                            return Task::batch([close_win, open_save]);
                         }
                     }
                     Some(super::PendingClose::Quit) => {
@@ -2780,14 +2848,13 @@ impl H7CAD {
                                     }
                                 }
                             } else {
-                                // No path — close dialog, show save-as, then come back.
+                                // No path — close unsaved dialog, open custom Save As dialog.
                                 self.active_tab = idx;
                                 self.pending_close = Some(super::PendingClose::Quit);
+                                self.save_dialog_for_unsaved = true;
                                 let close_win = self.close_unsaved_dialog_window();
-                                return Task::batch(vec![
-                                    close_win,
-                                    Task::perform(crate::io::pick_save_path(), Message::UnsavedPickedSavePath),
-                                ]);
+                                let open_save = self.open_save_dialog_window(idx);
+                                return Task::batch([close_win, open_save]);
                             }
                         }
                         if self.tabs.iter().any(|t| t.dirty) {
@@ -2804,9 +2871,10 @@ impl H7CAD {
             }
 
             Message::UnsavedPickedSavePath(Some(path)) => {
+                let (_, version) = crate::io::parse_save_format(&self.save_dialog_format);
                 match self.pending_close.take() {
                     Some(super::PendingClose::Tab(idx)) => {
-                        match crate::io::save(&self.tabs[idx].scene.document, &path) {
+                        match crate::io::save_as_version(&self.tabs[idx].scene.document, &path, version) {
                             Ok(()) => {
                                 self.command_line.push_output(&format!("Saved: {}", path.display()));
                                 self.tabs[idx].current_path = Some(path);
@@ -2815,7 +2883,6 @@ impl H7CAD {
                             }
                             Err(e) => {
                                 self.command_line.push_error(&format!("Save failed: {e}"));
-                                // Re-open dialog for retry.
                                 self.pending_close = Some(super::PendingClose::Tab(idx));
                                 return self.open_unsaved_dialog_window();
                             }
@@ -2823,7 +2890,7 @@ impl H7CAD {
                     }
                     Some(super::PendingClose::Quit) => {
                         let i = self.active_tab;
-                        match crate::io::save(&self.tabs[i].scene.document, &path) {
+                        match crate::io::save_as_version(&self.tabs[i].scene.document, &path, version) {
                             Ok(()) => {
                                 self.command_line.push_output(&format!("Saved: {}", path.display()));
                                 self.tabs[i].current_path = Some(path);
@@ -3851,6 +3918,41 @@ impl H7CAD {
     }
 
     /// Populate edit buffers from the currently selected text style.
+    fn open_save_dialog_window(&mut self, tab_idx: usize) -> Task<Message> {
+        if let Some(id) = self.save_dialog_window {
+            return window::gain_focus(id);
+        }
+        // Pre-fill filename from current path or tab name.
+        let (filename, folder) = if let Some(p) = &self.tabs[tab_idx].current_path {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "drawing.dwg".to_string());
+            let dir = p.parent().map(|d| d.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.save_dialog_folder.clone());
+            (name, dir)
+        } else {
+            let (ext, _) = crate::io::parse_save_format(&self.save_dialog_format);
+            let name = format!("{}.{ext}", self.tabs[tab_idx].tab_display_name());
+            (name, self.save_dialog_folder.clone())
+        };
+        self.save_dialog_filename = filename;
+        self.save_dialog_folder = folder;
+        let (id, task) = window::open(window::Settings {
+            size: iced::Size::new(500.0, 220.0),
+            resizable: false,
+            ..Default::default()
+        });
+        self.save_dialog_window = Some(id);
+        task.map(|_| Message::Noop)
+    }
+
+    fn close_save_dialog_window(&mut self) -> Task<Message> {
+        if let Some(id) = self.save_dialog_window.take() {
+            window::close(id)
+        } else {
+            Task::none()
+        }
+    }
+
     fn open_unsaved_dialog_window(&mut self) -> Task<Message> {
         if let Some(id) = self.unsaved_dialog_window {
             return window::gain_focus(id);

@@ -153,6 +153,18 @@ pub(super) struct H7CAD {
     /// OS window for the unsaved-changes confirmation dialog.
     unsaved_dialog_window: Option<window::Id>,
 
+    // ── Custom Save-As dialog ─────────────────────────────────────────────
+    /// OS window for the custom Save As dialog (format + filename + folder).
+    save_dialog_window: Option<window::Id>,
+    /// Currently selected format string, e.g. "DWG 2013".
+    save_dialog_format: String,
+    /// Editable filename (without path), e.g. "drawing.dwg".
+    save_dialog_filename: String,
+    /// Target folder path (as a string for editing).
+    save_dialog_folder: String,
+    /// True when triggered from the unsaved-changes flow.
+    save_dialog_for_unsaved: bool,
+
     // ── DimStyle Dialog ───────────────────────────────────────────────────
     /// Name of the style currently shown in the dialog.
     dimstyle_selected: String,
@@ -201,6 +213,14 @@ pub enum Message {
     SaveFile,
     SaveAs,
     PickedSavePath(Option<PathBuf>),
+    // ── Custom Save-As dialog ─────────────────────────────────────────────
+    SaveDialogFormatChanged(String),
+    SaveDialogFilenameChanged(String),
+    SaveDialogFolderChanged(String),
+    SaveDialogBrowse,
+    SaveDialogFolderPicked(Option<std::path::PathBuf>),
+    SaveDialogConfirm,
+    SaveDialogCancel,
     ClearScene,
     SetWireframe(bool),
     /// Switch camera projection: true = Orthographic, false = Perspective.
@@ -624,6 +644,13 @@ impl H7CAD {
             page_setup_scale: "Fit".to_string(),
             pending_close: None,
             unsaved_dialog_window: None,
+            save_dialog_window: None,
+            save_dialog_format: "DWG 2018".to_string(),
+            save_dialog_filename: "drawing.dwg".to_string(),
+            save_dialog_folder: std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| ".".to_string()),
+            save_dialog_for_unsaved: false,
             // Plot style
             active_plot_style: None,
             // Color scheme (default: dark CAD-style)
@@ -705,6 +732,7 @@ pub fn run() -> iced::Result {
             if Some(window_id) == state.shortcuts_window     { return "Keyboard Shortcuts".into(); }
             if Some(window_id) == state.about_window               { return "About H7CAD".into(); }
             if Some(window_id) == state.unsaved_dialog_window     { return "Unsaved Changes".into(); }
+            if Some(window_id) == state.save_dialog_window         { return "Save As".into(); }
             if let Some(tab) = state.tabs.get(state.active_tab) {
                 let dot = if tab.dirty { "● " } else { "" };
                 let name = tab.tab_display_name();
