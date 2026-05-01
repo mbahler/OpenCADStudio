@@ -100,15 +100,16 @@ A CAD application for 2D drafting and 3D modeling, built with Rust. Reads and wr
 
 ## Installation
 
-### Flatpak (Linux)
+### Linux (AppImage)
 
-Download `H7CAD.flatpak` from the [latest release](https://github.com/HakanSeven12/H7CAD/releases/latest), then:
+Download `H7CAD-*-linux-x86_64.AppImage` from the [latest release](https://github.com/HakanSeven12/H7CAD/releases/latest), then:
 
 ```bash
-flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-flatpak install H7CAD.flatpak
-flatpak run io.github.HakanSeven12.H7CAD
+chmod +x H7CAD-*-linux-x86_64.AppImage
+./H7CAD-*-linux-x86_64.AppImage
 ```
+
+No installation required — runs directly on any modern Linux distribution.
 
 ### Windows
 
