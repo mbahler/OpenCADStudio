@@ -1228,8 +1228,14 @@ impl H7CAD {
                         }
                     }
 
-                    let wo = self.tabs[i].scene.world_offset;
-                    let wo_vec = glam::Vec3::new(wo[0] as f32, wo[1] as f32, wo[2] as f32);
+                    // Paper-space entities use sheet coordinates (no world_offset).
+                    // Only add world_offset when converting local → DXF space in model space.
+                    let wo_vec = if self.tabs[i].scene.current_layout == "Model" {
+                        let wo = self.tabs[i].scene.world_offset;
+                        glam::Vec3::new(wo[0] as f32, wo[1] as f32, wo[2] as f32)
+                    } else {
+                        glam::Vec3::ZERO
+                    };
                     let apply = if grip.is_translate {
                         GripApply::Translate(snapped - grip.last_world)
                     } else {
