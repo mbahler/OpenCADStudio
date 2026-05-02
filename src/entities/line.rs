@@ -21,20 +21,45 @@ fn to_truck(line: &Line) -> TruckEntity {
     );
     let p0 = Point3::new(sx, sy, sz);
     let p1 = Point3::new(ex, ey, ez);
-    let v0 = builder::vertex(p0);
-    let v1 = builder::vertex(p1);
-    let edge = builder::line(&v0, &v1);
     let kv = vec![
         [p0.x as f32, p0.y as f32, p0.z as f32],
         [p1.x as f32, p1.y as f32, p1.z as f32],
     ];
+    let tangent = TangentGeom::Line { p1: kv[0], p2: kv[1] };
+
+    if line.thickness.abs() > 1e-10 {
+        let t = line.thickness;
+        let (nx, ny, nz) = normal;
+        let p0t = [
+            (sx + t * nx) as f32, (sy + t * ny) as f32, (sz + t * nz) as f32,
+        ];
+        let p1t = [
+            (ex + t * nx) as f32, (ey + t * ny) as f32, (ez + t * nz) as f32,
+        ];
+        let pts = vec![
+            kv[0], kv[1],
+            [f32::NAN; 3],
+            p0t, p1t,
+            [f32::NAN; 3],
+            kv[0], p0t,
+            [f32::NAN; 3],
+            kv[1], p1t,
+        ];
+        return TruckEntity {
+            object: TruckObject::Lines(pts),
+            snap_pts: vec![],
+            tangent_geoms: vec![tangent],
+            key_vertices: kv,
+        };
+    }
+
+    let v0 = builder::vertex(p0);
+    let v1 = builder::vertex(p1);
+    let edge = builder::line(&v0, &v1);
     TruckEntity {
         object: TruckObject::Curve(edge),
         snap_pts: vec![],
-        tangent_geoms: vec![TangentGeom::Line {
-            p1: kv[0],
-            p2: kv[1],
-        }],
+        tangent_geoms: vec![tangent],
         key_vertices: kv,
     }
 }
