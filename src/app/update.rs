@@ -489,7 +489,7 @@ impl H7CAD {
 
             Message::ClearScene => {
                 let i = self.active_tab;
-                self.push_undo_snapshot(i, "NEW");
+                self.push_undo_snapshot(i, "CLEAR");
                 self.tabs[i].scene.clear();
                 crate::linetypes::populate_document(&mut self.tabs[i].scene.document);
                 self.tabs[i].properties = PropertiesPanel::empty();

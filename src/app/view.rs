@@ -473,7 +473,7 @@ impl H7CAD {
                                 Some(Message::ToggleDynInput)
                             }
                             keyboard::Key::Character(c) if ctrl => match c.as_str() {
-                                "n" => Some(Message::ClearScene),
+                                "n" => Some(Message::TabNew),
                                 "o" => Some(Message::OpenFile),
                                 "s" if !shift => Some(Message::SaveFile),
                                 "s" if shift => Some(Message::SaveAs),
@@ -1075,4 +1075,3 @@ fn unsaved_changes_dialog_window(name: &str) -> Element<'static, Message> {
     .padding([24, 28])
     .into()
 }
-

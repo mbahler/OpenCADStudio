@@ -22,7 +22,7 @@ impl H7CAD {
         }
 
         match cmd {
-            "NEW"                => return Task::done(Message::ClearScene),
+            "NEW"                => return Task::done(Message::TabNew),
             "OPEN"               => return Task::done(Message::OpenFile),
             "SAVE"|"QSAVE"       => return Task::done(Message::SaveFile),
             "SAVEAS"             => return Task::done(Message::SaveAs),
