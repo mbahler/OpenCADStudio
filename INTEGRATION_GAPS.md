@@ -156,7 +156,7 @@ Then transform each OCS point: `WCS = x*Ax + y*Ay + z*N`
 
 | Status | Entity | Missing Snap | Location |
 |---|---|---|---|
-| ⚠️ | **Ellipse** (partial arc) | Endpoints not in pre-baked snap_pts | Arc endpoints emitted only as `Center`; functional via wire tessellation but semantically wrong |
+| ✅ | **Ellipse** (partial arc) | Endpoints in `key_vertices` → `SnapType::Endpoint` via snap engine | Correctly handled; `snap_pts` only needs Center |
 | ✅ | **Hatch** | Elevation Z | Snap Z uses `hatch.elevation - world_offset.z` — `src/scene/tessellate.rs:627` |
 
 ---
@@ -175,7 +175,7 @@ Then transform each OCS point: `WCS = x*Ax + y*Ay + z*N`
 |---|---|---|---|
 | ✅ | **TextStyle `is_backward`** flag applied | Negative width_factor | `src/entities/text.rs:61` |
 | ✅ | **TextStyle `is_upside_down`** flag applied | Rotation offset | `src/entities/text.rs:64` |
-| ⚠️ | **Unicode characters** not in CXF fonts | Glyph lookup implemented; missing characters silently dropped without warning | `src/scene/cxf.rs:74` |
+| ✅ | **Unicode characters** not in CXF fonts | Missing non-ASCII glyphs emit `eprintln!` warning (deduped per font+char) — `src/scene/cxf.rs` |
 
 ---
 
@@ -207,13 +207,13 @@ These are fixed in our post-load `fix_dxf_dimension_rotations()` in `src/io/mod.
 
 | Status | Count |
 |---|---|
-| ✅ Done | 46 |
-| ⚠️ Partial | 3 |
+| ✅ Done | 48 |
+| ⚠️ Partial | 2 |
 | ❌ Not done | 0 |
-| **Total** | **49** |
+| **Total** | **50** |
 
 ### Remaining gaps by priority
 
 **Medium:** Viewport GPU scissor rect (pixel-level boundary clipping for overlapping viewports)
 
-**Low:** LWPolyline plinegen (GPU shader change needed)
+**Low:** LWPolyline plinegen — GPU shader change needed; current behavior is continuous arc-length across vertices (equivalent to plinegen=true). Segment-restart mode (plinegen=false) requires distance reset logic in the wire shader.

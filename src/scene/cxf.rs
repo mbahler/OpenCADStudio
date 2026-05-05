@@ -21,9 +21,9 @@
 //!   Cap height = 9 glyph units.
 //!   Scale factor = text_height / 9.0.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::f32::consts::TAU;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 // ── Embedded assets ───────────────────────────────────────────────────────
 
@@ -81,6 +81,18 @@ impl CxfFile {
 
 static SHAPES: OnceLock<CxfFile> = OnceLock::new();
 static FONTS: OnceLock<HashMap<String, CxfFile>> = OnceLock::new();
+/// Dedup set so each (font, char) pair warns at most once per process run.
+static WARNED_GLYPHS: OnceLock<Mutex<HashSet<(String, char)>>> = OnceLock::new();
+
+fn warn_missing_glyph(font_name: &str, ch: char) {
+    if ch.is_ascii() { return; }
+    let set = WARNED_GLYPHS.get_or_init(|| Mutex::new(HashSet::new()));
+    if let Ok(mut guard) = set.lock() {
+        if guard.insert((font_name.to_string(), ch)) {
+            eprintln!("cxf: glyph U+{:04X} ('{}') not found in font '{font_name}'", ch as u32, ch);
+        }
+    }
+}
 
 fn shapes_file() -> &'static CxfFile {
     SHAPES.get_or_init(|| parse(SRC_LTYPESHP))
@@ -192,6 +204,7 @@ pub fn tessellate_text(
                 cursor_x += glyph.advance + font.letter_spacing;
             }
             None => {
+                warn_missing_glyph(font_name, ch);
                 cursor_x += 6.0 + font.letter_spacing;
             }
         }
@@ -367,6 +380,7 @@ pub fn tessellate_text_ex(
                 cursor_x += (glyph.advance + font.letter_spacing) * wf;
             }
             None => {
+                warn_missing_glyph(font_name, render_ch);
                 cursor_x += (6.0 + font.letter_spacing) * wf;
             }
         }
