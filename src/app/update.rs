@@ -93,6 +93,8 @@ impl H7CAD {
                 self.tabs[i].scene.hatches = caches.hatches;
                 self.tabs[i].scene.images = caches.images;
                 self.tabs[i].scene.meshes = caches.meshes;
+                // Invalidate the wire cache so the new document is tessellated.
+                self.tabs[i].scene.bump_geometry();
                 self.tabs[i].scene.selected = std::collections::HashSet::new();
                 self.tabs[i].scene.preview_wires = vec![];
                 self.tabs[i].scene.current_layout = "Model".to_string();
