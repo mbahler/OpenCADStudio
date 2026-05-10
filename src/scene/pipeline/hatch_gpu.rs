@@ -2,10 +2,12 @@
 //
 // Group 1 bindings per hatch:
 //   binding 0 — HatchUniformData  (64 bytes)   mode, color, angle_offset, scale, gradient params
-//   binding 1 — BoundaryData      (1024 bytes)  up to 64 boundary polygon vertices
+//   binding 1 — BoundaryData      (16384 bytes) boundary polygon vertices
 //   binding 2 — FamilyBatchData   (1296 bytes)  up to 16 line families + 128 dash values
 
-use crate::scene::hatch_model::{HatchModel, HatchPattern, PatFamily};
+use crate::scene::hatch_model::{
+    HatchModel, HatchPattern, PatFamily, MAX_HATCH_BOUNDARY_VERTS,
+};
 use iced::wgpu;
 use iced::wgpu::util::DeviceExt;
 
@@ -64,7 +66,7 @@ pub struct HatchUniformData {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct BoundaryData {
-    pub verts: [[f32; 4]; 64], // world XY in .xy, .zw unused
+    pub verts: [[f32; 4]; MAX_HATCH_BOUNDARY_VERTS], // world XY in .xy, .zw unused
 }
 
 /// One line family packed for the shader (48 bytes).
@@ -120,26 +122,21 @@ impl HatchGpu {
         };
 
         // ── Bounding box ─────────────────────────────────────────────────
-        let min_x = model
-            .boundary
-            .iter()
-            .map(|v| v[0])
-            .fold(f32::INFINITY, f32::min);
-        let max_x = model
-            .boundary
-            .iter()
-            .map(|v| v[0])
-            .fold(f32::NEG_INFINITY, f32::max);
-        let min_y = model
-            .boundary
-            .iter()
-            .map(|v| v[1])
-            .fold(f32::INFINITY, f32::min);
-        let max_y = model
-            .boundary
-            .iter()
-            .map(|v| v[1])
-            .fold(f32::NEG_INFINITY, f32::max);
+        let (mut min_x, mut max_x, mut min_y, mut max_y) = (
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        );
+        for &[x, y] in model.boundary.iter() {
+            if !x.is_finite() || !y.is_finite() {
+                continue;
+            }
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
 
         let max_spacing = match &model.pattern {
             HatchPattern::Pattern(families) => families
@@ -189,17 +186,22 @@ impl HatchGpu {
             let projs: Vec<f32> = model
                 .boundary
                 .iter()
+                .filter(|v| v[0].is_finite() && v[1].is_finite())
                 .map(|&[x, y]| x * grad_cos + y * grad_sin)
                 .collect();
-            let proj_min = projs.iter().cloned().fold(f32::INFINITY, f32::min);
-            let proj_max = projs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            (proj_min, (proj_max - proj_min).max(1e-4))
+            if projs.is_empty() {
+                (0.0, 1.0)
+            } else {
+                let proj_min = projs.iter().cloned().fold(f32::INFINITY, f32::min);
+                let proj_max = projs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                (proj_min, (proj_max - proj_min).max(1e-4))
+            }
         } else {
             (0.0, 1.0)
         };
 
         // ── HatchUniformData ─────────────────────────────────────────────
-        let n = model.boundary.len().min(64);
+        let n = model.boundary.len().min(MAX_HATCH_BOUNDARY_VERTS);
         let uniform_data = HatchUniformData {
             color: model.color,
             color2,
@@ -215,9 +217,14 @@ impl HatchGpu {
 
         // ── BoundaryData ─────────────────────────────────────────────────
         let mut boundary_data = BoundaryData {
-            verts: [[0.0; 4]; 64],
+            verts: [[0.0; 4]; MAX_HATCH_BOUNDARY_VERTS],
         };
-        for (i, &[x, y]) in model.boundary.iter().take(64).enumerate() {
+        for (i, &[x, y]) in model
+            .boundary
+            .iter()
+            .take(MAX_HATCH_BOUNDARY_VERTS)
+            .enumerate()
+        {
             boundary_data.verts[i] = [x, y, 0.0, 0.0];
         }
 

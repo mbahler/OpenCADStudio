@@ -1,9 +1,11 @@
 // HatchModel — CPU-side hatch fill data; rendered entirely on the GPU.
 use std::sync::Arc;
 //
-// The boundary is a closed polygon in world XY coordinates (max 64 vertices).
+// The boundary is a closed polygon in world XY coordinates.
 // The GPU fragment shader performs point-in-polygon and hatch-line tests so
 // no line geometry is ever tessellated on the CPU.
+
+pub const MAX_HATCH_BOUNDARY_VERTS: usize = 1024;
 
 /// One line family from a PAT-format hatch pattern.
 ///
@@ -41,7 +43,7 @@ pub enum HatchPattern {
 /// A hatched region defined by a closed polygon boundary.
 #[derive(Clone, Debug)]
 pub struct HatchModel {
-    /// World XY coordinates of the boundary polygon vertices (max 64).
+    /// World XY coordinates of the boundary polygon vertices.
     /// Arc so HatchModel::clone() is a pointer bump rather than a full Vec copy.
     pub boundary: Arc<Vec<[f32; 2]>>,
     /// Fill pattern.

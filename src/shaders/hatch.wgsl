@@ -42,7 +42,7 @@ struct HatchUniforms {
 @group(1) @binding(0) var<uniform> h: HatchUniforms;
 
 struct Boundary {
-    verts: array<vec4<f32>, 64>,
+    verts: array<vec4<f32>, 1024>,
 }
 @group(1) @binding(1) var<uniform> b: Boundary;
 
@@ -87,18 +87,34 @@ struct VOut {
 
 // ── Point-in-polygon (ray casting) ────────────────────────────────────────
 
+fn valid_vertex(p: vec2<f32>) -> bool {
+    return p.x == p.x && p.y == p.y;
+}
+
+fn edge_crosses(p: vec2<f32>, a: vec2<f32>, c: vec2<f32>) -> bool {
+    if (a.y > p.y) != (c.y > p.y) {
+        let x_int = (c.x - a.x) * (p.y - a.y) / (c.y - a.y) + a.x;
+        return p.x < x_int;
+    }
+    return false;
+}
+
 fn in_polygon(p: vec2<f32>) -> bool {
     var inside = false;
     let n = h.vcount;
-    var j = n - 1u;
+    var prev = vec2<f32>(0.0, 0.0);
+    var have_prev = false;
     for (var i = 0u; i < n; i++) {
         let vi = b.verts[i].xy;
-        let vj = b.verts[j].xy;
-        if (vi.y > p.y) != (vj.y > p.y) {
-            let x_int = (vj.x - vi.x) * (p.y - vi.y) / (vj.y - vi.y) + vi.x;
-            if p.x < x_int { inside = !inside; }
+        if !valid_vertex(vi) {
+            have_prev = false;
+            continue;
         }
-        j = i;
+        if have_prev && edge_crosses(p, prev, vi) {
+            inside = !inside;
+        }
+        prev = vi;
+        have_prev = true;
     }
     return inside;
 }

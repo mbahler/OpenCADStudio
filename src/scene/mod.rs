@@ -1916,19 +1916,35 @@ impl Scene {
 
     fn hatch_model_from_dxf(dxf: &DxfHatch, color: [f32; 4], world_offset: [f64; 3]) -> Option<HatchModel> {
         let [ox, oy, _oz] = world_offset;
-        let path = dxf
-            .paths
-            .iter()
-            .find(|p| p.flags.is_external())
-            .or_else(|| dxf.paths.first())?;
+        let normal = (dxf.normal.x, dxf.normal.y, dxf.normal.z);
+        let to_xy = |x: f64, y: f64| -> [f32; 2] {
+            let (wx, wy, _) = crate::scene::transform::ocs_point_to_wcs(
+                (x, y, dxf.elevation),
+                normal,
+            );
+            [(wx - ox) as f32, (wy - oy) as f32]
+        };
+        if dxf.paths.is_empty() {
+            return None;
+        }
 
         let mut boundary: Vec<[f32; 2]> = Vec::new();
 
-        for edge in &path.edges {
-            match edge {
+        for path in &dxf.paths {
+            let before_path = boundary.len();
+            if !boundary.is_empty() {
+                boundary.push([f32::NAN, f32::NAN]);
+            }
+            let path_start = boundary.len();
+
+            for edge in &path.edges {
+                match edge {
                 BoundaryEdge::Polyline(poly) => {
                     let verts = &poly.vertices;
                     let count = verts.len();
+                    if count == 0 {
+                        continue;
+                    }
                     let seg_count = if poly.is_closed {
                         count
                     } else {
@@ -1939,73 +1955,86 @@ impl Scene {
                         let v1 = &verts[(i + 1) % count];
                         let bulge = v0.z;
                         if bulge.abs() < 1e-9 {
-                            boundary.push([(v0.x - ox) as f32, (v0.y - oy) as f32]);
+                            boundary.push(to_xy(v0.x, v0.y));
                         } else {
-                            let p0 = [(v0.x - ox) as f32, (v0.y - oy) as f32];
-                            let p1 = [(v1.x - ox) as f32, (v1.y - oy) as f32];
-                            let angle = 4.0 * (bulge as f32).atan();
+                            let p0 = [v0.x as f32, v0.y as f32];
+                            let p1 = [v1.x as f32, v1.y as f32];
+                            let theta = 4.0 * (bulge as f32).atan();
                             let dx = p1[0] - p0[0];
                             let dy = p1[1] - p0[1];
                             let d = (dx * dx + dy * dy).sqrt();
-                            let r = (d / 2.0) / (angle / 2.0).sin().abs();
+                            if d < 1e-9 {
+                                boundary.push(to_xy(v0.x, v0.y));
+                                continue;
+                            }
+                            let r = (d * 0.5) / (theta * 0.5).sin().abs();
                             let mx = (p0[0] + p1[0]) * 0.5;
                             let my = (p0[1] + p1[1]) * 0.5;
-                            let len = d.max(1e-9);
-                            let px = -dy / len;
-                            let py = dx / len;
+                            let px = -dy / d;
+                            let py = dx / d;
                             let sign = if bulge > 0.0 { 1.0_f32 } else { -1.0_f32 };
-                            let h = r - (r * r - d * d / 4.0).max(0.0).sqrt();
-                            let cx = mx - sign * px * (r - h);
-                            let cy = my - sign * py * (r - h);
+                            let center_offset = r * (theta * 0.5).cos();
+                            let cx = mx + sign * px * center_offset;
+                            let cy = my + sign * py * center_offset;
                             let a0 = (p0[1] - cy).atan2(p0[0] - cx);
                             let a1 = (p1[1] - cy).atan2(p1[0] - cx);
-                            let (sa, mut ea) = if bulge > 0.0 { (a0, a1) } else { (a1, a0) };
-                            if ea < sa {
-                                ea += std::f32::consts::TAU;
+                            let mut sweep = a1 - a0;
+                            if bulge > 0.0 {
+                                if sweep <= 0.0 {
+                                    sweep += std::f32::consts::TAU;
+                                }
+                            } else if sweep >= 0.0 {
+                                sweep -= std::f32::consts::TAU;
                             }
-                            let span = ea - sa;
-                            let segs = ((span.abs() / std::f32::consts::TAU) * 16.0)
+                            if sweep.abs() < 1e-7 {
+                                sweep = if bulge > 0.0 {
+                                    std::f32::consts::TAU
+                                } else {
+                                    -std::f32::consts::TAU
+                                };
+                            }
+                            let segs = ((sweep.abs() / std::f32::consts::TAU) * 16.0)
                                 .ceil()
                                 .max(4.0) as u32;
                             for j in 0..segs {
-                                let t = sa + span * (j as f32 / segs as f32);
-                                boundary.push([cx + r * t.cos(), cy + r * t.sin()]);
+                                let a = a0 + sweep * (j as f32 / segs as f32);
+                                boundary.push(to_xy(
+                                    (cx + r * a.cos()) as f64,
+                                    (cy + r * a.sin()) as f64,
+                                ));
                             }
                         }
                     }
                     if poly.is_closed {
-                        if let Some(&first) = boundary.first() {
+                        if let Some(&first) = boundary.get(path_start) {
                             boundary.push(first);
                         }
                     }
                 }
                 BoundaryEdge::Line(line) => {
-                    boundary.push([(line.start.x - ox) as f32, (line.start.y - oy) as f32]);
-                    boundary.push([(line.end.x - ox) as f32, (line.end.y - oy) as f32]);
+                    boundary.push(to_xy(line.start.x, line.start.y));
+                    boundary.push(to_xy(line.end.x, line.end.y));
                 }
                 BoundaryEdge::CircularArc(arc) => {
-                    let cx = (arc.center.x - ox) as f32;
-                    let cy = (arc.center.y - oy) as f32;
-                    let r = arc.radius as f32;
-                    let (sa, ea) = if arc.counter_clockwise {
-                        (arc.start_angle as f32, arc.end_angle as f32)
-                    } else {
-                        (arc.end_angle as f32, arc.start_angle as f32)
-                    };
-                    let mut end = ea;
-                    if end < sa {
-                        end += std::f32::consts::TAU;
-                    }
+                    let cx = arc.center.x;
+                    let cy = arc.center.y;
+                    let r = arc.radius;
+                    let sa = arc.start_angle;
+                    let ea = arc.end_angle;
+                    let end = if ea >= sa { ea } else { ea + std::f64::consts::TAU };
                     let span = end - sa;
-                    let segs = ((span / std::f32::consts::TAU) * 32.0).ceil().max(4.0) as u32;
+                    let segs = ((span / std::f64::consts::TAU) * 32.0).ceil().max(4.0) as u32;
                     for i in 0..=segs {
-                        let t = sa + span * (i as f32 / segs as f32);
-                        boundary.push([cx + r * t.cos(), cy + r * t.sin()]);
+                        let t = sa + span * (i as f64 / segs as f64);
+                        boundary.push(to_xy(
+                            cx + r * t.cos(),
+                            cy + r * t.sin(),
+                        ));
                     }
                 }
                 BoundaryEdge::EllipticArc(ell) => {
-                    let cx = (ell.center.x - ox) as f32;
-                    let cy = (ell.center.y - oy) as f32;
+                    let cx = ell.center.x;
+                    let cy = ell.center.y;
                     let maj_x = ell.major_axis_endpoint.x as f32;
                     let maj_y = ell.major_axis_endpoint.y as f32;
                     let r_maj = (maj_x * maj_x + maj_y * maj_y).sqrt();
@@ -2026,10 +2055,10 @@ impl Scene {
                         let t = sa + span * (i as f32 / segs as f32);
                         let lx = r_maj * t.cos();
                         let ly = r_min * t.sin();
-                        boundary.push([
-                            cx + lx * rot.cos() - ly * rot.sin(),
-                            cy + lx * rot.sin() + ly * rot.cos(),
-                        ]);
+                        boundary.push(to_xy(
+                            cx + (lx * rot.cos() - ly * rot.sin()) as f64,
+                            cy + (lx * rot.sin() + ly * rot.cos()) as f64,
+                        ));
                     }
                 }
                 BoundaryEdge::Spline(spline) => {
@@ -2057,13 +2086,26 @@ impl Scene {
                         for i in 0..=segs {
                             let t = t0 + (t1 - t0) * (i as f64 / segs as f64);
                             let p = bspl.subs(t);
-                            boundary.push([(p.x - ox) as f32, (p.y - oy) as f32]);
+                            boundary.push(to_xy(p.x, p.y));
                         }
                     } else {
                         for cp in &spline.control_points {
-                            boundary.push([(cp.x - ox) as f32, (cp.y - oy) as f32]);
+                            boundary.push(to_xy(cp.x, cp.y));
                         }
                     }
+                }
+            }
+            }
+
+            if boundary.len() == path_start {
+                boundary.truncate(before_path);
+                continue;
+            }
+            if boundary.len() >= path_start + 3 {
+                let first = boundary[path_start];
+                let last = *boundary.last().unwrap();
+                if (first[0] - last[0]).abs() > 1e-5 || (first[1] - last[1]).abs() > 1e-5 {
+                    boundary.push(first);
                 }
             }
         }
@@ -2071,7 +2113,7 @@ impl Scene {
         if boundary.is_empty() {
             return None;
         }
-        boundary.truncate(64);
+        boundary.truncate(hatch_model::MAX_HATCH_BOUNDARY_VERTS);
 
         let pattern = if dxf.gradient_color.is_enabled() {
             let color2 = dxf
@@ -2113,8 +2155,8 @@ impl Scene {
             pattern,
             name,
             color,
-            angle_offset: 0.0,
-            scale: 1.0,
+            angle_offset: dxf.pattern_angle as f32,
+            scale: dxf.pattern_scale as f32,
         })
     }
 
@@ -3683,4 +3725,3 @@ fn polyline_segment_fill(
         Some(boundary)
     }
 }
-
