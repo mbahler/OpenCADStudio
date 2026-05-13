@@ -120,25 +120,36 @@ pub fn build_derived_caches(doc: &CadDocument) -> DerivedCaches {
 
     use rayon::prelude::*;
 
+    // Single pass over entities — collect only handles per kind. No clones.
+    // Heavy tessellation runs in parallel below, reading entities via
+    // `doc.get_entity(h)` (O(1) HashMap lookup).
+    let mut hatch_handles: Vec<Handle> = Vec::new();
+    let mut image_handles: Vec<Handle> = Vec::new();
+    let mut mesh_handles: Vec<Handle> = Vec::new();
+    for e in doc.entities() {
+        let h = e.common().handle;
+        match e {
+            EntityType::Hatch(_) | EntityType::Solid(_) => hatch_handles.push(h),
+            EntityType::RasterImage(_) => image_handles.push(h),
+            EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) => {
+                mesh_handles.push(h)
+            }
+            _ => {}
+        }
+    }
+
     // hatches
-    let hatch_entries: Vec<(Handle, EntityType)> = doc
-        .entities()
-        .filter_map(|e| match e {
-            EntityType::Hatch(h2) => Some((h2.common.handle, e.clone())),
-            EntityType::Solid(s) => Some((s.common.handle, e.clone())),
-            _ => None,
-        })
-        .collect();
-    let hatches: HashMap<Handle, HatchModel> = hatch_entries
-        .into_par_iter()
-        .filter_map(|(handle, kind)| {
-            let owner = kind.common().owner_handle;
+    let hatches: HashMap<Handle, HatchModel> = hatch_handles
+        .par_iter()
+        .filter_map(|&handle| {
+            let e = doc.get_entity(handle)?;
+            let owner = e.common().owner_handle;
             let offset = if owner == model_block {
                 world_offset
             } else {
                 [0.0; 3]
             };
-            let model = match &kind {
+            let model = match e {
                 EntityType::Hatch(dxf) => {
                     let color = tessellate::aci_to_rgba(&dxf.common.color);
                     Scene::hatch_model_from_dxf(dxf, color, offset)
@@ -154,11 +165,11 @@ pub fn build_derived_caches(doc: &CadDocument) -> DerivedCaches {
         .collect();
 
     // images
-    let images: HashMap<Handle, ImageModel> = doc
-        .entities()
-        .filter_map(|e| {
-            if let EntityType::RasterImage(img) = e {
-                ImageModel::from_raster_image(img).map(|m| (img.common.handle, m))
+    let images: HashMap<Handle, ImageModel> = image_handles
+        .par_iter()
+        .filter_map(|&handle| {
+            if let EntityType::RasterImage(img) = doc.get_entity(handle)? {
+                ImageModel::from_raster_image(img).map(|m| (handle, m))
             } else {
                 None
             }
@@ -166,20 +177,12 @@ pub fn build_derived_caches(doc: &CadDocument) -> DerivedCaches {
         .collect();
 
     // meshes (parallel tessellation)
-    let mesh_entries: Vec<(Handle, EntityType)> = doc
-        .entities()
-        .filter_map(|e| match e {
-            EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) => {
-                Some((e.common().handle, e.clone()))
-            }
-            _ => None,
-        })
-        .collect();
-    let meshes: HashMap<Handle, MeshModel> = mesh_entries
-        .into_par_iter()
-        .filter_map(|(handle, entity)| {
-            let color = tessellate::aci_to_rgba(&entity.common().color);
-            let model = match &entity {
+    let meshes: HashMap<Handle, MeshModel> = mesh_handles
+        .par_iter()
+        .filter_map(|&handle| {
+            let e = doc.get_entity(handle)?;
+            let color = tessellate::aci_to_rgba(&e.common().color);
+            let model = match e {
                 EntityType::Solid3D(s) => solid3d_tess::tessellate_solid3d(s, color),
                 EntityType::Region(r) => solid3d_tess::tessellate_region(r, color),
                 EntityType::Body(b) => solid3d_tess::tessellate_body(b, color),
@@ -3814,6 +3817,41 @@ fn tessellate_entity(
     }
 
     if let EntityType::Insert(ins) = e {
+        // Bail out for huge blocks (typically xref imports): exploding +
+        // tessellating tens of thousands of sub-entities freezes the UI, and
+        // any single bad sub can hang tessellation forever. Draw only an
+        // insertion marker so the user sees the block exists.
+        const INSERT_SUB_LIMIT: usize = 5_000;
+        let sub_count = document
+            .block_records
+            .get(&ins.block_name)
+            .map(|br| br.entity_handles.len())
+            .unwrap_or(0);
+        if sub_count > INSERT_SUB_LIMIT {
+            let [ox, oy, oz] = world_offset;
+            let ip = glam::Vec3::new(
+                (ins.insert_point.x - ox) as f32,
+                (ins.insert_point.y - oy) as f32,
+                (ins.insert_point.z - oz) as f32,
+            );
+            return vec![WireModel {
+                name: h.value().to_string(),
+                points: vec![],
+                color: entity_color,
+                selected: sel,
+                aci,
+                pattern_length: 0.0,
+                pattern: [0.0; 8],
+                line_weight_px: 1.0,
+                snap_pts: vec![(ip, wire_model::SnapHint::Insertion)],
+                tangent_geoms: vec![],
+                key_vertices: vec![],
+                aabb: WireModel::UNBOUNDED_AABB,
+                plinegen: true,
+                vp_scissor: None,
+                fill_tris: vec![],
+            }];
+        }
         // Resolve the INSERT's own style so ByBlock sub-entities can inherit it.
         let (ins_color, ins_pat_len, ins_pat, ins_lw_px, _) = render::render_style_for(document, e);
         let ins_color = render::adapt_to_bg(ins_color, bg_color);
