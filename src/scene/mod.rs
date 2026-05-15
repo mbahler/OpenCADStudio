@@ -251,10 +251,14 @@ fn compute_world_offset(
         std::collections::HashSet::new()
     };
 
-    // ── Pass 1: scan MSPACE entity bounding boxes ────────────────────────
-    let mut emin = [f64::INFINITY; 3];
-    let mut emax = [f64::NEG_INFINITY; 3];
-    let mut have = [false; 3];
+    // ── Pass 1: collect per-entity centroids ─────────────────────────────
+    // Min/max midpoint is wrecked by a single bogus entity at WCS distance
+    // (e.g. a Ray with bad direction, an orphan reference at WCS x=-510k
+    // when the real drawing sits at WCS x=+510k — the midpoint lands
+    // halfway between, far from both clusters). Per-entity centroids let
+    // us take the median, which is immune to single outliers regardless
+    // of how far they sit.
+    let mut centers: Vec<[f64; 3]> = Vec::new();
     for e in doc.entities() {
         let c = e.common();
         let h = c.handle;
@@ -305,25 +309,46 @@ fn compute_world_offset(
         {
             continue;
         }
-        let lo = [bmin.x, bmin.y, bmin.z];
-        let hi = [bmax.x, bmax.y, bmax.z];
-        for i in 0..3 {
-            if !lo[i].is_finite() || !hi[i].is_finite() {
-                continue;
-            }
-            if lo[i].abs() > SANE_EXTENT || hi[i].abs() > SANE_EXTENT {
-                continue;
-            }
-            if lo[i] < emin[i] {
-                emin[i] = lo[i];
-            }
-            if hi[i] > emax[i] {
-                emax[i] = hi[i];
-            }
-            have[i] = true;
+        let cx = (bmin.x + bmax.x) * 0.5;
+        let cy = (bmin.y + bmax.y) * 0.5;
+        let cz = (bmin.z + bmax.z) * 0.5;
+        if !cx.is_finite() || !cy.is_finite() || !cz.is_finite() {
+            continue;
         }
+        if cx.abs() > SANE_EXTENT || cy.abs() > SANE_EXTENT {
+            continue;
+        }
+        centers.push([cx, cy, cz]);
     }
-    let entity_ok = have[0] && have[1];
+    let entity_ok = !centers.is_empty();
+
+    // Median of per-entity centroids → robust drawing center.
+    // For local_extent_max: 95th-percentile distance from the median × 2
+    // gives the half-span of the dense cluster while leaving room for
+    // legitimate outliers (sparse leaders, dimensions, scattered annotations).
+    let median = |v: &mut Vec<f64>| -> f64 {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        v[v.len() / 2]
+    };
+    let percentile = |v: &mut Vec<f64>, frac: f64| -> f64 {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let i = ((v.len() as f64 - 1.0) * frac).round() as usize;
+        v[i]
+    };
+    let (ecx, ecy, ecz, espan_max) = if entity_ok {
+        let mut xs: Vec<f64> = centers.iter().map(|c| c[0]).collect();
+        let mut ys: Vec<f64> = centers.iter().map(|c| c[1]).collect();
+        let mut zs: Vec<f64> = centers.iter().map(|c| c[2]).collect();
+        let mx = median(&mut xs);
+        let my = median(&mut ys);
+        let mz = median(&mut zs);
+        let mut dx: Vec<f64> = centers.iter().map(|c| (c[0] - mx).abs()).collect();
+        let mut dy: Vec<f64> = centers.iter().map(|c| (c[1] - my).abs()).collect();
+        let p95 = percentile(&mut dx, 0.95).max(percentile(&mut dy, 0.95));
+        (mx, my, mz, (p95 * 2.0).max(1.0) as f32)
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    };
 
     // ── Pass 2: read header extents ──────────────────────────────────────
     let h = &doc.header;
@@ -336,7 +361,13 @@ fn compute_world_offset(
         && hmin.y.abs() < SANE_EXTENT
         && hmax.y.abs() < SANE_EXTENT;
 
-    let from_header = || -> ([f64; 3], f32) {
+    // Entity-derived offset is preferred whenever it's available — the
+    // median-of-centroids ignores Ray/orphan/duplicate-block-defn outliers
+    // that the header EXTMIN/EXTMAX (a min/max midpoint) bakes in. Header
+    // is the fallback only when the entity scan found nothing.
+    if entity_ok {
+        ([ecx, ecy, ecz], espan_max)
+    } else if header_ok {
         let offset = [
             (hmin.x + hmax.x) * 0.5,
             (hmin.y + hmax.y) * 0.5,
@@ -346,45 +377,8 @@ fn compute_world_offset(
         let hh = ((hmax.y - hmin.y) * 0.5) as f32;
         let hz = ((hmax.z - hmin.z) * 0.5).max(1.0) as f32;
         (offset, hw.max(hh).max(hz) * 10.0)
-    };
-    let from_entity = || -> ([f64; 3], f32) {
-        let z_have = have[2];
-        let offset = [
-            (emin[0] + emax[0]) * 0.5,
-            (emin[1] + emax[1]) * 0.5,
-            if z_have { (emin[2] + emax[2]) * 0.5 } else { 0.0 },
-        ];
-        let hw = ((emax[0] - emin[0]) * 0.5) as f32;
-        let hh = ((emax[1] - emin[1]) * 0.5) as f32;
-        let hz = if z_have {
-            ((emax[2] - emin[2]) * 0.5).max(1.0) as f32
-        } else {
-            1.0
-        };
-        (offset, hw.max(hh).max(hz) * 10.0)
-    };
-
-    match (header_ok, entity_ok) {
-        (false, false) => ([0.0; 3], 1e9_f32),
-        (false, true) => from_entity(),
-        (true, false) => from_header(),
-        (true, true) => {
-            // Stale-header detection: how many header half-spans is the
-            // header center away from the entity centroid? > 10 → trust
-            // entities, header is lying.
-            let hcx = (hmin.x + hmax.x) * 0.5;
-            let hcy = (hmin.y + hmax.y) * 0.5;
-            let ecx = (emin[0] + emax[0]) * 0.5;
-            let ecy = (emin[1] + emax[1]) * 0.5;
-            let hhw = ((hmax.x - hmin.x).abs() * 0.5).max(1.0);
-            let hhh = ((hmax.y - hmin.y).abs() * 0.5).max(1.0);
-            let drift = ((hcx - ecx).abs() / hhw).max((hcy - ecy).abs() / hhh);
-            if drift > 10.0 {
-                from_entity()
-            } else {
-                from_header()
-            }
-        }
+    } else {
+        ([0.0; 3], 1e9_f32)
     }
 }
 
