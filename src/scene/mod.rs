@@ -4344,18 +4344,13 @@ fn tessellate_entity(
             }
         }
 
-        // Cache miss / unavailable: fall back to the original explode path,
-        // but keep the safety bail-out for pathologically large blocks so
-        // the UI doesn't hang on broken or unbounded sub-entity counts.
-        const INSERT_SUB_LIMIT: usize = 5_000;
+        // Cache miss / unavailable: fall back to the original explode path.
+        // The block_cache primary path covers all typical Inserts; this
+        // branch only fires for pathological cache failures.
         let br = document.block_records.get(&ins.block_name);
-        let sub_count = br.map(|br| br.entity_handles.len()).unwrap_or(0);
         let is_xref = br
             .map(|br| br.flags.is_xref || br.flags.is_xref_overlay)
             .unwrap_or(false);
-        if sub_count > INSERT_SUB_LIMIT {
-            return vec![marker];
-        }
         let mut wires: Vec<WireModel> = ins
             .explode_from_document(document)
             .iter()
