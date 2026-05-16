@@ -30,28 +30,21 @@ use crate::scene::wire_model::{SnapHint, TangentGeom, WireModel};
 
 // ── Arc tessellation helpers ─────────────────────────────────────────────
 
-/// Convert arc `(start, end, ccw)` into a `(start, signed_span)` that
-/// (a) sweeps in the correct direction and (b) wraps through 2π when the
-/// short path crosses the seam. The legacy `(TAU - sa, TAU - ea)` flip
-/// was direction-correct for non-wrap arcs but silently rendered the
-/// long-way-around when the short path crossed 0 / 2π.
+/// Convert hatch-boundary arc `(start, end, ccw)` into a
+/// `(start, signed_span)` ready for the sampling loop. Matches the
+/// legacy `(TAU - sa, TAU - ea)` flip used here for years — direction
+/// semantics are preserved on real files. (Wrap-through-2π is a known
+/// edge case in that convention; do not "fix" it without a wider audit
+/// of how upstream writers emit CW boundary arcs.)
 pub(super) fn arc_signed_span(start: f64, end: f64, ccw: bool) -> (f64, f64) {
     const TAU: f64 = std::f64::consts::TAU;
-    let mut span = end - start;
-    if ccw {
-        if span <= 0.0 {
-            span += TAU;
-        }
-    } else if span >= 0.0 {
-        span -= TAU;
-    }
-    (start, span)
+    let (sa, ea) = if ccw { (start, end) } else { (TAU - start, TAU - end) };
+    (sa, ea - sa)
 }
 
-/// Segment count for an arc targeting ~0.1% chord-height error vs.
-/// radius. Floors at 8 so very small arcs don't degenerate into
-/// triangles; rough cap of 256 prevents pathological huge-radius +
-/// near-full-circle inputs from exploding the boundary vertex count.
+/// Segment count for an arc targeting ~0.1% chord-height error.
+/// Floors at 8 so very small arcs don't degenerate into triangles; cap
+/// of 256 keeps pathological full-circle inputs bounded.
 pub(super) fn arc_segments(span_abs: f64) -> u32 {
     if span_abs < 1e-9 {
         return 1;
