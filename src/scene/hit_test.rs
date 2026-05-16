@@ -222,16 +222,51 @@ fn world_to_screen(world: Vec3, view_proj: Mat4, bounds: Rectangle) -> Point {
 }
 
 /// Even-odd ray-casting test: is `p` inside the polygon?
+///
+/// Handles multi-path boundaries: NaN points (used as path separators by
+/// hatches with islands / holes) reset the previous-vertex tracking so
+/// that the ray-cast doesn't draw a spurious closing edge between the
+/// end of one sub-path and the start of the next. Each sub-path with at
+/// least 2 finite vertices contributes its segments to the parity flip.
 fn point_in_polygon(p: Point, poly: &[Point]) -> bool {
-    let n = poly.len();
     let mut inside = false;
-    let (mut xi, mut yi) = (poly[n - 1].x, poly[n - 1].y);
+    let mut prev: Option<Point> = None;
+    let mut path_start: Option<Point> = None;
     for &pt in poly {
-        let (xj, yj) = (pt.x, pt.y);
-        if ((yi > p.y) != (yj > p.y)) && (p.x < (xj - xi) * (p.y - yi) / (yj - yi) + xi) {
+        if !pt.x.is_finite() || !pt.y.is_finite() {
+            // Close the just-finished sub-path before starting the next.
+            if let (Some(prev_v), Some(start_v)) = (prev, path_start) {
+                if ((prev_v.y > p.y) != (start_v.y > p.y))
+                    && (p.x
+                        < (start_v.x - prev_v.x) * (p.y - prev_v.y) / (start_v.y - prev_v.y)
+                            + prev_v.x)
+                {
+                    inside = !inside;
+                }
+            }
+            prev = None;
+            path_start = None;
+            continue;
+        }
+        if let Some(prev_v) = prev {
+            if ((prev_v.y > p.y) != (pt.y > p.y))
+                && (p.x < (pt.x - prev_v.x) * (p.y - prev_v.y) / (pt.y - prev_v.y) + prev_v.x)
+            {
+                inside = !inside;
+            }
+        } else {
+            path_start = Some(pt);
+        }
+        prev = Some(pt);
+    }
+    // Close the final sub-path.
+    if let (Some(prev_v), Some(start_v)) = (prev, path_start) {
+        if ((prev_v.y > p.y) != (start_v.y > p.y))
+            && (p.x
+                < (start_v.x - prev_v.x) * (p.y - prev_v.y) / (start_v.y - prev_v.y) + prev_v.x)
+        {
             inside = !inside;
         }
-        (xi, yi) = (xj, yj);
     }
     inside
 }
@@ -277,21 +312,57 @@ pub fn click_hit_hatch(
     bounds: Rectangle,
 ) -> Option<Handle> {
     for (&handle, hatch) in hatches {
-        // boundary verts are stored as small f32 offsets from
-        // `world_origin` (f64). Reconstruct offset-rel WCS before
-        // projecting to screen.
-        let ox = hatch.world_origin[0] as f32;
-        let oy = hatch.world_origin[1] as f32;
-        let screen: Vec<Point> = hatch
-            .boundary
-            .iter()
-            .map(|&[x, y]| world_to_screen(Vec3::new(x + ox, y + oy, 0.0), view_proj, bounds))
-            .collect();
-        if screen.len() >= 3 && point_in_polygon(cursor, &screen) {
+        if hatch_contains_screen_point(hatch, cursor, view_proj, bounds) {
             return Some(handle);
         }
     }
     None
+}
+
+/// Same as `click_hit_hatch` but iterates `(Handle, HatchModel)` pairs
+/// where the Handle is the parent Insert handle (block-internal
+/// hatches). The first matching pair returns its Insert handle so
+/// clicking a sub-hatch of a block selects the Insert, matching
+/// AutoCAD's behaviour for block sub-entities.
+pub fn click_hit_insert_hatch(
+    cursor: Point,
+    insert_hatches: &[(Handle, HatchModel)],
+    view_proj: Mat4,
+    bounds: Rectangle,
+) -> Option<Handle> {
+    for (handle, hatch) in insert_hatches {
+        if hatch_contains_screen_point(hatch, cursor, view_proj, bounds) {
+            return Some(*handle);
+        }
+    }
+    None
+}
+
+fn hatch_contains_screen_point(
+    hatch: &HatchModel,
+    cursor: Point,
+    view_proj: Mat4,
+    bounds: Rectangle,
+) -> bool {
+    // boundary verts are stored as small f32 offsets from
+    // `world_origin` (f64). Reconstruct offset-rel WCS before
+    // projecting to screen.
+    let ox = hatch.world_origin[0] as f32;
+    let oy = hatch.world_origin[1] as f32;
+    let screen: Vec<Point> = hatch
+        .boundary
+        .iter()
+        .map(|&[x, y]| {
+            if x.is_finite() && y.is_finite() {
+                world_to_screen(Vec3::new(x + ox, y + oy, 0.0), view_proj, bounds)
+            } else {
+                // Preserve path separators for the NaN-aware
+                // point_in_polygon ray-cast.
+                Point::new(f32::NAN, f32::NAN)
+            }
+        })
+        .collect();
+    screen.len() >= 3 && point_in_polygon(cursor, &screen)
 }
 
 /// Return Handles of hatches selected by a completed rectangular selection box.

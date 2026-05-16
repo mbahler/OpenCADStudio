@@ -1998,7 +1998,7 @@ impl H7CAD {
                                     a,
                                     p,
                                     crossing,
-                                    &self.tabs[i].scene.hatches,
+                                    &self.tabs[i].scene.visible_hatches_for_click(),
                                     vp_mat,
                                     bounds,
                                 ));
@@ -2031,7 +2031,7 @@ impl H7CAD {
                             handles.extend(scene::hit_test::poly_hit_hatch(
                                 &poly_pts,
                                 crossing,
-                                &self.tabs[i].scene.hatches,
+                                &self.tabs[i].scene.visible_hatches_for_click(),
                                 vp_mat,
                                 bounds,
                             ));
@@ -2058,7 +2058,17 @@ impl H7CAD {
                                 .or_else(|| {
                                     scene::hit_test::click_hit_hatch(
                                         p,
-                                        &self.tabs[i].scene.hatches,
+                                        &self.tabs[i].scene.visible_hatches_for_click(),
+                                        vp_mat,
+                                        bounds,
+                                    )
+                                })
+                                .or_else(|| {
+                                    // Block-internal hatch: resolve to the
+                                    // parent Insert (AutoCAD behaviour).
+                                    scene::hit_test::click_hit_insert_hatch(
+                                        p,
+                                        &self.tabs[i].scene.insert_hatches_for_click(),
                                         vp_mat,
                                         bounds,
                                     )
@@ -2096,7 +2106,7 @@ impl H7CAD {
                                 a,
                                 p,
                                 crossing,
-                                &self.tabs[i].scene.hatches,
+                                &self.tabs[i].scene.visible_hatches_for_click(),
                                 vp_mat,
                                 bounds,
                             ));

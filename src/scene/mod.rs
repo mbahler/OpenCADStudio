@@ -1103,6 +1103,79 @@ impl Scene {
         arc
     }
 
+    /// Hatches eligible for click / box / lasso hit-testing in the current
+    /// layout. Filters out block-internal source hatches (stored in
+    /// `self.hatches` at block-local coords for the block-defn position,
+    /// which doesn't project correctly through the offset-rel view_proj
+    /// and was causing the wrong hatch to be selected on click).
+    pub fn visible_hatches_for_click(&self) -> HashMap<Handle, HatchModel> {
+        let layout_block = self.current_layout_block_handle();
+        self.hatches
+            .iter()
+            .filter_map(|(&h, m)| {
+                let owner = self.document.get_entity(h)?.common().owner_handle;
+                if self.belongs_to_visible_block(h, owner, layout_block) {
+                    Some((h, m.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Per-Insert hatch models in the current layout, keyed by the Insert
+    /// handle so a click on a block-internal hatch can select the parent
+    /// Insert (AutoCAD behaviour: sub-entities of a block aren't directly
+    /// selectable; the click resolves to the Insert).
+    pub fn insert_hatches_for_click(&self) -> Vec<(Handle, HatchModel)> {
+        let layout_block = self.current_layout_block_handle();
+        let hatch_offset = if self.current_layout == "Model" {
+            self.world_offset
+        } else {
+            [0.0; 3]
+        };
+        let layer_hidden = |layer: &str| {
+            self.document
+                .layers
+                .get(layer)
+                .map(|l| l.flags.off || l.flags.frozen)
+                .unwrap_or(false)
+        };
+        let mut out: Vec<(Handle, HatchModel)> = Vec::new();
+        for entity in self.document.entities() {
+            let EntityType::Insert(ins) = entity else {
+                continue;
+            };
+            if ins.common.invisible || layer_hidden(&ins.common.layer) {
+                continue;
+            }
+            if !self.belongs_to_visible_block(
+                ins.common.handle,
+                ins.common.owner_handle,
+                layout_block,
+            ) {
+                continue;
+            }
+            for sub in ins
+                .explode_from_document(&self.document)
+                .into_iter()
+                .map(crate::modules::home::modify::explode::normalize_insert_entity)
+            {
+                let EntityType::Hatch(dxf) = sub else {
+                    continue;
+                };
+                if dxf.common.invisible || layer_hidden(&dxf.common.layer) {
+                    continue;
+                }
+                let color = self.render_style(&EntityType::Hatch(dxf.clone())).0;
+                if let Some(model) = Self::hatch_model_from_dxf(&dxf, color, hatch_offset) {
+                    out.push((ins.common.handle, model));
+                }
+            }
+        }
+        out
+    }
+
     /// Wires that should participate in hit-testing, snapping, and selection.
     ///
     /// - Model layout: all entity wires (same as entity_wires).
