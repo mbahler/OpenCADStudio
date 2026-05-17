@@ -14,6 +14,7 @@ pub mod object;
 pub mod paper_canvas;
 pub mod pipeline;
 pub mod properties;
+pub mod quadtree;
 mod render;
 mod selection;
 pub mod solid3d_tess;
