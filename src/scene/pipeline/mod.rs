@@ -1327,9 +1327,16 @@ fn aabb_diagonal_pixels(
 }
 
 /// `true` when the world-XY AABB projects entirely outside the
-/// viewport rect. Phase 2.2 mesh-frustum cull. Equivalent to a 2D
-/// bounding-box rejection test in NDC; same 4-corner projection used
-/// for LOD picking, so the extra cost is negligible.
+/// viewport rect (extended by `MARGIN_FRAC` to absorb pan inertia and
+/// avoid edge pop-in). Phase 2.2 mesh-frustum / Phase 2.3 hatch +
+/// wipeout cull. Equivalent to a 2D bounding-box rejection test in
+/// NDC; uses the same 4-corner projection that LOD picking already
+/// does, so the extra cost is negligible.
+///
+/// IMPORTANT: the AABB must be in the same local space (world_offset
+/// subtracted) that `view_proj` expects. `HatchGpu.world_aabb` rebuilds
+/// the absolute local-space rect from `model.world_origin + boundary
+/// extents` for this reason; meshes already store an absolute rect.
 fn aabb_offscreen(
     aabb: [f32; 4],
     view_proj: glam::Mat4,
@@ -1360,8 +1367,13 @@ fn aabb_offscreen(
         if py < min_py { min_py = py; }
         if py > max_py { max_py = py; }
     }
-    // Reject if projected AABB sits fully to one side of the viewport.
-    max_px < 0.0 || min_px > w || max_py < 0.0 || min_py > h
+    // 25% pad on each side — matches `view_world_aabb` (wire path),
+    // keeps edge geometry rendered while panning before the next
+    // upload reaches the GPU.
+    const MARGIN_FRAC: f32 = 0.25;
+    let mx = w * MARGIN_FRAC;
+    let my = h * MARGIN_FRAC;
+    max_px < -mx || min_px > w + mx || max_py < -my || min_py > h + my
 }
 
 /// Return `true` when the world-XY AABB's screen-space size is below the

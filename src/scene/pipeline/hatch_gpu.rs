@@ -349,11 +349,28 @@ impl HatchGpu {
             ],
         });
 
+        // Boundary vertices are stored as f32 offsets from
+        // `model.world_origin` (so f32 keeps precision at UTM-scale
+        // WCS). The pipeline-level frustum cull (Phase 2.3
+        // `aabb_offscreen`) projects through `view_proj`, which expects
+        // local-space (world_offset-subtracted) coordinates — the same
+        // space as `world_origin`. Add the origin back so `world_aabb`
+        // is in that absolute local space rather than relative to the
+        // anchor. (Sub-pixel LOD via `aabb_below_pixel` is unaffected:
+        // it measures a projected diagonal, invariant under translation.)
+        let ox = model.world_origin[0] as f32;
+        let oy = model.world_origin[1] as f32;
+        let world_aabb = if min_x.is_finite() && min_y.is_finite() {
+            [min_x + ox, min_y + oy, max_x + ox, max_y + oy]
+        } else {
+            [min_x, min_y, max_x, max_y]
+        };
+
         Self {
             vertex_buffer,
             bind_group,
             vp_scissor: model.vp_scissor,
-            world_aabb: [min_x, min_y, max_x, max_y],
+            world_aabb,
             _uniform_buf,
             _boundary_buf,
             _family_buf,
