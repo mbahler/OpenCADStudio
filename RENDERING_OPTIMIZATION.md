@@ -1,76 +1,39 @@
-# Rendering Optimization Roadmap: Culling & Level of Detail
+# Rendering Optimization Roadmap
 
-## Background
+Phases 1–4 have all landed. This document is kept as a stub so the
+git history points somewhere; the optimisations themselves are
+documented inline at the call sites:
 
-H7CAD renders all entities every frame regardless of camera position or zoom level. No spatial
-acceleration, no LOD, no frustum culling. Every wire, hatch, mesh, and image is uploaded and
-drawn unconditionally. This scales poorly for large drawings (100k+ entities) and dense 3D solids.
+- **Phase 1** – per-frame LOD ladder, scissor cull (search for
+  `Phase 1.*` in `scene/pipeline/mod.rs`).
+- **Phase 2** – quadtree spatial index for top-level entities, plus
+  draw-time frustum cull for hatches / wipeouts / meshes
+  (`Phase 2.1`, `2.2`, `2.3`).
+- **Phase 3** – LOD substitution for far / sub-pixel content
+  (`Phase 3.2`, `3.3`, `3.4`).
+- **Phase 4-B** – batched hatch pipeline. Every hatch is uploaded
+  into shared storage buffers (`hatch_batched_gpu.rs`) and drawn in
+  one `pass.draw(0..6N, 0..1)`; the per-instance `visibility` buffer
+  doubles as a CPU-driven cull mask (sub-pixel + frustum) that the
+  vertex shader honours by emitting an out-of-NDC clip position for
+  skipped instances. Replaces N bind-group swaps + N draw calls with
+  a single draw.
 
-Current pipeline order:
-1. Hatch fills → 2. Images → 3. Meshes → 4. Face3D fills → 5. Face3D edges →
-6. Wires → 7. Wipeouts → 8. Selection overlay → 9. MSAA resolve → 10. Blit
+## Deliberate non-goals
 
----
-
-## Phase 4 — GPU-Side Culling (Advanced)
-
-**Goal:** Offload culling to the GPU; zero CPU cost for large entity counts.
-
-### 4.1 Indirect Draw + Compute Cull
-
-Convert per-entity draw calls to indirect draw calls (`draw_indirect` / `draw_indexed_indirect`).
-Run a compute shader pre-pass that tests each entity's AABB against the frustum and writes
-`DrawIndirectArgs` only for visible entities.
-
-```wgsl
-// cull.wgsl
-@compute @workgroup_size(64)
-fn cull_entities(@builtin(global_invocation_id) id: vec3<u32>) {
-    let entity = entities[id.x];
-    if frustum_test(entity.aabb) {
-        // atomically append to indirect draw buffer
-        let slot = atomicAdd(&draw_count, 1u);
-        draw_args[slot] = entity.draw_args;
-    }
-}
-```
-
-Requires restructuring entity data into GPU-side storage buffers. High complexity; tackle after
-Phases 1–3 prove insufficient.
-
-### 4.2 Hierarchical Z-Buffer Occlusion Culling (3D Only)
-
-For dense 3D solid scenes, use a Hi-Z buffer to cull occluded meshes:
-
-1. Render depth-only pass for large opaque solids.
-2. Downsample depth into mip chain (Hi-Z pyramid).
-3. Compute shader tests each mesh AABB against Hi-Z; skips occluded meshes.
-
-Relevant only for perspective (3D) mode with many overlapping solids.
-
----
-
-## Implementation Order
-
-```
-Phase 4.1  Indirect draw + GPU cull         high complexity, defer
-Phase 4.2  Hi-Z occlusion                   high complexity, 3D only, last
-```
-
----
-
-## Key Files to Modify
-
-| File | Change |
-|------|--------|
-| `src/scene/mod.rs` | Quadtree/octree; LOD epoch tracking |
-| `src/scene/pipeline/mod.rs` | Cull hatch/image entities before upload loops |
-| `src/shaders/cull.wgsl` | New — Phase 4 compute culling shader |
-
----
-
-## Success Metrics
-
-- **Phase 2 target:** Pan/zoom frame cost O(visible) not O(total).
-- **Phase 4 target:** GPU-cull overhead < 0.5 ms for 1M entity scene.
-
+- **Phase 4.1 (multi-draw indirect / compute cull)** — iced 0.14
+  doesn't expose `Features::MULTI_DRAW_INDIRECT` to widget pipelines.
+  Without it, single-draw indirect adds no real saving over the
+  current batched draw. Revisit if iced surfaces the feature flag,
+  or if H7CAD ever swaps the shader widget for a custom wgpu surface.
+- **Phase 4.2 (Hi-Z occlusion)** — pays off only for perspective 3D
+  with many overlapping opaque meshes. H7CAD is orthographic
+  top-down for every realistic workflow, so the win is theoretical.
+- **Per-mutation incremental quadtree updates** — `entity_index_cache`
+  rebuilds lazily on `geometry_epoch` change. Full rebuild is ~50 ms
+  on a 100 k-entity doc; promote to per-mutation `insert`/`remove`/
+  `update` if profiling shows that as a hot spot during heavy edits.
+- **Per-hatch viewport scissor in the batched path** — paper-space
+  MSPACE viewports can render hatches past the viewport border for
+  now. Add a per-instance scissor rect (computed from `vp_scissor`)
+  if it shows up as a visible artefact.
