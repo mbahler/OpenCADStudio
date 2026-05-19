@@ -2584,17 +2584,47 @@ impl H7CAD {
 
             Message::RibbonLayerChanged(layer) => {
                 let i = self.active_tab;
-                self.tabs[i].active_layer = layer.clone();
-                self.tabs[i].layers.current_layer = layer.clone();
-                self.ribbon.active_layer = layer;
                 self.ribbon.close_dropdown();
+                let handles = self.property_target_handles(i);
+                if handles.is_empty() {
+                    // No selection — change the creation default.
+                    self.tabs[i].active_layer = layer.clone();
+                    self.tabs[i].layers.current_layer = layer.clone();
+                    self.ribbon.active_layer = layer;
+                } else {
+                    // Apply to selection; leave the creation default alone
+                    // (matches AutoCAD; "Make current" is a separate action).
+                    self.push_undo_snapshot(i, "CHPROP");
+                    for handle in handles {
+                        if let Some(entity) = self.tabs[i].scene.document.get_entity_mut(handle) {
+                            crate::scene::dispatch::apply_common_prop(entity, "layer", &layer);
+                        }
+                    }
+                    self.tabs[i].dirty = true;
+                    self.ribbon.active_layer = layer;
+                    self.refresh_properties();
+                }
                 Task::none()
             }
 
             Message::RibbonColorChanged(color) => {
-                self.ribbon.active_color = color;
+                let i = self.active_tab;
                 self.ribbon.prop_color_palette_open = false;
                 self.ribbon.close_dropdown();
+                let handles = self.property_target_handles(i);
+                if handles.is_empty() {
+                    self.ribbon.active_color = color;
+                } else {
+                    self.push_undo_snapshot(i, "CHPROP");
+                    for handle in handles {
+                        if let Some(entity) = self.tabs[i].scene.document.get_entity_mut(handle) {
+                            crate::scene::dispatch::apply_color(entity, color);
+                        }
+                    }
+                    self.tabs[i].dirty = true;
+                    self.ribbon.active_color = color;
+                    self.refresh_properties();
+                }
                 Task::none()
             }
             Message::RibbonColorPaletteToggle => {
@@ -2602,13 +2632,41 @@ impl H7CAD {
                 Task::none()
             }
             Message::RibbonLinetypeChanged(lt) => {
-                self.ribbon.active_linetype = lt;
+                let i = self.active_tab;
                 self.ribbon.close_dropdown();
+                let handles = self.property_target_handles(i);
+                if handles.is_empty() {
+                    self.ribbon.active_linetype = lt;
+                } else {
+                    self.push_undo_snapshot(i, "CHPROP");
+                    for handle in handles {
+                        if let Some(entity) = self.tabs[i].scene.document.get_entity_mut(handle) {
+                            crate::scene::dispatch::apply_common_prop(entity, "linetype", &lt);
+                        }
+                    }
+                    self.tabs[i].dirty = true;
+                    self.ribbon.active_linetype = lt;
+                    self.refresh_properties();
+                }
                 Task::none()
             }
             Message::RibbonLineweightChanged(lw) => {
-                self.ribbon.active_lineweight = lw;
+                let i = self.active_tab;
                 self.ribbon.close_dropdown();
+                let handles = self.property_target_handles(i);
+                if handles.is_empty() {
+                    self.ribbon.active_lineweight = lw;
+                } else {
+                    self.push_undo_snapshot(i, "CHPROP");
+                    for handle in handles {
+                        if let Some(entity) = self.tabs[i].scene.document.get_entity_mut(handle) {
+                            crate::scene::dispatch::apply_line_weight(entity, lw);
+                        }
+                    }
+                    self.tabs[i].dirty = true;
+                    self.ribbon.active_lineweight = lw;
+                    self.refresh_properties();
+                }
                 Task::none()
             }
 
