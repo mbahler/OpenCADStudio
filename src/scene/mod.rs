@@ -5246,12 +5246,19 @@ fn lod_stub_wire(
     let [ax, ay, bx, by] = aabb;
     let cx = (ax + bx) * 0.5;
     let cy = (ay + by) * 0.5;
+    // Mirror what tessellate.rs does for the non-stub paths: bake the
+    // selection-highlight colour into the wire so a re-tessellate triggered
+    // by a zoom-induced LOD change keeps the entity highlighted. Without
+    // this swap the wire's `selected` flag is true but its colour stays at
+    // the entity's own hue, so the user sees the highlight vanish at the
+    // LOD boundary. #19.
+    let stored_color = if selected { WireModel::SELECTED } else { color };
     WireModel {
         name,
         // Diagonal: projects to 1-5 px at the LOD threshold so the entity
         // shows as a tiny mark.
         points: vec![[ax, ay, 0.0], [bx, by, 0.0]],
-        color,
+        color: stored_color,
         selected,
         aci,
         pattern_length: 0.0,
