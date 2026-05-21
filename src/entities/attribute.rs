@@ -218,7 +218,7 @@ fn build_attr_truck(input: AttrTextInputs<'_>, document: &acadrust::CadDocument)
             &resolved.font_name,
             line,
         );
-        strokes_all.push(TextStroke { strokes, origin });
+        strokes_all.push(TextStroke { strokes, origin, color: None });
     }
     let _ = input.line_count; // round-trip only — recomputed above
 

@@ -141,7 +141,7 @@ fn to_truck(t: &Text, document: &acadrust::CadDocument) -> TruckEntity {
         &t.value,
     );
     TruckEntity {
-        object: TruckObject::Text(vec![TextStroke { strokes, origin }]),
+        object: TruckObject::Text(vec![TextStroke { strokes, origin, color: None }]),
         snap_pts: vec![(snap_pt, SnapHint::Insertion)],
         tangent_geoms: vec![],
         key_vertices: vec![],

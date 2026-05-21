@@ -10,9 +10,15 @@ use crate::scene::wire_model::{SnapHint, TangentGeom};
 /// One group of glyph strokes with its world-space origin stored in f64.
 /// Strokes are in glyph-local space (origin = [0,0]) so that the large
 /// world offset can be subtracted with f64 precision in tessellate.rs.
+///
+/// `color`, when set, overrides the entity colour for just this group — used
+/// by MTEXT inline `\C` / `\c` per-run colour. Strokes sharing the same
+/// (color, None) override are merged into one WireModel downstream; runs with
+/// distinct colours emit their own WireModel.
 pub struct TextStroke {
     pub strokes: Vec<Vec<[f32; 2]>>,
     pub origin: [f64; 2],
+    pub color: Option<[f32; 3]>,
 }
 
 #[allow(dead_code)]

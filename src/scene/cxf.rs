@@ -227,6 +227,33 @@ pub fn tessellate_text_ex(
     font_name: &str,
     text: &str,
 ) -> Vec<Vec<[f32; 2]>> {
+    tessellate_text_run(
+        origin,
+        height,
+        rotation,
+        width_factor,
+        oblique_angle,
+        1.0,
+        font_name,
+        text,
+    )
+}
+
+/// Like [`tessellate_text_ex`] but takes a `tracking` multiplier applied to
+/// the per-glyph `letter_spacing` advance. `tracking = 1.0` keeps the legacy
+/// behaviour; MTEXT's `\T<v>;` inline code routes here so per-run character
+/// spacing scales independently of the width factor.
+#[allow(clippy::too_many_arguments)]
+pub fn tessellate_text_run(
+    origin: [f32; 2],
+    height: f32,
+    rotation: f32,
+    width_factor: f32,
+    oblique_angle: f32,
+    tracking: f32,
+    font_name: &str,
+    text: &str,
+) -> Vec<Vec<[f32; 2]>> {
     if text.is_empty() || height <= 0.0 {
         return vec![];
     }
@@ -388,7 +415,7 @@ pub fn tessellate_text_ex(
                         }
                     } else {
                         // Partial digit sequence — advance as unknown glyph and move on
-                        cursor_x += (6.0 + font.letter_spacing) * wf;
+                        cursor_x += (6.0 + font.letter_spacing * tracking) * wf;
                         continue;
                     }
                 }
@@ -417,11 +444,11 @@ pub fn tessellate_text_ex(
                             .collect(),
                     );
                 }
-                cursor_x += (glyph.advance + font.letter_spacing) * wf;
+                cursor_x += (glyph.advance + font.letter_spacing * tracking) * wf;
             }
             None => {
                 warn_missing_glyph(font_name, render_ch);
-                cursor_x += (6.0 + font.letter_spacing) * wf;
+                cursor_x += (6.0 + font.letter_spacing * tracking) * wf;
             }
         }
     }

@@ -401,9 +401,32 @@ fn tessellate_sub_local(
     // Pass `local_offset` as the f64 world-offset so tessellate subtracts it
     // before casting to f32 — same precision-preservation trick used for
     // top-level entities, applied per-defn.
-    let wire = tessellate::tessellate(
+    //
+    // tessellate() may emit multiple WireModels for a single sub-entity (e.g.
+    // MTEXT with inline `\C` / `\c` colour switches splits one entity into
+    // one wire per colour group). The block-defn cache stores a single
+    // LocalWire per sub-entity, so we fold the wires into one — points get
+    // concatenated with NaN separators, the primary colour comes from the
+    // first wire. Per-segment colour is lost inside cached block defns; for
+    // top-level MTEXT outside blocks the colour split is preserved via the
+    // hot path in `tessellate_entity`.
+    let mut wires_out = tessellate::tessellate(
         doc, h, sub, false, sub_color, pat_len, pat, lw_px, local_offset, anno_scale,
     );
+    if wires_out.is_empty() {
+        return None;
+    }
+    let mut wire = wires_out.remove(0);
+    for extra in wires_out {
+        if !wire.points.is_empty() && !extra.points.is_empty() {
+            wire.points.push([f32::NAN, f32::NAN, f32::NAN]);
+        }
+        wire.points.extend(extra.points);
+        wire.key_vertices.extend(extra.key_vertices);
+        wire.snap_pts.extend(extra.snap_pts);
+        wire.tangent_geoms.extend(extra.tangent_geoms);
+        wire.fill_tris.extend(extra.fill_tris);
+    }
 
     if wire.points.len() > 100_000 {
         return None;

@@ -4777,7 +4777,7 @@ fn tessellate_entity(
         } else {
             (0.0_f32, [0.0f32; 8])
         };
-        let mut wire = tessellate::tessellate(
+        let mut wires = tessellate::tessellate(
             document,
             h,
             e,
@@ -4789,8 +4789,11 @@ fn tessellate_entity(
             world_offset,
             1.0,
         );
-        wire.aabb = entity_aabb(e, world_offset);
-        return vec![wire];
+        let ab = entity_aabb(e, world_offset);
+        for w in &mut wires {
+            w.aabb = ab;
+        }
+        return wires;
     }
 
     let (entity_color, pattern_length, pattern, line_weight_px, aci) =
@@ -5066,7 +5069,7 @@ fn tessellate_entity(
                 let sub_aabb = entity_aabb(&sub, world_offset);
                 let sub_pattern_length = sub_pattern_length * pslt_factor;
                 let sub_pattern = sub_pattern.map(|v| v * pslt_factor);
-                let mut wire = tessellate::tessellate(
+                let mut wires = tessellate::tessellate(
                     document,
                     h,
                     &sub,
@@ -5078,10 +5081,12 @@ fn tessellate_entity(
                     world_offset,
                     anno_scale,
                 );
-                wire.name = h.value().to_string();
-                wire.aci = sub_aci;
-                wire.aabb = sub_aabb;
-                vec![wire]
+                for w in &mut wires {
+                    w.name = h.value().to_string();
+                    w.aci = sub_aci;
+                    w.aabb = sub_aabb;
+                }
+                wires
             })
             .collect();
         append_insert_attribute_wires(
@@ -5219,7 +5224,7 @@ fn tessellate_entity(
         }
     }
 
-    let mut base = tessellate::tessellate(
+    let mut bases = tessellate::tessellate(
         document,
         h,
         e,
@@ -5231,28 +5236,37 @@ fn tessellate_entity(
         world_offset,
         anno_scale,
     );
-    base.aci = aci;
-    base.aabb = aabb;
+    for b in &mut bases {
+        b.aci = aci;
+        b.aabb = aabb;
+    }
 
+    // Complex linetypes (with embedded shapes / text) expand the *base*
+    // polyline along its tangent. Text-type entities never have a complex
+    // linetype assigned, so we only consult the first wire here — multi-wire
+    // returns come exclusively from MTEXT colour splits which can't trigger
+    // this path.
     if let Some(clt) = crate::linetypes::complex_lt(lt_name) {
-        let mut wires = complex_lt::apply_along(
-            &base.name,
-            &base.points,
-            clt,
-            (lt_scale * pslt_factor).max(1e-4),
-            entity_color,
-            sel,
-            base.line_weight_px,
-        );
-        if !wires.is_empty() {
-            for w in &mut wires {
-                w.aabb = aabb;
+        if let Some(base) = bases.first() {
+            let mut wires = complex_lt::apply_along(
+                &base.name,
+                &base.points,
+                clt,
+                (lt_scale * pslt_factor).max(1e-4),
+                entity_color,
+                sel,
+                base.line_weight_px,
+            );
+            if !wires.is_empty() {
+                for w in &mut wires {
+                    w.aabb = aabb;
+                }
+                return wires;
             }
-            return wires;
         }
     }
 
-    vec![base]
+    bases
 }
 
 /// Build the 4 OBB corners (CCW: bl, br, tr, tl) of a Text / MText entity
@@ -5565,7 +5579,7 @@ fn append_insert_attribute_wires(
             sub_color
         };
         let sub_aabb = entity_aabb(&attr_entity, world_offset);
-        let mut wire = tessellate::tessellate(
+        let mut attr_wires = tessellate::tessellate(
             document,
             insert_handle,
             &attr_entity,
@@ -5579,10 +5593,12 @@ fn append_insert_attribute_wires(
         );
         // Use the INSERT's handle so selection / picking groups attribute
         // text with the parent insert instead of treating it as a stray text.
-        wire.name = insert_handle.value().to_string();
-        wire.aci = sub_aci;
-        wire.aabb = sub_aabb;
-        wires.push(wire);
+        for w in &mut attr_wires {
+            w.name = insert_handle.value().to_string();
+            w.aci = sub_aci;
+            w.aabb = sub_aabb;
+        }
+        wires.extend(attr_wires);
     }
 }
 

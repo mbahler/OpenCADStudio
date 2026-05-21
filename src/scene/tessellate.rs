@@ -112,7 +112,7 @@ pub fn tessellate(
     line_weight_px: f32,
     world_offset: [f64; 3],
     anno_scale: f32,
-) -> WireModel {
+) -> Vec<WireModel> {
     let color = if selected {
         WireModel::SELECTED
     } else {
@@ -145,7 +145,7 @@ pub fn tessellate(
     // MultiLeader is handled by scene/mod.rs since it emits multiple WireModels
     // (leader, text, frame, fill) with distinct colors.
     if let EntityType::Leader(leader) = entity {
-        return tessellate_leader_single(
+        return vec![tessellate_leader_single(
             document,
             handle,
             leader,
@@ -154,74 +154,141 @@ pub fn tessellate(
             line_weight_px,
             world_offset,
             anno_scale,
-        );
+        )];
     }
 
     // ── Try the truck path first ───────────────────────────────────────────
     if let Some(te) = convert(entity, document) {
         match te.object {
             // ── Text / MText: pre-tessellated glyph strokes ───────────────
+            //
+            // Strokes are pre-grouped by world origin (one TextStroke per
+            // line / per run / per fragment), each carrying an optional
+            // colour override produced by MTEXT inline `\C` / `\c`. We bin
+            // groups by override colour and emit one WireModel per bin so a
+            // single MTEXT can hand back N colour-distinct wires when the
+            // value mixes inline colours.
             TruckObject::Text(stroke_groups) => {
-                // Each TextStroke keeps its strokes in glyph-local space and
-                // its world origin as f64.  Subtract world_offset in f64 before
-                // casting to f32 so large UTM coordinates don't crush precision.
                 let [ox, oy, oz] = world_offset;
                 let elev = entity_z(entity) - oz as f32;
 
-                let mut points: Vec<[f32; 3]> = Vec::new();
-                let mut first = true;
-                // Annotation scale: scale glyph strokes relative to the text
-                // insertion point (first group's origin) so multi-line MText
-                // lines spread apart correctly as well as growing in size.
+                // anno_scale anchors at the first group's origin so multi-line
+                // MText lines spread apart correctly as they grow.
                 let ref_origin = stroke_groups
                     .first()
                     .map(|g| g.origin)
                     .unwrap_or([0.0, 0.0]);
                 let ref_lx = (ref_origin[0] - ox) as f32;
                 let ref_ly = (ref_origin[1] - oy) as f32;
+
+                // Selection forces a single uniform colour — never split.
+                let split_by_color = !selected;
+
+                // Bins: key = Some(rgb) or None (= inherit entity colour).
+                // Preserve insertion order so wire-emit ordering tracks the
+                // original glyph stream (useful for stable hit-test indexing).
+                let mut bins: Vec<(Option<[f32; 3]>, Vec<[f32; 3]>)> = Vec::new();
+                let mut bin_first: Vec<bool> = Vec::new();
+                let find_or_make =
+                    |key: Option<[f32; 3]>, bins: &mut Vec<(Option<[f32; 3]>, Vec<[f32; 3]>)>, firsts: &mut Vec<bool>| -> usize {
+                        if let Some(i) = bins.iter().position(|(k, _)| *k == key) {
+                            i
+                        } else {
+                            bins.push((key, Vec::new()));
+                            firsts.push(true);
+                            bins.len() - 1
+                        }
+                    };
+
                 for group in &stroke_groups {
                     let lx = (group.origin[0] - ox) as f32;
                     let ly = (group.origin[1] - oy) as f32;
                     let slx = (lx - ref_lx) * anno_scale + ref_lx;
                     let sly = (ly - ref_ly) * anno_scale + ref_ly;
+                    let bin_key = if split_by_color { group.color } else { None };
+                    let bi = find_or_make(bin_key, &mut bins, &mut bin_first);
+                    let pts = &mut bins[bi].1;
                     for stroke in &group.strokes {
                         if stroke.len() < 2 {
                             continue;
                         }
-                        if !first && !points.is_empty() {
-                            points.push([f32::NAN, f32::NAN, f32::NAN]);
+                        if !bin_first[bi] && !pts.is_empty() {
+                            pts.push([f32::NAN, f32::NAN, f32::NAN]);
                         }
-                        first = false;
+                        bin_first[bi] = false;
                         for &[x, y] in stroke {
-                            points.push([x * anno_scale + slx, y * anno_scale + sly, elev]);
+                            pts.push([x * anno_scale + slx, y * anno_scale + sly, elev]);
                         }
                     }
                 }
 
                 let snap_pts = offset_snap_pts(te.snap_pts, world_offset);
-                let [ox, oy, oz] = world_offset;
                 let key_vertices: Vec<[f32; 3]> = te
                     .key_vertices
                     .into_iter()
                     .map(|[x, y, z]| [(x - ox) as f32, (y - oy) as f32, (z - oz) as f32])
                     .collect();
-                return WireModel {
-                    name,
-                    points,
-                    color,
-                    selected,
-                    pattern_length: 0.0,
-                    pattern: [0.0; 8],
-                    line_weight_px,
-                    snap_pts,
-                    tangent_geoms: te.tangent_geoms,
-                    aci: 0,
-                    key_vertices,
-                    aabb: WireModel::UNBOUNDED_AABB,
-                    plinegen: true,
-                    vp_scissor: None,
-                    fill_tris: vec![],
-                };
+
+                // Empty input (no glyphs) → emit a single empty wire so the
+                // entity still has a hit-test target via snap_pts.
+                if bins.is_empty() {
+                    return vec![WireModel {
+                        name,
+                        points: Vec::new(),
+                        color,
+                        selected,
+                        pattern_length: 0.0,
+                        pattern: [0.0; 8],
+                        line_weight_px,
+                        snap_pts,
+                        tangent_geoms: te.tangent_geoms,
+                        aci: 0,
+                        key_vertices,
+                        aabb: WireModel::UNBOUNDED_AABB,
+                        plinegen: true,
+                        vp_scissor: None,
+                        fill_tris: vec![],
+                    }];
+                }
+
+                let bin_count = bins.len();
+                let mut out: Vec<WireModel> = Vec::with_capacity(bin_count);
+                for (idx, (override_rgb, pts)) in bins.into_iter().enumerate() {
+                    let wire_color = match override_rgb {
+                        Some([r, g, b]) => [r, g, b, color[3]],
+                        None => color,
+                    };
+                    // Snap points and key vertices belong to the entity as a
+                    // whole — attach them only to the first emitted wire so
+                    // pickers / hover don't double-count.
+                    let (snap, keys, tangents) = if idx == 0 {
+                        (
+                            snap_pts.clone(),
+                            key_vertices.clone(),
+                            te.tangent_geoms.clone(),
+                        )
+                    } else {
+                        (Vec::new(), Vec::new(), Vec::new())
+                    };
+                    out.push(WireModel {
+                        name: name.clone(),
+                        points: pts,
+                        color: wire_color,
+                        selected,
+                        pattern_length: 0.0,
+                        pattern: [0.0; 8],
+                        line_weight_px,
+                        snap_pts: snap,
+                        tangent_geoms: tangents,
+                        aci: 0,
+                        key_vertices: keys,
+                        aabb: WireModel::UNBOUNDED_AABB,
+                        plinegen: true,
+                        vp_scissor: None,
+                        fill_tris: vec![],
+                    });
+                }
+                return out;
             }
 
             // ── Standard topology objects ─────────────────────────────────
@@ -239,7 +306,7 @@ pub fn tessellate(
                                 [(kx - ox) as f32, (ky - oy) as f32, (kz - oz) as f32]
                             })
                             .collect();
-                        return WireModel {
+                        return vec![WireModel {
                             name,
                             points: vec![
                                 [x - s, y, z],
@@ -260,7 +327,7 @@ pub fn tessellate(
                             plinegen: true,
                             vp_scissor: None,
                             fill_tris: vec![],
-                        };
+                        }];
                     }
                     _ => {}
                 }
@@ -275,7 +342,7 @@ pub fn tessellate(
                         .into_iter()
                         .map(|[x, y, z]| [(x - ox) as f32, (y - oy) as f32, (z - oz) as f32])
                         .collect();
-                    return WireModel {
+                    return vec![WireModel {
                         name,
                         points,
                         color,
@@ -291,7 +358,7 @@ pub fn tessellate(
                         plinegen: true,
                         vp_scissor: None,
                         fill_tris: vec![],
-                    };
+                    }];
                 }
             }
 
@@ -304,7 +371,7 @@ pub fn tessellate(
                         .into_iter()
                         .map(|[x, y, z]| [(x - ox) as f32, (y - oy) as f32, (z - oz) as f32])
                         .collect();
-                    return WireModel {
+                    return vec![WireModel {
                         name,
                         points,
                         color,
@@ -320,7 +387,7 @@ pub fn tessellate(
                         plinegen: true,
                         vp_scissor: None,
                         fill_tris: vec![],
-                    };
+                    }];
                 }
             }
 
@@ -351,7 +418,7 @@ pub fn tessellate(
                     .into_iter()
                     .map(|[x, y, z]| [(x - ox) as f32, (y - oy) as f32, (z - oz) as f32])
                     .collect();
-                return WireModel {
+                return vec![WireModel {
                     name,
                     points: local_pts,
                     color,
@@ -367,7 +434,7 @@ pub fn tessellate(
                     plinegen: true,
                     vp_scissor: None,
                     fill_tris,
-                };
+                }];
             }
 
             TruckObject::SegmentedLines(points) => {
@@ -388,7 +455,7 @@ pub fn tessellate(
                     .into_iter()
                     .map(|[x, y, z]| [(x - ox) as f32, (y - oy) as f32, (z - oz) as f32])
                     .collect();
-                return WireModel {
+                return vec![WireModel {
                     name,
                     points: local_pts,
                     color,
@@ -404,7 +471,7 @@ pub fn tessellate(
                     vp_scissor: None,
                     aabb: WireModel::UNBOUNDED_AABB,
                     fill_tris: vec![],
-                };
+                }];
             }
 
             TruckObject::Volume(_) => {
@@ -427,14 +494,14 @@ pub fn tessellate(
                     let sp = Vec3::new((p.x - ox) as f32, (p.y - oy) as f32, (p.z - oz) as f32);
                     wm.snap_pts.push((sp, SnapHint::Insertion));
                 }
-                return wm;
+                return vec![wm];
             }
         }
     }
 
     // ── Legacy fallback for Viewport and other unhandled types ────────────
     let (points, snap_pts, tangent_geoms, key_vertices) = legacy_geometry(entity, world_offset);
-    WireModel {
+    vec![WireModel {
         name,
         points,
         color,
@@ -450,7 +517,7 @@ pub fn tessellate(
         plinegen: true,
         vp_scissor: None,
         fill_tris: vec![],
-    }
+    }]
 }
 
 pub fn tessellate_dimension(
@@ -1539,7 +1606,7 @@ pub fn tessellate_multileader(
             for sub in synth_ins.explode_from_document(document) {
                 let normalized =
                     crate::modules::home::modify::explode::normalize_insert_entity(sub);
-                let mut wire = tessellate(
+                let mut sub_wires = tessellate(
                     document,
                     handle,
                     &normalized,
@@ -1551,8 +1618,10 @@ pub fn tessellate_multileader(
                     world_offset,
                     1.0,
                 );
-                wire.name = name.clone();
-                wires.push(wire);
+                for w in &mut sub_wires {
+                    w.name = name.clone();
+                }
+                wires.extend(sub_wires);
             }
             // Block attributes attached to the multileader — render each as
             // its own attribute entity at WCS location like INSERT does.
