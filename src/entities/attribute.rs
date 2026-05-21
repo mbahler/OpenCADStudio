@@ -111,11 +111,16 @@ fn build_attr_truck(input: AttrTextInputs<'_>, document: &acadrust::CadDocument)
 
     let resolved = resolve_text_style(input.text_style, document);
 
-    // width_factor sign also flips on text_generation_flags bit 2 (backward).
-    // The TextStyle's own is_backward flag is multiplicative — if both are set
-    // they cancel (mirror twice → forward), matching AutoCAD.
-    let base_wf =
-        ((input.width_factor as f32).max(0.01) * resolved.width_factor.max(0.01)).clamp(0.01, 100.0);
+    // The entity stores the FINAL width factor / oblique angle (same rule
+    // as TEXT). Use it as-is; fall back to the style only when the parser
+    // reports a default-omitted 0.0.
+    let base_wf = if input.width_factor.abs() > 1e-9 {
+        (input.width_factor as f32).clamp(0.01, 100.0)
+    } else {
+        resolved.width_factor.max(0.01)
+    };
+    // text_generation_flags bit 2 (backward) flips width-factor sign; the
+    // TextStyle's own is_backward is XOR-combined so mirror-twice cancels.
     let attr_backward = (input.text_generation_flags & 2) != 0;
     let mut width_factor = base_wf;
     if attr_backward ^ resolved.is_backward {
@@ -132,7 +137,11 @@ fn build_attr_truck(input: AttrTextInputs<'_>, document: &acadrust::CadDocument)
     } else {
         input.rotation as f32
     };
-    let oblique_angle = input.oblique_angle as f32 + resolved.oblique_angle;
+    let oblique_angle = if input.oblique_angle.abs() > 1e-9 {
+        input.oblique_angle as f32
+    } else {
+        resolved.oblique_angle
+    };
 
     // Anchor selection mirrors Text: only Left/Baseline uses insertion_point;
     // every other alignment uses alignment_point.

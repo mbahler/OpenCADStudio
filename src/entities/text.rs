@@ -61,12 +61,15 @@ fn to_truck(t: &Text, document: &acadrust::CadDocument) -> TruckEntity {
     let snap_pt = Vec3::new(wsx as f32, wsy as f32, wsz as f32);
     let resolved_style = resolve_text_style(&t.style, document);
     let font_name = resolved_style.font_name;
-    let base_wf = (if t.width_factor > 0.0 {
-        t.width_factor as f32
+    // AutoCAD text geometry rule: the entity stores the FINAL width factor /
+    // oblique angle, copied from the style at creation and persisting through
+    // style edits. Use it as-is. Only fall back to the style when the entity
+    // value is missing (the parser reports 0.0 for default-omitted fields).
+    let base_wf = if t.width_factor.abs() > 1e-9 {
+        (t.width_factor as f32).clamp(0.01, 100.0)
     } else {
-        1.0
-    } * resolved_style.width_factor.max(0.01))
-    .clamp(0.01, 100.0);
+        resolved_style.width_factor.max(0.01)
+    };
     // is_backward mirrors text left-right via negative width factor.
     let width_factor = if resolved_style.is_backward {
         -base_wf
@@ -79,7 +82,11 @@ fn to_truck(t: &Text, document: &acadrust::CadDocument) -> TruckEntity {
     } else {
         t.rotation as f32
     };
-    let oblique_angle = t.oblique_angle as f32 + resolved_style.oblique_angle;
+    let oblique_angle = if t.oblique_angle.abs() > 1e-9 {
+        t.oblique_angle as f32
+    } else {
+        resolved_style.oblique_angle
+    };
     let anchor = match (
         &t.horizontal_alignment,
         &t.vertical_alignment,

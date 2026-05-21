@@ -1552,12 +1552,18 @@ pub fn tessellate_multileader(
     // text_left_attachment (vertical), with text_rotation/text_direction applied.
     if ml.content_type == LeaderContentType::MText && !ml.context.text_string.is_empty() {
         let ctx = &ml.context;
-        let raw_height = if ctx.text_height > 0.0 {
-            ctx.text_height
+        // `ctx.text_height` (when > 0) is the already-resolved WCS text height
+        // stored in the per-instance context — style × scale_factor × anno
+        // scale are all already baked in. Multiplying by `effective_scale`
+        // again would double-scale (e.g., a context height of 100 in a file
+        // with scale_factor=20 was rendering at 2000 units — 20× too big).
+        // Only the fallback path (file omits the context value) needs
+        // scale_factor + annotation scale applied.
+        let height = if ctx.text_height > 0.0 {
+            ctx.text_height as f32
         } else {
-            ml.text_height
-        } as f32;
-        let height = raw_height * effective_scale;
+            ml.text_height as f32 * effective_scale
+        };
 
         let ins = &ctx.text_location;
         // Subtract world_offset in f64 before casting to f32: drawings often
@@ -1595,7 +1601,6 @@ pub fn tessellate_multileader(
         if ml.text_direction_negative {
             rot += std::f32::consts::PI;
         }
-        let (cos_r, sin_r) = (rot.cos(), rot.sin());
 
         // Resolve text style via handle when available, falling back to STANDARD.
         let style_name = ctx
@@ -1612,16 +1617,29 @@ pub fn tessellate_multileader(
         let style = crate::entities::text_support::resolve_text_style(&style_name, document);
         let font_name = style.font_name;
         let font = crate::scene::cxf::get_font(&font_name);
-        let width_factor = style.width_factor.max(0.01);
+        // MultiLeader text takes its width factor / oblique from the style
+        // (no entity-level override exists for MText-content multileaders).
+        // is_backward flips the sign on width_factor; is_upside_down adds π
+        // to the text rotation — same convention as Text / MText.
+        let base_wf = style.width_factor.max(0.01);
+        let width_factor = if style.is_backward { -base_wf } else { base_wf };
         let oblique = style.oblique_angle;
+        if style.is_upside_down {
+            rot += std::f32::consts::PI;
+        }
+        let (cos_r, sin_r) = (rot.cos(), rot.sin());
 
         // Strip MText format codes (e.g. `{\fArial Black|b0|i0|c162|p34;...}`),
         // then split on \P / \n / \N and optionally word-wrap to text_width.
         let plain = crate::entities::text_support::strip_mtext_codes(&ctx.text_string);
         let explicit_lines = crate::entities::text_support::split_mtext_lines(&plain);
         let lines: Vec<String> = if ctx.text_width > 0.0 {
-            let scale = height / 9.0 * width_factor;
-            let max_w = ctx.text_width as f32 * effective_scale;
+            // Measurement uses positive width magnitude; the sign on
+            // width_factor is a render-time mirror flag.
+            let scale = height / 9.0 * width_factor.abs();
+            // ctx.text_width lives in the same WCS frame as ctx.text_height;
+            // it does not need a second multiplication by effective_scale.
+            let max_w = ctx.text_width as f32;
             explicit_lines
                 .iter()
                 .flat_map(|line| {
@@ -1676,7 +1694,9 @@ pub fn tessellate_multileader(
         };
         let v_offset = v_offset_for_attachment(vertical_attach, n_lines, height, line_h);
 
-        let scale = height / 9.0 * width_factor;
+        // line_widths use positive magnitude for measurement; tessellate_text_ex
+        // gets the signed width_factor below to honour the backward flag.
+        let scale = height / 9.0 * width_factor.abs();
         let line_widths: Vec<f32> = lines
             .iter()
             .map(|line| crate::entities::text_support::measure_mtext_chars(line, scale, font))

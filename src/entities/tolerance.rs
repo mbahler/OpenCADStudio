@@ -130,7 +130,13 @@ fn tessellate_tolerance(tol: &Tolerance) -> Vec<Vec<[f32; 2]>> {
     } else {
         2.5_f32
     };
-    let gap = (h * 0.35).max(0.1);
+    // DIMGAP — stored on the entity (resolved from the dim style at creation).
+    // Fall back to AutoCAD's 0.35 × height convention only when missing.
+    let gap = if tol.dimension_gap > 1e-6 {
+        tol.dimension_gap as f32
+    } else {
+        (h * 0.35).max(0.1)
+    };
     let cell_h = h + 2.0 * gap;
     let char_w = h * 0.65;
     let min_cell_w = h * 1.4;

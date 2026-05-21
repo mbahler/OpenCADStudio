@@ -79,12 +79,19 @@ fn to_truck(t: &MText, document: &acadrust::CadDocument) -> TruckEntity {
     let resolved_style = resolve_text_style(&t.style, document);
     let font_name = resolved_style.font_name;
     let font = cxf::get_font(&font_name);
-    let style_width_factor = resolved_style.width_factor.max(0.01);
+    // MText has no entity-level width/oblique override (those are MText format
+    // codes \W and \Q inside the value string, handled by `strip_mtext_codes`).
+    // Default rendering inherits both from the style. `is_backward` flips the
+    // width-factor sign so text reads right-to-left.
+    let base_wf = resolved_style.width_factor.max(0.01);
+    let style_width_factor = if resolved_style.is_backward { -base_wf } else { base_wf };
     let style_oblique = resolved_style.oblique_angle;
     let plain = strip_mtext_codes(&t.value);
     let explicit_lines = split_mtext_lines(&plain);
     let lines: Vec<String> = if t.rectangle_width > 0.0 {
-        let scale = t.height as f32 / 9.0 * style_width_factor;
+        // Measurement uses the magnitude only; the sign on style_width_factor
+        // is a render-time mirror flag, not a width scalar.
+        let scale = t.height as f32 / 9.0 * style_width_factor.abs();
         let max_w = t.rectangle_width as f32;
         explicit_lines
             .iter()
@@ -131,7 +138,12 @@ fn to_truck(t: &MText, document: &acadrust::CadDocument) -> TruckEntity {
         _ => 0.0,
     };
     let vertical_text = matches!(t.drawing_direction, DrawingDirection::TopToBottom);
-    let rot = t.rotation as f32;
+    // is_upside_down flips the text 180° around the insertion point.
+    let rot = if resolved_style.is_upside_down {
+        t.rotation as f32 + std::f32::consts::PI
+    } else {
+        t.rotation as f32
+    };
     let (cos_r, sin_r) = (rot.cos(), rot.sin());
     let ins_x = t.insertion_point.x;
     let ins_y = t.insertion_point.y;
@@ -151,7 +163,7 @@ fn to_truck(t: &MText, document: &acadrust::CadDocument) -> TruckEntity {
             (line_y * (-sin_r), line_y * cos_r)
         };
         let line_w = if h_anchor > 0.0 {
-            let scale = t.height as f32 / 9.0 * style_width_factor;
+            let scale = t.height as f32 / 9.0 * style_width_factor.abs();
             measure_mtext_chars(line, scale, font)
         } else {
             0.0

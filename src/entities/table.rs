@@ -14,7 +14,7 @@ fn v3(v: &acadrust::types::Vector3) -> Vec3 {
 }
 
 impl TruckConvertible for Table {
-    fn to_truck(&self, _document: &acadrust::CadDocument) -> Option<TruckEntity> {
+    fn to_truck(&self, document: &acadrust::CadDocument) -> Option<TruckEntity> {
         if self.rows.is_empty() || self.columns.is_empty() {
             return None;
         }
@@ -121,9 +121,42 @@ impl TruckConvertible for Table {
         // is gone — col/row offsets still feed cell drawing below.
         let _ = (total_w, total_h);
 
-        // Cell text — lifted into Lines points via 2D strokes
-        let text_height = 0.18_f32;
-        let margin = text_height * 0.5_f32;
+        // Cell text — resolve defaults via TableStyle, then layer per-cell
+        // overrides on top. Resolution order (text height, text style, alignment):
+        //   1. CellContent.* (per-content explicit override)
+        //   2. CellStyle.*   (per-cell explicit override)
+        //   3. TableStyle.<row_kind>_row_style.* (table-wide default for this row class)
+        //   4. compiled-in fallback (0.18 / "txt" / MiddleCenter)
+        //
+        // Row classification: row 0 is Title (when not suppressed), row 1 is
+        // Header (when not suppressed), everything else is Data. The two
+        // suppressed flags shift the leading rows down to Data.
+        let lookup_style = |h: acadrust::Handle| -> Option<&acadrust::tables::TextStyle> {
+            document.text_styles.iter().find(|s| s.handle == h)
+        };
+        let table_style: Option<&acadrust::objects::TableStyle> =
+            self.table_style_handle.and_then(|h| {
+                document.objects.get(&h).and_then(|obj| match obj {
+                    acadrust::objects::ObjectType::TableStyle(ts) => Some(ts),
+                    _ => None,
+                })
+            });
+        let title_suppressed = table_style.map(|t| t.title_suppressed).unwrap_or(false);
+        let header_suppressed = table_style.map(|t| t.header_suppressed).unwrap_or(false);
+
+        let font_for_handle = |handle: Option<acadrust::Handle>| -> Option<String> {
+            handle.and_then(|h| lookup_style(h)).and_then(|s| {
+                let file = s.font_file.trim();
+                if !file.is_empty() {
+                    let basename = file.rsplit(['/', '\\']).next().unwrap_or(file);
+                    let stem = basename.split('.').next().unwrap_or(basename).trim();
+                    if !stem.is_empty() {
+                        return Some(stem.to_string());
+                    }
+                }
+                None
+            })
+        };
 
         for (ri, row) in self.rows.iter().enumerate() {
             let row_top = row_offsets[ri];
@@ -132,6 +165,22 @@ impl TruckConvertible for Table {
                 .copied()
                 .unwrap_or(row_top + row.height as f32);
             let row_mid = (row_top + row_bot) * 0.5;
+
+            // Pick the appropriate row_style from TableStyle for this row's role.
+            let row_style: Option<&acadrust::objects::RowCellStyle> = table_style
+                .map(|ts| {
+                    let kind = match (title_suppressed, header_suppressed, ri) {
+                        (false, _, 0) => 0,            // title
+                        (false, false, 1) => 1,        // header
+                        (true, false, 0) => 1,        // header pulled up
+                        _ => 2,                       // data
+                    };
+                    match kind {
+                        0 => &ts.title_row_style,
+                        1 => &ts.header_row_style,
+                        _ => &ts.data_row_style,
+                    }
+                });
 
             for (ci, cell) in row.cells.iter().enumerate() {
                 let text = cell.text_value();
@@ -143,16 +192,39 @@ impl TruckConvertible for Table {
                 let col_width = self.columns.get(ci).map(|c| c.width as f32).unwrap_or(1.0);
                 let col_right = col_left + col_width;
 
-                // Alignment: CellStyle.alignment i32 encodes 1-9 (AutoCAD convention):
-                // 1=TopLeft 2=TopCenter 3=TopRight
-                // 4=MiddleLeft 5=MiddleCenter 6=MiddleRight
-                // 7=BottomLeft 8=BottomCenter 9=BottomRight
-                // 0/default = MiddleCenter (5)
-                let align = cell.style.as_ref().map_or(5, |s| s.alignment);
+                // Resolve text height: content → cell-style → row-style → 0.18.
+                let content = cell.contents.first();
+                let cell_h = content
+                    .map(|c| c.text_height)
+                    .filter(|h| *h > 1e-6)
+                    .or_else(|| cell.style.as_ref().map(|s| s.text_height).filter(|h| *h > 1e-6))
+                    .or_else(|| row_style.map(|s| s.text_height).filter(|h| *h > 1e-6))
+                    .map(|h| h as f32)
+                    .unwrap_or(0.18);
+                let margin = cell_h * 0.5_f32;
+
+                // Resolve text-style handle: content → cell-style → row-style.
+                let style_handle = content
+                    .and_then(|c| c.text_style_handle)
+                    .or_else(|| cell.style.as_ref().and_then(|s| s.text_style_handle))
+                    .or_else(|| row_style.and_then(|s| s.text_style_handle));
+                let font_owned =
+                    font_for_handle(style_handle).unwrap_or_else(|| "txt".to_string());
+                let font_name: &str = &font_owned;
+
+                // Alignment resolution: cell.style.alignment (1-9) overrides;
+                // otherwise fall back to row_style.alignment, then MiddleCenter.
+                let align = cell
+                    .style
+                    .as_ref()
+                    .map(|s| s.alignment)
+                    .filter(|a| *a != 0)
+                    .or_else(|| row_style.map(|s| s.alignment as i32))
+                    .unwrap_or(5);
                 let horiz = ((align - 1).rem_euclid(3)) + 1; // 1=left, 2=center, 3=right
                 let vert = ((align - 1) / 3) + 1; // 1=top, 2=middle, 3=bottom
 
-                let text_w = cxf::measure_text(text, text_height, 1.0, "txt");
+                let text_w = cxf::measure_text(text, cell_h, 1.0, font_name);
 
                 let x_offset = match horiz {
                     1 => col_left + margin,                     // left
@@ -161,19 +233,22 @@ impl TruckConvertible for Table {
                 };
                 let y_offset = match vert {
                     1 => row_top + margin,               // top
-                    3 => row_bot - margin - text_height, // bottom
-                    _ => row_mid - text_height * 0.5,    // middle (default)
+                    3 => row_bot - margin - cell_h,      // bottom
+                    _ => row_mid - cell_h * 0.5,         // middle (default)
                 };
 
                 let text_origin = origin + h * x_offset + v_down * y_offset;
 
+                // Content rotation (radians) on top of table cell rotation.
+                let rot = content.map(|c| c.rotation as f32).unwrap_or(0.0)
+                    + cell.rotation as f32;
                 let strokes = cxf::tessellate_text_ex(
                     [text_origin.x, text_origin.y],
-                    text_height,
-                    0.0,
+                    cell_h,
+                    rot,
                     1.0,
                     0.0,
-                    "txt",
+                    font_name,
                     text,
                 );
                 for stroke in strokes {

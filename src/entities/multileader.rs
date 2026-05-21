@@ -187,13 +187,14 @@ fn to_truck(ml: &MultiLeader, document: &acadrust::CadDocument) -> Option<TruckE
     // here — this path is consumed by snap / truck export which work in WCS.
     if ml.content_type == LeaderContentType::MText && !ml.context.text_string.is_empty() {
         let ctx = &ml.context;
-        let raw_height = if ctx.text_height > 0.0 {
-            ctx.text_height
-        } else {
-            ml.text_height
-        } as f32;
+        // `ctx.text_height` (when > 0) is already in WCS — scale_factor is
+        // baked in. Only the fallback path needs to multiply.
         let scale_factor = ml.scale_factor as f32;
-        let height = raw_height * scale_factor;
+        let height = if ctx.text_height > 0.0 {
+            ctx.text_height as f32
+        } else {
+            ml.text_height as f32 * scale_factor
+        };
 
         let ins = &ctx.text_location;
         let ins_x = ins.x;
@@ -202,12 +203,11 @@ fn to_truck(ml: &MultiLeader, document: &acadrust::CadDocument) -> Option<TruckE
         // Prefer text_direction (carries through rotations/mirrors); fall back
         // to text_rotation when no direction has been set.
         let td = ctx.text_direction;
-        let rot = if td.x.abs() > 1e-9 || td.y.abs() > 1e-9 {
+        let mut rot = if td.x.abs() > 1e-9 || td.y.abs() > 1e-9 {
             (td.y as f32).atan2(td.x as f32)
         } else {
             ctx.text_rotation as f32
         };
-        let (cos_r, sin_r) = (rot.cos(), rot.sin());
         snap_pts.push(node([ins_x, ins_y, z]));
 
         // Resolve text style via handle when available, falling back to STANDARD.
@@ -225,16 +225,28 @@ fn to_truck(ml: &MultiLeader, document: &acadrust::CadDocument) -> Option<TruckE
         let style = crate::entities::text_support::resolve_text_style(&style_name, document);
         let font_name = style.font_name;
         let font = crate::scene::cxf::get_font(&font_name);
-        let width_factor = style.width_factor.max(0.01);
+        // MultiLeader text inherits width factor / oblique from the style.
+        // is_backward flips the sign on width_factor; is_upside_down adds π
+        // to the text rotation — same convention as Text / MText.
+        let base_wf = style.width_factor.max(0.01);
+        let width_factor = if style.is_backward { -base_wf } else { base_wf };
         let oblique = style.oblique_angle;
+        if style.is_upside_down {
+            rot += std::f32::consts::PI;
+        }
+        let (cos_r, sin_r) = (rot.cos(), rot.sin());
 
         // Strip MText format codes (e.g. `{\fArial Black|b0|i0|c162|p34;...}`),
         // then split on \P / \n / \N and optionally word-wrap to text_width.
         let plain = crate::entities::text_support::strip_mtext_codes(&ctx.text_string);
         let explicit_lines = crate::entities::text_support::split_mtext_lines(&plain);
         let lines: Vec<String> = if ctx.text_width > 0.0 {
-            let scale = height / 9.0 * width_factor;
-            let max_w = ctx.text_width as f32 * scale_factor;
+            // Width-factor sign is a render-time mirror flag; measurement uses
+            // the magnitude only.
+            let scale = height / 9.0 * width_factor.abs();
+            // ctx.text_width is in the same WCS frame as ctx.text_height —
+            // do not re-multiply by scale_factor.
+            let max_w = ctx.text_width as f32;
             explicit_lines
                 .iter()
                 .flat_map(|line| {
@@ -261,7 +273,9 @@ fn to_truck(ml: &MultiLeader, document: &acadrust::CadDocument) -> Option<TruckE
         let v_offset =
             v_offset_for_attachment(ctx.text_left_attachment, n_lines, height, line_h);
 
-        let scale = height / 9.0 * width_factor;
+        // Line-width measurement uses positive magnitude; mirror sign feeds
+        // tessellate_text_ex below.
+        let scale = height / 9.0 * width_factor.abs();
         for (i, line) in lines.iter().enumerate() {
             let li = i as f32;
             let line_y_local = -li * line_h + v_offset;
