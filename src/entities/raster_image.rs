@@ -277,8 +277,12 @@ impl TruckConvertible for Wipeout {
                 self.clip_type,
                 acadrust::entities::WipeoutClipType::Polygonal
             ) {
-            // Convert pixel-space boundary vertices to world space:
-            // world = insertion_point + u_vector * v.x * size.x + v_vector * v.y * size.y
+            // Clip vertices are stored in image-pixel space, centred on the
+            // image (range ±size/2). The image's bottom-left corner sits at
+            // `insertion_point`, the image-Y axis points DOWN (per DXF
+            // "v_vector points down the image"), so map:
+            //   x_off = (clip.x + size.x/2) × u_vector
+            //   y_off = (size.y/2 − clip.y) × v_vector   ← y flipped
             let ox = self.insertion_point.x;
             let oy = self.insertion_point.y;
             let oz = self.insertion_point.z;
@@ -286,12 +290,11 @@ impl TruckConvertible for Wipeout {
                 .clip_boundary_vertices
                 .iter()
                 .map(|v| {
-                    let wx = self.u_vector.x * v.x * self.size.x
-                        + self.v_vector.x * v.y * self.size.y;
-                    let wy = self.u_vector.y * v.x * self.size.x
-                        + self.v_vector.y * v.y * self.size.y;
-                    let wz = self.u_vector.z * v.x * self.size.x
-                        + self.v_vector.z * v.y * self.size.y;
+                    let cx = v.x + self.size.x * 0.5;
+                    let cy = self.size.y * 0.5 - v.y;
+                    let wx = self.u_vector.x * cx + self.v_vector.x * cy;
+                    let wy = self.u_vector.y * cx + self.v_vector.y * cy;
+                    let wz = self.u_vector.z * cx + self.v_vector.z * cy;
                     [ox + wx, oy + wy, oz + wz]
                 })
                 .collect();
@@ -329,16 +332,17 @@ impl Grippable for Wipeout {
             let ox = self.insertion_point.x as f32;
             let oy = self.insertion_point.y as f32;
             let oz = self.insertion_point.z as f32;
+            // Same image-pixel-space → WCS mapping as `to_truck` so grips
+            // sit exactly on the rendered polygon vertices.
             self.clip_boundary_vertices
                 .iter()
                 .enumerate()
                 .map(|(i, v)| {
-                    let wx = (self.u_vector.x * v.x * self.size.x
-                        + self.v_vector.x * v.y * self.size.y) as f32;
-                    let wy = (self.u_vector.y * v.x * self.size.x
-                        + self.v_vector.y * v.y * self.size.y) as f32;
-                    let wz = (self.u_vector.z * v.x * self.size.x
-                        + self.v_vector.z * v.y * self.size.y) as f32;
+                    let cx = v.x + self.size.x * 0.5;
+                    let cy = self.size.y * 0.5 - v.y;
+                    let wx = (self.u_vector.x * cx + self.v_vector.x * cy) as f32;
+                    let wy = (self.u_vector.y * cx + self.v_vector.y * cy) as f32;
+                    let wz = (self.u_vector.z * cx + self.v_vector.z * cy) as f32;
                     if i == 0 {
                         square_grip(i, Vec3::new(ox + wx, oy + wy, oz + wz))
                     } else {

@@ -2744,16 +2744,35 @@ impl Scene {
         if is_polygon {
             let ox = (wo.insertion_point.x - wox) as f32;
             let oy = (wo.insertion_point.y - woy) as f32;
-            wo.clip_boundary_vertices
+            // DXF clip vertices live in image-pixel space, centred on the
+            // image (range −size/2 … +size/2). Image-bottom-left → insertion,
+            // image-y-axis points DOWN (per the DXF "v_vector points down the
+            // image" convention), so map:
+            //   x_off = (clip.x + size.x/2) × u_vec
+            //   y_off = (size.y/2 − clip.y) × v_vec    ← y flipped
+            let cx_of = |v: &acadrust::types::Vector2| v.x + wo.size.x * 0.5;
+            let cy_of = |v: &acadrust::types::Vector2| wo.size.y * 0.5 - v.y;
+            let mut poly: Vec<[f32; 2]> = wo
+                .clip_boundary_vertices
                 .iter()
                 .map(|v| {
-                    let wx =
-                        (wo.u_vector.x * v.x * wo.size.x + wo.v_vector.x * v.y * wo.size.y) as f32;
-                    let wy =
-                        (wo.u_vector.y * v.x * wo.size.x + wo.v_vector.y * v.y * wo.size.y) as f32;
+                    let cx = cx_of(v);
+                    let cy = cy_of(v);
+                    let wx = (wo.u_vector.x * cx + wo.v_vector.x * cy) as f32;
+                    let wy = (wo.u_vector.y * cx + wo.v_vector.y * cy) as f32;
                     [ox + wx, oy + wy]
                 })
-                .collect()
+                .collect();
+            // Close the loop: the GPU `in_polygon` ray-cast walks
+            // sequential pairs and doesn't wrap, so without an explicit
+            // closing vertex the last edge (vN-1 → v0) is never tested and
+            // the fill bleeds far past the boundary.
+            if let Some(&first) = poly.first() {
+                if poly.last() != Some(&first) {
+                    poly.push(first);
+                }
+            }
+            poly
         } else {
             // Rectangular boundary from 4 corners.
             let ox = (wo.insertion_point.x - wox) as f32;

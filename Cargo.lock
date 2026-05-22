@@ -42,7 +42,7 @@ checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
 [[package]]
 name = "acadrust"
 version = "0.3.4"
-source = "git+https://github.com/HakanSeven12/acadrust?branch=fix%2Fhatch-boundary-handle-cap#62716f51e05aba084533f65e0eb3cfd3c7cc1dfa"
+source = "git+https://github.com/HakanSeven12/acadrust?branch=fix%2Fwipeout-clip-vertices#15e434f733a4c970d5d680de89acc2cb381accbe"
 dependencies = [
  "ahash",
  "anyhow",

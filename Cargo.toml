@@ -24,7 +24,8 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [patch.crates-io]
-# TEMP: tracks https://github.com/hakanaktt/acadrust/pull/27 (hatch
-# boundary-handle cap). When that PR lands on hakanaktt/main, revert to
-# `git = "https://github.com/hakanaktt/acadrust", branch = "main"`.
-acadrust = { git = "https://github.com/HakanSeven12/acadrust", branch = "fix/hatch-boundary-handle-cap" }
+# TEMP: tracks fix/wipeout-clip-vertices on HakanSeven12/acadrust, which
+# stacks the wipeout/raster-image clip-vertex fix on top of the earlier
+# hatch boundary-handle cap. Revert to `branch = "main"` once both
+# upstream PRs land.
+acadrust = { git = "https://github.com/HakanSeven12/acadrust", branch = "fix/wipeout-clip-vertices" }
