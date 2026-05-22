@@ -290,9 +290,11 @@ fn emit_hatch(ops: &mut Vec<Op>, hatch: &HatchModel, ox: f32, oy: f32) {
     let (paint_mode, fill_color) = match &hatch.pattern {
         HatchPattern::Solid => (PaintMode::Fill, [r, g, b]),
         HatchPattern::Pattern(_) => {
-            // Stroke the outline only — pattern lines themselves are
-            // procedural and not synthesised on the CPU.
-            (PaintMode::Stroke, [r, g, b])
+            // Pattern fills are emitted as raster line segments below; the
+            // outline polygon path itself is skipped because pattern
+            // hatches in real DXF do not draw their boundary as part of
+            // the fill.
+            (PaintMode::Clip, [r, g, b]) // sentinel — handled below
         }
         HatchPattern::Gradient { color2, .. } => {
             // PDF gradients are stored in resource dictionaries; for the
@@ -306,21 +308,44 @@ fn emit_hatch(ops: &mut Vec<Op>, hatch: &HatchModel, ox: f32, oy: f32) {
         }
     };
 
-    match paint_mode {
-        PaintMode::Fill | PaintMode::FillStroke => {
-            ops.push(Op::SetFillColor {
-                col: Color::Rgb(Rgb {
-                    r: fill_color[0],
-                    g: fill_color[1],
-                    b: fill_color[2],
-                    icc_profile: None,
-                }),
+    // Pattern hatches: rasterise the family lines clipped to the boundary
+    // and emit each as a stroked line. Skips the polygon outline entirely.
+    if matches!(hatch.pattern, HatchPattern::Pattern(_)) {
+        let segments = hatch.pattern_segments();
+        if segments.is_empty() {
+            return;
+        }
+        ops.push(Op::SetOutlineColor {
+            col: Color::Rgb(Rgb {
+                r,
+                g,
+                b,
+                icc_profile: None,
+            }),
+        });
+        for [a, b_pt] in segments {
+            ops.push(Op::DrawLine {
+                line: Line {
+                    points: vec![
+                        LinePoint {
+                            p: Point::new(Mm(a[0] + ox), Mm(a[1] + oy)),
+                            bezier: false,
+                        },
+                        LinePoint {
+                            p: Point::new(Mm(b_pt[0] + ox), Mm(b_pt[1] + oy)),
+                            bezier: false,
+                        },
+                    ],
+                    is_closed: false,
+                },
             });
         }
-        _ => {}
+        return;
     }
-    if matches!(paint_mode, PaintMode::Stroke | PaintMode::FillStroke) {
-        ops.push(Op::SetOutlineColor {
+
+    // Solid / gradient: filled polygon path.
+    if matches!(paint_mode, PaintMode::Fill | PaintMode::FillStroke) {
+        ops.push(Op::SetFillColor {
             col: Color::Rgb(Rgb {
                 r: fill_color[0],
                 g: fill_color[1],

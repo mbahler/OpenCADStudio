@@ -188,15 +188,24 @@ fn draw_hatch(frame: &mut canvas::Frame, hatch: &HatchModel, to_px: &impl Fn(f32
             frame.fill(&path, color);
         }
         HatchPattern::Pattern(_) => {
-            // Pattern hatches: draw just the boundary outline for now.
-            frame.stroke(
-                &path,
-                canvas::Stroke {
-                    style: canvas::Style::Solid(color),
-                    width: 1.0,
-                    ..Default::default()
-                },
-            );
+            // Rasterise the PAT line families clipped to the boundary so
+            // the paper canvas shows the actual hatch lines (ANSI31, etc.)
+            // instead of just the outline. Matches the GPU shader output
+            // for model-space hatches.
+            for [a, b] in hatch.pattern_segments() {
+                let seg = canvas::Path::new(|builder| {
+                    builder.move_to(to_px(a[0], a[1]));
+                    builder.line_to(to_px(b[0], b[1]));
+                });
+                frame.stroke(
+                    &seg,
+                    canvas::Stroke {
+                        style: canvas::Style::Solid(color),
+                        width: 1.0,
+                        ..Default::default()
+                    },
+                );
+            }
         }
         HatchPattern::Gradient { color2, .. } => {
             // Gradient: average the two colours as a solid fill.
