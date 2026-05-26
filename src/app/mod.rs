@@ -308,6 +308,10 @@ pub enum Message {
     SaveDialogCancel,
     ClearScene,
     SetWireframe(bool),
+    /// Set the active tab's render mode (one of acadrust's seven visual
+    /// styles). Replaces the binary `SetWireframe` over time; the older
+    /// message stays for ribbon/CLI back-compat and forwards.
+    SetRenderMode(acadrust::entities::ViewportRenderMode),
     /// Switch camera projection: true = Orthographic, false = Perspective.
     SetProjection(bool),
     /// Select a ribbon module tab by index.

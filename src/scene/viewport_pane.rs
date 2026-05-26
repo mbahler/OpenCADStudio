@@ -20,14 +20,20 @@ pub struct ViewportPane<'a> {
     pub scene: &'a Scene,
     pub mode: ViewportPaneMode,
     pub show_viewcube: bool,
+    pub render_mode: acadrust::entities::ViewportRenderMode,
 }
 
 impl<'a> ViewportPane<'a> {
-    pub fn model(scene: &'a Scene, show_viewcube: bool) -> Self {
+    pub fn model(
+        scene: &'a Scene,
+        show_viewcube: bool,
+        render_mode: acadrust::entities::ViewportRenderMode,
+    ) -> Self {
         Self {
             scene,
             mode: ViewportPaneMode::Model,
             show_viewcube,
+            render_mode,
         }
     }
 
@@ -39,6 +45,7 @@ impl<'a> ViewportPane<'a> {
             scene,
             mode: ViewportPaneMode::Paper { handle },
             show_viewcube: false,
+            render_mode: acadrust::entities::ViewportRenderMode::Wireframe2D,
         }
     }
 }
@@ -52,11 +59,20 @@ impl<'a> ViewportPane<'a> {
 pub struct PaperViewportPane<'a> {
     pub scene: &'a Scene,
     pub handle: Handle,
+    pub render_mode: acadrust::entities::ViewportRenderMode,
 }
 
 impl<'a> PaperViewportPane<'a> {
-    pub fn new(scene: &'a Scene, handle: Handle) -> Self {
-        Self { scene, handle }
+    pub fn new(
+        scene: &'a Scene,
+        handle: Handle,
+        render_mode: acadrust::entities::ViewportRenderMode,
+    ) -> Self {
+        Self {
+            scene,
+            handle,
+            render_mode,
+        }
     }
 }
 
@@ -71,7 +87,12 @@ impl<'a, Msg: std::fmt::Debug + Clone> shader::Program<Msg> for PaperViewportPan
         bounds: Rectangle,
     ) -> Self::Primitive {
         self.scene
-            .build_active_viewport_primitive(self.handle, state.hover_region, bounds)
+            .build_active_viewport_primitive(
+                self.handle,
+                state.hover_region,
+                bounds,
+                self.render_mode,
+            )
     }
 
     fn update(
@@ -109,14 +130,18 @@ impl<'a, Msg: std::fmt::Debug + Clone> shader::Program<Msg> for ViewportPane<'a>
         bounds: Rectangle,
     ) -> Self::Primitive {
         match &self.mode {
-            ViewportPaneMode::Model => {
-                self.scene
-                    .build_primitive(state.hover_region, bounds, self.show_viewcube)
-            }
-            ViewportPaneMode::Paper { handle } => {
-                self.scene
-                    .build_viewport_primitive(*handle, state.hover_region, bounds)
-            }
+            ViewportPaneMode::Model => self.scene.build_primitive(
+                state.hover_region,
+                bounds,
+                self.show_viewcube,
+                self.render_mode,
+            ),
+            ViewportPaneMode::Paper { handle } => self.scene.build_viewport_primitive(
+                *handle,
+                state.hover_region,
+                bounds,
+                self.render_mode,
+            ),
         }
     }
 

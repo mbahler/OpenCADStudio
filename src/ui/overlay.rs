@@ -1,10 +1,9 @@
 //! Viewport overlay widgets:
-//!   • info_bar()        — top-left bracket buttons showing view name / style
 //!   • nav_toolbar()     — vertical orbit/pan/zoom buttons on the right
 
 use glam::{Mat4, Vec3};
 use iced::mouse;
-use iced::widget::{button, canvas, column, container, row, text};
+use iced::widget::{button, canvas, column, container, text};
 use iced::{Background, Border, Color, Element, Length, Point, Size, Theme};
 
 use crate::app::Message;
@@ -28,43 +27,6 @@ pub struct GripMarker {
     pub shape: GripShape,
     /// True → grip is currently being dragged (drawn filled red).
     pub is_hot: bool,
-}
-
-// ── Info bar ─────────────────────────────────────────────────────────────
-
-pub fn info_bar<'a>(view_name: &'a str, visual_style: &'a str) -> Element<'a, Message> {
-    let bracket = |s: &'a str| -> Element<'a, Message> {
-        container(text(s).size(10).color(Color {
-            r: 0.78,
-            g: 0.78,
-            b: 0.78,
-            a: 1.0,
-        }))
-        .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(Color {
-                r: 0.10,
-                g: 0.10,
-                b: 0.10,
-                a: 0.75,
-            })),
-            border: Border {
-                color: Color {
-                    r: 0.35,
-                    g: 0.35,
-                    b: 0.35,
-                    a: 1.0,
-                },
-                width: 1.0,
-                radius: 0.0.into(),
-            },
-            ..Default::default()
-        })
-        .padding([2, 6])
-        .into()
-    };
-    row![bracket("[-]"), bracket(view_name), bracket(visual_style)]
-        .spacing(0)
-        .into()
 }
 
 // ── Nav toolbar ───────────────────────────────────────────────────────────

@@ -654,19 +654,41 @@ impl OpenCADStudio {
             }
 
             Message::SetWireframe(w) => {
-                let i = self.active_tab;
-                self.tabs[i].wireframe = w;
-                self.ribbon.set_wireframe(w);
-                self.tabs[i].visual_style = if w {
-                    "Wireframe".into()
+                // Back-compat shim: forward to the new render-mode path so
+                // the ribbon button + WIREFRAME / SOLID command line still
+                // work without duplicating the rendering plumbing.
+                let mode = if w {
+                    acadrust::entities::ViewportRenderMode::Wireframe2D
                 } else {
-                    "Shaded".into()
+                    acadrust::entities::ViewportRenderMode::FlatShaded
                 };
-                self.command_line.push_output(if w {
-                    "Visual style: Wireframe"
-                } else {
-                    "Visual style: Shaded"
-                });
+                Task::done(Message::SetRenderMode(mode))
+            }
+
+            Message::SetRenderMode(mode) => {
+                use acadrust::entities::ViewportRenderMode as M;
+                let i = self.active_tab;
+                self.tabs[i].render_mode = mode;
+                // Keep the legacy `wireframe` bool synced — both wireframe
+                // modes set it, everything else clears it.
+                let wf = matches!(mode, M::Wireframe2D | M::Wireframe3D);
+                self.tabs[i].wireframe = wf;
+                self.ribbon.set_wireframe(wf);
+                let label = match mode {
+                    M::Wireframe2D => "Wireframe 2D",
+                    M::Wireframe3D => "Wireframe 3D",
+                    M::HiddenLine => "Hidden Line",
+                    M::FlatShaded => "Flat Shaded",
+                    M::GouraudShaded => "Gouraud Shaded",
+                    M::FlatShadedWithEdges => "Flat Shaded + Edges",
+                    M::GouraudShadedWithEdges => "Gouraud Shaded + Edges",
+                };
+                self.tabs[i].visual_style = label.into();
+                // Re-upload face3d fills on the next frame — the render
+                // pipeline keys its upload cache off `geometry_epoch`.
+                self.tabs[i].scene.bump_geometry();
+                self.command_line
+                    .push_output(&format!("Visual style: {label}"));
                 Task::none()
             }
 

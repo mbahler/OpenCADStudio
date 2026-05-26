@@ -784,16 +784,25 @@ impl Pipeline {
         device: &wgpu::Device,
         face3d_wires: &[WireModel],
         all_wires: &[WireModel],
+        wireframe_only: bool,
     ) {
-        let has_fills =
-            !face3d_wires.is_empty() || all_wires.iter().any(|w| !w.fill_tris.is_empty());
+        // Edge buffer is always built from `face3d_wires`, so 3DFACE
+        // outlines stay on the screen regardless of mode.
+        self.gpu_face3d_edges = WireGpu::from_batch(device, face3d_wires);
+        // Fill buffer: in wireframe mode we drop the 3DFACE quads
+        // (those come from `face3d_wires.key_vertices`) but keep
+        // `all_wires.fill_tris` — that channel carries 2D content like
+        // text-LOD greek rectangles and PolyfaceMesh face triangles
+        // which shouldn't disappear with the toggle.
+        let face3d_for_fill: &[WireModel] = if wireframe_only { &[] } else { face3d_wires };
+        let has_fills = !face3d_for_fill.is_empty()
+            || all_wires.iter().any(|w| !w.fill_tris.is_empty());
         if !has_fills {
             self.gpu_face3d_fill = None;
-            self.gpu_face3d_edges = vec![];
-            return;
+        } else {
+            self.gpu_face3d_fill =
+                Some(Face3DGpu::from_wires(device, face3d_for_fill, all_wires));
         }
-        self.gpu_face3d_fill = Some(Face3DGpu::from_wires(device, face3d_wires, all_wires));
-        self.gpu_face3d_edges = WireGpu::from_batch(device, face3d_wires);
     }
 
     pub fn upload_meshes(&mut self, device: &wgpu::Device, meshes: &[MeshLodSet]) {

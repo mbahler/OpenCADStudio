@@ -16,6 +16,27 @@ use iced::{keyboard, Background, Border, Color, Element, Fill, Subscription, Tas
 
 const VIEWCUBE_HIT_SIZE: f32 = VIEWCUBE_DRAW_PX;
 
+/// `pick_list` requires its items to implement `Display`; acadrust's
+/// `ViewportRenderMode` enum carries the raw DXF integers, not a label,
+/// so wrap it locally with a friendly name renderer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RenderModeChoice(pub acadrust::entities::ViewportRenderMode);
+
+impl std::fmt::Display for RenderModeChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use acadrust::entities::ViewportRenderMode as M;
+        f.write_str(match self.0 {
+            M::Wireframe2D => "Wireframe 2D",
+            M::Wireframe3D => "Wireframe 3D",
+            M::HiddenLine => "Hidden Line",
+            M::FlatShaded => "Flat Shaded",
+            M::GouraudShaded => "Gouraud Shaded",
+            M::FlatShadedWithEdges => "Flat Shaded + Edges",
+            M::GouraudShadedWithEdges => "Gouraud Shaded + Edges",
+        })
+    }
+}
+
 impl OpenCADStudio {
     pub fn view(&self, window_id: window::Id) -> Element<'_, Message> {
         // ── Floating panel windows ─────────────────────────────────────────
@@ -236,7 +257,11 @@ impl OpenCADStudio {
         } else if is_paper {
             paper_canvas_view(tab)
         } else {
-            shader(ViewportPane::model(&tab.scene, self.show_viewcube))
+            shader(ViewportPane::model(
+                &tab.scene,
+                self.show_viewcube,
+                tab.render_mode,
+            ))
                 .width(Fill)
                 .height(Fill)
                 .into()
@@ -357,15 +382,53 @@ impl OpenCADStudio {
             )
         };
 
-        let info = container(overlay::info_bar(
-            if is_paper {
-                &tab.scene.current_layout
-            } else {
-                "Custom View"
+        // Render-mode picker, top-left of the viewport. Drives whether
+        // 3D face / mesh fills and edges are rendered for the active
+        // tab. Hatch fills are deliberately *not* gated by this — the
+        // document's FILLMODE still owns 2D fill state.
+        let render_modes: Vec<RenderModeChoice> = vec![
+            RenderModeChoice(acadrust::entities::ViewportRenderMode::Wireframe2D),
+            RenderModeChoice(acadrust::entities::ViewportRenderMode::Wireframe3D),
+            RenderModeChoice(acadrust::entities::ViewportRenderMode::HiddenLine),
+            RenderModeChoice(acadrust::entities::ViewportRenderMode::FlatShaded),
+            RenderModeChoice(acadrust::entities::ViewportRenderMode::GouraudShaded),
+            RenderModeChoice(acadrust::entities::ViewportRenderMode::FlatShadedWithEdges),
+            RenderModeChoice(acadrust::entities::ViewportRenderMode::GouraudShadedWithEdges),
+        ];
+        let info = container(
+            iced::widget::pick_list(
+                render_modes,
+                Some(RenderModeChoice(tab.render_mode)),
+                |c| Message::SetRenderMode(c.0),
+            )
+            .text_size(11),
+        )
+        .style(|_: &Theme| iced::widget::container::Style {
+            background: Some(iced::Background::Color(Color {
+                r: 0.10,
+                g: 0.10,
+                b: 0.10,
+                a: 0.75,
+            })),
+            border: iced::Border {
+                color: Color {
+                    r: 0.35,
+                    g: 0.35,
+                    b: 0.35,
+                    a: 1.0,
+                },
+                width: 1.0,
+                radius: 4.0.into(),
             },
-            &tab.visual_style,
-        ))
-        .padding([4, 6]);
+            text_color: Some(Color {
+                r: 0.85,
+                g: 0.85,
+                b: 0.85,
+                a: 1.0,
+            }),
+            ..Default::default()
+        })
+        .padding([4, 8]);
 
         let viewport_mouse = mouse_area(container(
             iced::widget::Space::new().width(Fill).height(Fill),
@@ -443,20 +506,35 @@ impl OpenCADStudio {
                     })
                     .width(Fill)
                     .height(Fill),
-                container(info).width(Fill).height(Fill),
                 selection_overlay,
                 viewport_mouse,
+                // Toggle sits ABOVE the viewport mouse_area so clicks
+                // inside the toggle's bounds reach it instead of the
+                // shader behind it; `opaque` blocks the same clicks from
+                // bubbling further down. Outside the toggle's footprint
+                // the outer Fill container is transparent — viewport
+                // drawing / selection stays unaffected.
+                container(iced::widget::opaque(info))
+                    .width(Fill)
+                    .height(Fill)
+                    .align_x(iced::alignment::Horizontal::Left)
+                    .align_y(iced::alignment::Vertical::Top),
             ]
             .width(Fill)
             .height(Fill)
         };
 
         if self.show_navbar && !tab.is_start {
+            // Anchor the nav toolbar to the vertical centre of the
+            // viewport area, flush against the right edge with a small
+            // gutter, so it stays aligned no matter how tall the
+            // window is.
             let nav = container(overlay::nav_toolbar())
                 .align_right(Fill)
-                .align_top(Fill)
+                .align_y(iced::alignment::Vertical::Center)
+                .height(Fill)
                 .padding(iced::Padding {
-                    top: 148.0,
+                    top: 0.0,
                     right: 8.0,
                     bottom: 0.0,
                     left: 0.0,
@@ -805,7 +883,7 @@ fn paper_canvas_view<'a>(tab: &'a super::document::DocumentTab) -> Element<'a, M
             let w = rect.width.clamp(1.0, canvas_w - x);
             let h = rect.height.clamp(1.0, canvas_h - y);
 
-            let vp_widget = shader(PaperViewportPane::new(scene, vp_handle))
+            let vp_widget = shader(PaperViewportPane::new(scene, vp_handle, tab.render_mode))
                 .width(iced::Length::Fixed(w))
                 .height(iced::Length::Fixed(h));
 

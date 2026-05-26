@@ -98,11 +98,69 @@ pub struct Primitive {
     /// Header.fill_mode (FILLMODE): when false, hatch / wipeout / face3d-fill
     /// uploads short-circuit so the renderer draws only wireframe.
     pub(super) fill_mode: bool,
+    /// Per-view "Wireframe vs Solid" toggle. When `true`, 3D face fills
+    /// are dropped on the upload path so 3D faces draw as edges only.
+    /// Hatch / wipeout uploads are deliberately *not* gated by this flag —
+    /// the user toggle should only affect 3D solids, not 2D fills.
+    pub(super) view_wireframe: bool,
+    /// Whether the active render mode wants 3D mesh fills uploaded. Off
+    /// in `Wireframe2D` / `Wireframe3D`; on for every shaded variant. Set
+    /// at the same point `view_wireframe` is computed so the two stay in
+    /// lock-step for the gating logic in `prepare()`.
+    #[allow(dead_code)]
+    pub(super) mesh_fill: bool,
+    /// Whether the active render mode wants 3D mesh / face edges
+    /// rendered on top of fills. Most shaded modes turn this off; the
+    /// `*WithEdges` variants and the pure wireframes leave it on.
+    #[allow(dead_code)]
+    pub(super) show_3d_edges: bool,
     pub(super) geometry_epoch: u64,
     /// Camera generation captured when this Primitive was assembled. Paired
     /// with `geometry_epoch` so the wire buffers re-upload when the view
     /// changes (frustum culling produces a different wire list).
     pub(super) camera_generation: u64,
+}
+
+/// Flags the render pipeline consumes, derived from
+/// [`acadrust::entities::ViewportRenderMode`]. Each shaded variant fills
+/// 3D faces and meshes; the pure wireframes drop the fill and keep only
+/// edges. `*WithEdges` variants render both. `HiddenLine` is currently
+/// rendered as plain solid (until Phase 2 wires up the depth-only
+/// prepass); `FlatShaded` vs `GouraudShaded` differ in shader uniform
+/// only and produce identical fill flags here.
+#[derive(Clone, Copy, Debug)]
+pub struct RenderModeFlags {
+    pub face3d_fill: bool,
+    pub mesh_fill: bool,
+    pub show_3d_edges: bool,
+}
+
+pub fn render_mode_flags(
+    mode: acadrust::entities::ViewportRenderMode,
+) -> RenderModeFlags {
+    use acadrust::entities::ViewportRenderMode as M;
+    match mode {
+        M::Wireframe2D | M::Wireframe3D => RenderModeFlags {
+            face3d_fill: false,
+            mesh_fill: false,
+            show_3d_edges: true,
+        },
+        M::HiddenLine => RenderModeFlags {
+            face3d_fill: true,
+            mesh_fill: true,
+            show_3d_edges: true,
+        },
+        M::FlatShaded | M::GouraudShaded => RenderModeFlags {
+            face3d_fill: true,
+            mesh_fill: true,
+            show_3d_edges: false,
+        },
+        M::FlatShadedWithEdges | M::GouraudShadedWithEdges => RenderModeFlags {
+            face3d_fill: true,
+            mesh_fill: true,
+            show_3d_edges: true,
+        },
+    }
 }
 
 // ── shader::Primitive impl ────────────────────────────────────────────────
@@ -132,6 +190,11 @@ impl shader::Primitive for Primitive {
         pipeline.upload_uniforms(queue, &self.uniforms);
         let cur_key = (self.geometry_epoch, self.camera_generation);
         let fill_mode = self.fill_mode;
+        // 3D face fill requires *both* the doc-level FILLMODE *and* the
+        // per-view Solid toggle. Hatches / wipeouts deliberately ignore
+        // the view toggle so 2D fills stay on even when the user picks
+        // the Wireframe overlay style.
+        let face3d_fill_active = fill_mode && !self.view_wireframe;
         if cur_key != pipeline.cached_epoch {
             // Static buffers (hatches/images/meshes) only need refresh on a
             // real geometry change, not on every camera tick.
@@ -149,12 +212,15 @@ impl shader::Primitive for Primitive {
             // Wires re-upload on every camera change because the visible
             // subset shifts under frustum culling.
             pipeline.upload_wires(device, &self.wires[..]);
-            if fill_mode {
-                pipeline.upload_face3d(device, &self.face3d_wires[..], &self.wires[..]);
-            } else {
-                // Edges still need to draw, but no fill_tris are forwarded.
-                pipeline.upload_face3d(device, &self.face3d_wires[..], &[]);
-            }
+            // `wireframe_only=true` keeps the face3d edge buffer but
+            // drops the fill — that's the on-screen result of toggling
+            // the render mode to Wireframe2D / Wireframe3D.
+            pipeline.upload_face3d(
+                device,
+                &self.face3d_wires[..],
+                &self.wires[..],
+                !face3d_fill_active,
+            );
             pipeline.cached_epoch = cur_key;
         }
         pipeline.compute_wire_scissors(self.uniforms.view_proj, clip_size.width, clip_size.height);
@@ -337,7 +403,10 @@ impl Scene {
         hover_region: Option<usize>,
         bounds: Rectangle,
         show_viewcube: bool,
+        render_mode: acadrust::entities::ViewportRenderMode,
     ) -> Primitive {
+        let flags = render_mode_flags(render_mode);
+        let view_wireframe = !flags.face3d_fill;
         let cam = self.camera.borrow();
         self.selection.borrow_mut().vp_size = (bounds.width, bounds.height);
         // Record the active widget's aspect so view_world_aabb() can compute
@@ -379,6 +448,9 @@ impl Scene {
             bg_color,
             show_viewcube,
             fill_mode: self.document.header.fill_mode,
+            view_wireframe,
+            mesh_fill: flags.mesh_fill,
+            show_3d_edges: flags.show_3d_edges,
             geometry_epoch: self.geometry_epoch,
             camera_generation: self.camera_generation,
         }
@@ -391,10 +463,13 @@ impl Scene {
         vp_handle: Handle,
         hover_region: Option<usize>,
         bounds: Rectangle,
+        render_mode: acadrust::entities::ViewportRenderMode,
     ) -> Primitive {
+        let flags = render_mode_flags(render_mode);
+        let view_wireframe = !flags.face3d_fill;
         let cam = match self.camera_for_viewport(vp_handle) {
             Some(c) => c,
-            None => return self.build_primitive(hover_region, bounds, false),
+            None => return self.build_primitive(hover_region, bounds, false, render_mode),
         };
 
         let base_arc = self.model_wires_for_viewport_arc(vp_handle);
@@ -423,6 +498,9 @@ impl Scene {
             bg_color: self.bg_color,
             show_viewcube: false,
             fill_mode: self.document.header.fill_mode,
+            view_wireframe,
+            mesh_fill: flags.mesh_fill,
+            show_3d_edges: flags.show_3d_edges,
             geometry_epoch: self.geometry_epoch,
             camera_generation: self.camera_generation,
         }
@@ -435,8 +513,11 @@ impl Scene {
         vp_handle: Handle,
         hover_region: Option<usize>,
         bounds: Rectangle,
+        render_mode: acadrust::entities::ViewportRenderMode,
     ) -> PaperViewportPrimitive {
-        PaperViewportPrimitive(self.build_viewport_primitive(vp_handle, hover_region, bounds))
+        PaperViewportPrimitive(
+            self.build_viewport_primitive(vp_handle, hover_region, bounds, render_mode),
+        )
     }
 
     /// Update viewcube hover state from cursor position within `bounds`.
