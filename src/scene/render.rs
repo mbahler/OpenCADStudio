@@ -114,6 +114,10 @@ pub struct Primitive {
     /// `*WithEdges` variants and the pure wireframes leave it on.
     #[allow(dead_code)]
     pub(super) show_3d_edges: bool,
+    /// HiddenLine routes 3D fills through a depth-only prepass so edges
+    /// occluded by closer geometry are culled by the LessEqual depth
+    /// test on the wire passes that follow.
+    pub(super) hidden_line: bool,
     pub(super) geometry_epoch: u64,
     /// Camera generation captured when this Primitive was assembled. Paired
     /// with `geometry_epoch` so the wire buffers re-upload when the view
@@ -124,15 +128,16 @@ pub struct Primitive {
 /// Flags the render pipeline consumes, derived from
 /// [`acadrust::entities::ViewportRenderMode`]. Each shaded variant fills
 /// 3D faces and meshes; the pure wireframes drop the fill and keep only
-/// edges. `*WithEdges` variants render both. `HiddenLine` is currently
-/// rendered as plain solid (until Phase 2 wires up the depth-only
-/// prepass); `FlatShaded` vs `GouraudShaded` differ in shader uniform
-/// only and produce identical fill flags here.
+/// edges. `*WithEdges` variants render both. HiddenLine uses a depth
+/// prepass: face/mesh fills are uploaded but routed through depth-only
+/// pipelines so hidden edges drop out. `FlatShaded` vs `GouraudShaded`
+/// differ in shader uniform only and produce identical fill flags here.
 #[derive(Clone, Copy, Debug)]
 pub struct RenderModeFlags {
     pub face3d_fill: bool,
     pub mesh_fill: bool,
     pub show_3d_edges: bool,
+    pub hidden_line: bool,
 }
 
 pub fn render_mode_flags(
@@ -144,21 +149,25 @@ pub fn render_mode_flags(
             face3d_fill: false,
             mesh_fill: false,
             show_3d_edges: true,
+            hidden_line: false,
         },
         M::HiddenLine => RenderModeFlags {
             face3d_fill: true,
             mesh_fill: true,
             show_3d_edges: true,
+            hidden_line: true,
         },
         M::FlatShaded | M::GouraudShaded => RenderModeFlags {
             face3d_fill: true,
             mesh_fill: true,
             show_3d_edges: false,
+            hidden_line: false,
         },
         M::FlatShadedWithEdges | M::GouraudShadedWithEdges => RenderModeFlags {
             face3d_fill: true,
             mesh_fill: true,
             show_3d_edges: true,
+            hidden_line: false,
         },
     }
 }
@@ -251,7 +260,14 @@ impl shader::Primitive for Primitive {
         // the draw path so meshes use the wireframe pipeline + the
         // pre-built triangle-edge index buffer.
         let mesh_wireframe = !self.mesh_fill;
-        pipeline.render(encoder, target, *clip, self.bg_color, mesh_wireframe);
+        pipeline.render(
+            encoder,
+            target,
+            *clip,
+            self.bg_color,
+            mesh_wireframe,
+            self.hidden_line,
+        );
         if self.show_viewcube {
             pipeline.viewcube.render(encoder, target, *clip);
         }
@@ -455,6 +471,7 @@ impl Scene {
             view_wireframe,
             mesh_fill: flags.mesh_fill,
             show_3d_edges: flags.show_3d_edges,
+            hidden_line: flags.hidden_line,
             geometry_epoch: self.geometry_epoch,
             camera_generation: self.camera_generation,
         }
@@ -505,6 +522,7 @@ impl Scene {
             view_wireframe,
             mesh_fill: flags.mesh_fill,
             show_3d_edges: flags.show_3d_edges,
+            hidden_line: flags.hidden_line,
             geometry_epoch: self.geometry_epoch,
             camera_generation: self.camera_generation,
         }
