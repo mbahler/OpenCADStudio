@@ -4,21 +4,52 @@ use acadrust::tables::Ucs;
 
 // ── Coordinate parsing ─────────────────────────────────────────────────────
 
-/// Parse a typed coordinate string into a world-space Vec3.
+/// How a typed coordinate should be interpreted relative to the last
+/// input point.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum CoordKind {
+    /// `@x,y` prefix — offset from the last input point.
+    Relative,
+    /// `#x,y` prefix — world/UCS absolute, overriding DYN.
+    Absolute,
+    /// No prefix — the caller decides (DYN on → relative, off → absolute).
+    Default,
+}
+
+/// Parse a typed coordinate string into a Vec3 plus its interpretation.
 /// Accepts "x,y"   → Vec3(x, y, 0)
 ///         "x,y,z" → Vec3(x, y, z)
-/// Separators: comma or semicolon; decimal point or decimal comma.
-pub(super) fn parse_coord(text: &str) -> Option<glam::Vec3> {
-    let parts: Vec<f32> = text
+/// A leading `@` marks the value relative to the last point; a leading
+/// `#` forces absolute. Separators: comma or semicolon.
+pub(super) fn parse_coord(text: &str) -> Option<(glam::Vec3, CoordKind)> {
+    let trimmed = text.trim();
+    let (kind, rest) = if let Some(r) = trimmed.strip_prefix('@') {
+        (CoordKind::Relative, r)
+    } else if let Some(r) = trimmed.strip_prefix('#') {
+        (CoordKind::Absolute, r)
+    } else {
+        (CoordKind::Default, trimmed)
+    };
+    let parts: Vec<f32> = rest
         .split(|c| c == ',' || c == ';')
-        .map(|s| s.trim().replace(',', "."))
+        .map(|s| s.trim())
         .filter_map(|s| s.parse().ok())
         .collect();
     match parts.as_slice() {
-        [x, y] => Some(glam::Vec3::new(*x, *y, 0.0)),
-        [x, y, z] => Some(glam::Vec3::new(*x, *y, *z)),
+        [x, y] => Some((glam::Vec3::new(*x, *y, 0.0), kind)),
+        [x, y, z] => Some((glam::Vec3::new(*x, *y, *z), kind)),
         _ => None,
     }
+}
+
+/// Rotate a UCS-local offset into WCS without applying the origin
+/// translation — used for relative coordinate entry, where only the
+/// axis orientation matters, not the UCS origin.
+pub(super) fn ucs_rotate_vec(offset: glam::Vec3, ucs: &Ucs) -> glam::Vec3 {
+    let x = glam::Vec3::new(ucs.x_axis.x as f32, ucs.x_axis.y as f32, ucs.x_axis.z as f32);
+    let y = glam::Vec3::new(ucs.y_axis.x as f32, ucs.y_axis.y as f32, ucs.y_axis.z as f32);
+    let z = ucs_z_axis(ucs);
+    x * offset.x + y * offset.y + z * offset.z
 }
 
 // ── UCS ↔ WCS transforms ───────────────────────────────────────────────────
@@ -70,16 +101,6 @@ pub(super) fn ucs_rotated_z(origin: glam::Vec3, angle_z: f32) -> Ucs {
     ucs.x_axis = acadrust::types::Vector3::new(cos, sin, 0.0);
     ucs.y_axis = acadrust::types::Vector3::new(-sin, cos, 0.0);
     ucs
-}
-
-pub(super) fn angle_close(a: f32, b: f32, tol: f32) -> bool {
-    let diff = (a - b).rem_euclid(std::f32::consts::TAU);
-    let diff = if diff > std::f32::consts::PI {
-        diff - std::f32::consts::TAU
-    } else {
-        diff
-    };
-    diff.abs() < tol
 }
 
 // ── Grid plane detection ───────────────────────────────────────────────────

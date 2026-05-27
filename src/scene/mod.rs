@@ -2211,13 +2211,6 @@ impl Scene {
         self.camera.borrow().view_rotation_mat()
     }
 
-    /// Return (yaw, pitch) of the active viewport's camera, or None if PSPACE.
-    pub fn active_viewport_yaw_pitch(&self) -> Option<(f32, f32)> {
-        let h = self.active_viewport?;
-        let cam = self.camera_for_viewport(h)?;
-        Some((cam.yaw, cam.pitch))
-    }
-
     /// Return the handle of the user viewport whose bounding rectangle contains
     /// the given paper-space point, or `None` if no viewport matches.
     pub fn viewport_at_paper_point(&self, px: f32, py: f32) -> Option<Handle> {

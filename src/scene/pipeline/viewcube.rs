@@ -83,54 +83,6 @@ impl CubeRegion {
         glam::Vec3::new(c[0], c[1], c[2]).normalize_or(glam::Vec3::Z)
     }
 
-    /// Returns `(yaw, pitch, roll)` for the canonical camera orientation
-    /// pointed at this region.
-    ///
-    /// `yaw` (rotate around world Z) and `pitch` (tilt toward world Z)
-    /// place the camera on the right side of the cube; `roll` rotates
-    /// around the camera's view axis so edge views land with the edge
-    /// vertical on screen instead of horizontal. Faces and corners
-    /// keep `roll = 0` (world up stays up).
-    pub fn snap_angles(self) -> (f32, f32, f32) {
-        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
-        let iso = (1.0_f32 / 2.0_f32.sqrt()).atan();
-        // For the 8 horizontal-cube edges (top + bottom rings), roll by
-        // ±π/2 around the camera's view axis so the edge sits vertical
-        // on screen — TOP face on one half, the side face on the other.
-        // The 4 vertical edges (FRONT-RIGHT etc.) already run along Z
-        // and read vertical with roll = 0.
-        let r = FRAC_PI_2;
-        match self.id() {
-            0 => (0.0, FRAC_PI_2, 0.0),
-            1 => (0.0, -FRAC_PI_2, 0.0),
-            2 => (0.0, 0.0, 0.0),              // FRONT
-            3 => (PI, 0.0, 0.0),               // BACK
-            4 => (FRAC_PI_2, 0.0, 0.0),        // RIGHT
-            5 => (-FRAC_PI_2, 0.0, 0.0),       // LEFT
-            6 => (0.0, FRAC_PI_4, r),          // EDGE_TOP_FRONT
-            7 => (PI, FRAC_PI_4, r),           // EDGE_TOP_BACK
-            8 => (FRAC_PI_2, FRAC_PI_4, r),    // EDGE_TOP_RIGHT
-            9 => (-FRAC_PI_2, FRAC_PI_4, r),   // EDGE_TOP_LEFT
-            10 => (0.0, -FRAC_PI_4, r),        // EDGE_BOT_FRONT
-            11 => (PI, -FRAC_PI_4, r),         // EDGE_BOT_BACK
-            12 => (FRAC_PI_2, -FRAC_PI_4, r),  // EDGE_BOT_RIGHT
-            13 => (-FRAC_PI_2, -FRAC_PI_4, r), // EDGE_BOT_LEFT
-            14 => (FRAC_PI_4, 0.0, 0.0),       // EDGE_FRONT_RIGHT
-            15 => (-FRAC_PI_4, 0.0, 0.0),      // EDGE_FRONT_LEFT
-            16 => (PI * 0.75, 0.0, 0.0),       // EDGE_BACK_RIGHT
-            17 => (-PI * 0.75, 0.0, 0.0),      // EDGE_BACK_LEFT
-            18 => (FRAC_PI_4, iso, 0.0),       // CORNER_TPF_R
-            19 => (-FRAC_PI_4, iso, 0.0),      // CORNER_TPF_L
-            20 => (PI * 0.75, iso, 0.0),       // CORNER_TBK_R
-            21 => (-PI * 0.75, iso, 0.0),      // CORNER_TBK_L
-            22 => (FRAC_PI_4, -iso, 0.0),      // CORNER_BTF_R
-            23 => (-FRAC_PI_4, -iso, 0.0),     // CORNER_BTF_L
-            24 => (PI * 0.75, -iso, 0.0),      // CORNER_BBK_R
-            25 => (-PI * 0.75, -iso, 0.0),     // CORNER_BBK_L
-            _ => (0.0, 0.0, 0.0),
-        }
-    }
-
     pub fn opposite(self) -> CubeRegion {
         match self {
             CubeRegion::Face(FACE_TOP) => CubeRegion::Face(FACE_BOTTOM),

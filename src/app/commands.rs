@@ -3256,8 +3256,10 @@ impl OpenCADStudio {
                     // UCS ORIGIN x,y,z  — shift the active UCS origin, keep axes
                     "ORIGIN" | "O" => {
                         let coord_str = parts.get(2).copied().unwrap_or("");
-                        if let Some(pt) = super::helpers::parse_coord(coord_str) {
-                            // `pt` is in current UCS space; convert to WCS
+                        if let Some((pt, _)) = super::helpers::parse_coord(coord_str) {
+                            // `pt` is in current UCS space; convert to WCS.
+                            // The @/# relative-coordinate prefix is ignored
+                            // here — a UCS origin is always absolute.
                             let wcs_origin = if let Some(ref ucs) = self.tabs[i].active_ucs {
                                 ucs_to_wcs(pt, ucs)
                             } else {

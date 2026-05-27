@@ -1,5 +1,6 @@
 use super::helpers::{
-    angle_close, ortho_constrain, parse_coord, polar_constrain, ucs_to_wcs, ucs_z_axis,
+    ortho_constrain, parse_coord, polar_constrain, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis,
+    CoordKind,
 };
 use super::{Message, OpenCADStudio, POLY_START_DELAY_MS};
 use crate::modules::ModuleEvent;
@@ -960,13 +961,40 @@ impl OpenCADStudio {
                         return Task::none();
                     }
 
-                    if let Some(ucs_pt) = parse_coord(&text) {
-                        // Typed coordinates are in active UCS space; convert to WCS.
-                        let wcs_pt = if let Some(ref ucs) = self.tabs[i].active_ucs {
-                            ucs_to_wcs(ucs_pt, ucs)
-                        } else {
-                            ucs_pt
+                    if let Some((coord, kind)) = parse_coord(&text) {
+                        // Resolve relative vs absolute. `@` forces relative,
+                        // `#` forces absolute, no prefix follows DYN: when
+                        // dynamic input is on, bare coordinates are relative
+                        // to the last point (issue #26).
+                        // `@` forces relative, `#` forces absolute, no
+                        // prefix follows DYN (on → relative). The very
+                        // first point has no reference, so relative falls
+                        // back to absolute.
+                        let want_relative = match kind {
+                            CoordKind::Relative => true,
+                            CoordKind::Absolute => false,
+                            CoordKind::Default => self.dyn_input,
                         };
+                        let ucs = self.tabs[i].active_ucs.clone();
+                        let wcs_pt = match (want_relative, self.last_point) {
+                            (true, Some(base)) => {
+                                // Offset from the last point, rotated by the
+                                // UCS axes (no origin translation).
+                                let offset = match &ucs {
+                                    Some(u) => ucs_rotate_vec(coord, u),
+                                    None => coord,
+                                };
+                                base + offset
+                            }
+                            _ => {
+                                // Absolute: typed coordinates are in active UCS.
+                                match &ucs {
+                                    Some(u) => ucs_to_wcs(coord, u),
+                                    None => coord,
+                                }
+                            }
+                        };
+                        self.last_point = Some(wcs_pt);
                         let result = self.tabs[i].active_cmd.as_mut().map(|c| c.on_point(wcs_pt));
                         if let Some(r) = result {
                             return self.apply_cmd_result(r);
