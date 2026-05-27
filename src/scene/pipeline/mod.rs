@@ -1835,8 +1835,38 @@ fn create_msaa_texture(
     })
 }
 
-impl iced::widget::shader::Pipeline for Pipeline {
+/// Holds one inner `Pipeline` per viewport drawn this frame. A single
+/// shader widget owns one `MultiPipeline`; the unified renderer grows the
+/// `inners` vector to match the viewport count and draws each into its own
+/// screen rectangle. Inner `Pipeline` code (upload / LOD / render / blit)
+/// is unchanged — it just runs once per viewport.
+pub struct MultiPipeline {
+    pub(crate) inners: Vec<Pipeline>,
+    format: wgpu::TextureFormat,
+}
+
+impl MultiPipeline {
+    /// Ensure exactly `n` (≥1) inner pipelines exist, creating any missing
+    /// ones. Extra pipelines beyond `n` are dropped.
+    pub(crate) fn ensure_len(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        n: usize,
+    ) {
+        let n = n.max(1);
+        while self.inners.len() < n {
+            self.inners.push(Pipeline::new(device, queue, self.format));
+        }
+        self.inners.truncate(n);
+    }
+}
+
+impl iced::widget::shader::Pipeline for MultiPipeline {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        Self::new(device, queue, format)
+        Self {
+            inners: vec![Pipeline::new(device, queue, format)],
+            format,
+        }
     }
 }

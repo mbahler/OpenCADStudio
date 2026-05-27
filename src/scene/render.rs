@@ -12,19 +12,19 @@ use iced::{Rectangle, Size};
 use std::sync::Arc;
 
 use super::pipeline::viewcube::{hover_id, VIEWCUBE_PX};
-use super::pipeline::Pipeline;
+use super::pipeline::MultiPipeline;
 use super::tess_util;
 use super::{HatchModel, ImageModel, MeshLodSet, Scene, Uniforms, WireModel};
 
 // ── PaperViewportPipeline / PaperViewportPrimitive ────────────────────────
 //
-// Newtype wrappers around Pipeline / Primitive so that the active-MSPACE
+// Newtype wrappers around MultiPipeline / Primitive so that the active-MSPACE
 // viewport widget gets its own Iced storage entry (keyed by TypeId of the
 // Pipeline type).  This prevents the shared-pipeline prepare() overwrite
-// that occurs when PaperSheet and the viewport widget both use `Pipeline`.
+// that occurs when PaperSheet and the viewport widget both use the same type.
 
 /// Dedicated pipeline for the MSPACE active-viewport shader widget.
-pub struct PaperViewportPipeline(pub(super) Pipeline);
+pub struct PaperViewportPipeline(pub(super) MultiPipeline);
 
 impl iced::widget::shader::Pipeline for PaperViewportPipeline {
     fn new(
@@ -32,7 +32,9 @@ impl iced::widget::shader::Pipeline for PaperViewportPipeline {
         queue: &iced::wgpu::Queue,
         format: iced::wgpu::TextureFormat,
     ) -> Self {
-        Self(Pipeline::new(device, queue, format))
+        Self(<MultiPipeline as iced::widget::shader::Pipeline>::new(
+            device, queue, format,
+        ))
     }
 }
 
@@ -76,8 +78,21 @@ pub struct CameraState {
 
 // ── GPU primitive ─────────────────────────────────────────────────────────
 
+/// Normalized rectangle covering the whole widget — used for a single
+/// full-window viewport (Model view or active paper viewport).
+const FULL_VIEWPORT_RECT: Rectangle = Rectangle {
+    x: 0.0,
+    y: 0.0,
+    width: 1.0,
+    height: 1.0,
+};
+
+/// Everything needed to render one viewport: its geometry, camera, render
+/// mode, and the screen rectangle it occupies. The unified renderer carries
+/// a `Vec<ViewportData>` (one per tiled / floating viewport); each gets its
+/// own inner `Pipeline` instance drawn into its own rectangle.
 #[derive(Debug)]
-pub struct Primitive {
+pub struct ViewportData {
     pub(super) wires: Arc<Vec<WireModel>>,
     /// 3DFACE entity wires — separated so they are uploaded to the dedicated
     /// face3d pipeline (fill + batched edges) instead of N individual WireGpu.
@@ -92,8 +107,6 @@ pub struct Primitive {
     /// Used by the ViewCube pipeline — no gimbal lock.
     pub(super) cam_rotation: Mat4,
     pub(super) hover_region: Option<usize>,
-    /// Background color used to clear the MSAA buffer at the start of each frame.
-    pub(super) bg_color: [f32; 4],
     pub(super) show_viewcube: bool,
     /// Header.fill_mode (FILLMODE): when false, hatch / wipeout / face3d-fill
     /// uploads short-circuit so the renderer draws only wireframe.
@@ -121,6 +134,20 @@ pub struct Primitive {
     /// with `geometry_epoch` so the wire buffers re-upload when the view
     /// changes (frustum culling produces a different wire list).
     pub(super) camera_generation: u64,
+    /// Screen rectangle this viewport fills, **normalized** to the widget
+    /// bounds (each component in 0..1). A single full-widget view is
+    /// `(0, 0, 1, 1)`; tiled / floating viewports are sub-rectangles.
+    /// Normalized form lets `render()` derive the physical sub-clip from
+    /// the surface clip without needing the scale factor.
+    pub(super) screen_rect: Rectangle,
+}
+
+#[derive(Debug)]
+pub struct Primitive {
+    /// One entry per viewport drawn this frame (≥1).
+    pub(super) viewports: Vec<ViewportData>,
+    /// Background color used to clear each viewport's MSAA buffer.
+    pub(super) bg_color: [f32; 4],
 }
 
 /// Flags the render pipeline consumes, derived from
@@ -196,11 +223,11 @@ pub fn render_mode_flags(
 // ── shader::Primitive impl ────────────────────────────────────────────────
 
 impl shader::Primitive for Primitive {
-    type Pipeline = Pipeline;
+    type Pipeline = MultiPipeline;
 
     fn prepare(
         &self,
-        pipeline: &mut Pipeline,
+        pipeline: &mut MultiPipeline,
         device: &iced::wgpu::Device,
         queue: &iced::wgpu::Queue,
         bounds: &Rectangle,
@@ -208,90 +235,107 @@ impl shader::Primitive for Primitive {
     ) {
         let phys = viewport.physical_size();
         let full_size = Size::new(phys.width, phys.height);
-        // MSAA and depth textures are sized to the shader widget's clip bounds,
-        // not the full surface — so the MSAA resolve can't overwrite other widgets.
         let scale = viewport.scale_factor() as f32;
-        let clip_size = Size::new(
-            (bounds.width * scale).ceil() as u32,
-            (bounds.height * scale).ceil() as u32,
-        );
-        pipeline.ensure_depth_texture(device, clip_size);
-        pipeline.viewcube.ensure_depth_texture(device, full_size);
-        pipeline.upload_uniforms(queue, &self.uniforms);
-        let cur_key = (self.geometry_epoch, self.camera_generation);
-        let fill_mode = self.fill_mode;
-        // 3D face fill requires *both* the doc-level FILLMODE *and* the
-        // per-view Solid toggle. Hatches / wipeouts deliberately ignore
-        // the view toggle so 2D fills stay on even when the user picks
-        // the Wireframe overlay style.
-        let face3d_fill_active = fill_mode && !self.view_wireframe;
-        if cur_key != pipeline.cached_epoch {
-            // Static buffers (hatches/images/meshes) only need refresh on a
-            // real geometry change, not on every camera tick.
-            if self.geometry_epoch != pipeline.cached_epoch.0 {
-                if fill_mode {
-                    pipeline.upload_hatches(device, &self.hatches[..]);
-                    pipeline.upload_wipeouts(device, &self.wipeout_hatches[..]);
-                } else {
-                    pipeline.upload_hatches(device, &[]);
-                    pipeline.upload_wipeouts(device, &[]);
+        pipeline.ensure_len(device, queue, self.viewports.len());
+
+        for (i, vp) in self.viewports.iter().enumerate() {
+            let inner = &mut pipeline.inners[i];
+            // Physical MSAA/depth size for this viewport's sub-rect.
+            let clip_size = Size::new(
+                (vp.screen_rect.width * bounds.width * scale).ceil().max(1.0) as u32,
+                (vp.screen_rect.height * bounds.height * scale).ceil().max(1.0) as u32,
+            );
+            inner.ensure_depth_texture(device, clip_size);
+            inner.viewcube.ensure_depth_texture(device, full_size);
+            inner.upload_uniforms(queue, &vp.uniforms);
+            let cur_key = (vp.geometry_epoch, vp.camera_generation);
+            let fill_mode = vp.fill_mode;
+            // 3D face fill requires *both* the doc-level FILLMODE *and* the
+            // per-view Solid toggle. Hatches / wipeouts deliberately ignore
+            // the view toggle so 2D fills stay on even when the user picks
+            // the Wireframe overlay style.
+            let face3d_fill_active = fill_mode && !vp.view_wireframe;
+            if cur_key != inner.cached_epoch {
+                // Static buffers (hatches/images/meshes) only need refresh on
+                // a real geometry change, not on every camera tick.
+                if vp.geometry_epoch != inner.cached_epoch.0 {
+                    if fill_mode {
+                        inner.upload_hatches(device, &vp.hatches[..]);
+                        inner.upload_wipeouts(device, &vp.wipeout_hatches[..]);
+                    } else {
+                        inner.upload_hatches(device, &[]);
+                        inner.upload_wipeouts(device, &[]);
+                    }
+                    inner.upload_images(device, queue, &vp.images[..]);
+                    inner.upload_meshes(device, &vp.meshes[..]);
                 }
-                pipeline.upload_images(device, queue, &self.images[..]);
-                pipeline.upload_meshes(device, &self.meshes[..]);
+                // Wires re-upload on every camera change because the visible
+                // subset shifts under frustum culling.
+                inner.upload_wires(device, &vp.wires[..]);
+                inner.upload_face3d(
+                    device,
+                    &vp.face3d_wires[..],
+                    &vp.wires[..],
+                    !face3d_fill_active,
+                );
+                inner.cached_epoch = cur_key;
             }
-            // Wires re-upload on every camera change because the visible
-            // subset shifts under frustum culling.
-            pipeline.upload_wires(device, &self.wires[..]);
-            // `wireframe_only=true` keeps the face3d edge buffer but
-            // drops the fill — that's the on-screen result of toggling
-            // the render mode to Wireframe2D / Wireframe3D.
-            pipeline.upload_face3d(
-                device,
-                &self.face3d_wires[..],
-                &self.wires[..],
-                !face3d_fill_active,
-            );
-            pipeline.cached_epoch = cur_key;
-        }
-        pipeline.compute_wire_scissors(self.uniforms.view_proj, clip_size.width, clip_size.height);
-        pipeline.compute_wipeout_scissors(self.uniforms.view_proj, clip_size.width, clip_size.height);
-        pipeline.compute_image_scissors(self.uniforms.view_proj, clip_size.width, clip_size.height);
-        pipeline.compute_hatch_lod(queue, self.uniforms.view_proj, clip_size.width, clip_size.height);
-        pipeline.compute_wipeout_lod(self.uniforms.view_proj, clip_size.width, clip_size.height);
-        pipeline.compute_mesh_lod(self.uniforms.view_proj, clip_size.width, clip_size.height);
-        if self.show_viewcube {
-            pipeline.viewcube.upload(
-                queue,
-                self.cam_rotation,
-                bounds.width as u32,
-                bounds.height as u32,
-                self.hover_region,
-            );
+            let vproj = vp.uniforms.view_proj;
+            inner.compute_wire_scissors(vproj, clip_size.width, clip_size.height);
+            inner.compute_wipeout_scissors(vproj, clip_size.width, clip_size.height);
+            inner.compute_image_scissors(vproj, clip_size.width, clip_size.height);
+            inner.compute_hatch_lod(queue, vproj, clip_size.width, clip_size.height);
+            inner.compute_wipeout_lod(vproj, clip_size.width, clip_size.height);
+            inner.compute_mesh_lod(vproj, clip_size.width, clip_size.height);
+            if vp.show_viewcube {
+                inner.viewcube.upload(
+                    queue,
+                    vp.cam_rotation,
+                    (vp.screen_rect.width * bounds.width) as u32,
+                    (vp.screen_rect.height * bounds.height) as u32,
+                    vp.hover_region,
+                );
+            }
         }
     }
 
     fn render(
         &self,
-        pipeline: &Pipeline,
+        pipeline: &MultiPipeline,
         encoder: &mut iced::wgpu::CommandEncoder,
         target: &iced::wgpu::TextureView,
         clip: &Rectangle<u32>,
     ) {
-        // `mesh_fill` is false for Wireframe 2D / Wireframe 3D — flip
-        // the draw path so meshes use the wireframe pipeline + the
-        // pre-built triangle-edge index buffer.
-        let mesh_wireframe = !self.mesh_fill;
-        pipeline.render(
-            encoder,
-            target,
-            *clip,
-            self.bg_color,
-            mesh_wireframe,
-            self.hidden_line,
-            self.show_3d_edges,
-        );
-        if self.show_viewcube {
-            pipeline.viewcube.render(encoder, target, *clip);
+        for (i, vp) in self.viewports.iter().enumerate() {
+            let Some(inner) = pipeline.inners.get(i) else {
+                break;
+            };
+            // Derive this viewport's physical sub-clip from the normalized
+            // screen_rect and the surface clip.
+            let cw = clip.width as f32;
+            let ch = clip.height as f32;
+            let vp_clip = Rectangle {
+                x: clip.x + (vp.screen_rect.x * cw) as u32,
+                y: clip.y + (vp.screen_rect.y * ch) as u32,
+                width: (vp.screen_rect.width * cw).max(1.0) as u32,
+                height: (vp.screen_rect.height * ch).max(1.0) as u32,
+            };
+            // `mesh_fill` is false for Wireframe 2D / Wireframe 3D — flip
+            // the draw path so meshes use the wireframe pipeline + the
+            // pre-built triangle-edge index buffer.
+            let mesh_wireframe = !vp.mesh_fill;
+            inner.render(
+                encoder,
+                target,
+                vp_clip,
+                self.bg_color,
+                mesh_wireframe,
+                vp.hidden_line,
+                vp.show_3d_edges,
+            );
+            if vp.show_viewcube {
+                inner.viewcube.render(encoder, target, vp_clip);
+            }
         }
     }
 }
@@ -480,7 +524,7 @@ impl Scene {
         let mut uniforms = Uniforms::new(&cam, bounds, self.document.header.lineweight_display);
         uniforms.flat_shade = if flags.flat_shade { 1.0 } else { 0.0 };
 
-        Primitive {
+        let data = ViewportData {
             wires: all_wires,
             face3d_wires: Arc::new(face3d_wires),
             hatches: self.hatch_models_arc(),
@@ -490,7 +534,6 @@ impl Scene {
             uniforms,
             cam_rotation: cam.view_rotation_mat(),
             hover_region,
-            bg_color,
             show_viewcube,
             fill_mode: self.document.header.fill_mode,
             view_wireframe,
@@ -499,6 +542,11 @@ impl Scene {
             hidden_line: flags.hidden_line,
             geometry_epoch: self.geometry_epoch,
             camera_generation: self.camera_generation,
+            screen_rect: FULL_VIEWPORT_RECT,
+        };
+        Primitive {
+            viewports: vec![data],
+            bg_color,
         }
     }
 
@@ -541,7 +589,7 @@ impl Scene {
         let mut uniforms = Uniforms::new(&cam, bounds, self.document.header.lineweight_display);
         uniforms.flat_shade = if flags.flat_shade { 1.0 } else { 0.0 };
 
-        Primitive {
+        let data = ViewportData {
             wires: all_wires,
             face3d_wires: Arc::new(face3d_wires),
             hatches: self.hatch_models_arc(),
@@ -551,7 +599,6 @@ impl Scene {
             uniforms,
             cam_rotation: cam.view_rotation_mat(),
             hover_region,
-            bg_color: self.bg_color,
             show_viewcube,
             fill_mode: self.document.header.fill_mode,
             view_wireframe,
@@ -560,6 +607,11 @@ impl Scene {
             hidden_line: flags.hidden_line,
             geometry_epoch: self.geometry_epoch,
             camera_generation: self.camera_generation,
+            screen_rect: FULL_VIEWPORT_RECT,
+        };
+        Primitive {
+            viewports: vec![data],
+            bg_color: self.bg_color,
         }
     }
 
