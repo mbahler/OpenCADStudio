@@ -10,6 +10,10 @@ pub enum SnapHint {
     Quadrant,
     /// Insertion point of text or block.
     Insertion,
+    /// Midpoint of a curve that has one well-defined midpoint (an arc's
+    /// arc-length centre, a spline's `t = 0.5`). Lines / polylines do
+    /// not use this — their midpoints are derived from `key_vertices`.
+    Midpoint,
 }
 
 /// Geometric primitive used by the tangent-snap engine.

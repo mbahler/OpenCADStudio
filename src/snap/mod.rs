@@ -334,6 +334,7 @@ impl Snapper {
                     SnapHint::Node => SnapType::Node,
                     SnapHint::Quadrant => SnapType::Quadrant,
                     SnapHint::Insertion => SnapType::Insertion,
+                    SnapHint::Midpoint => SnapType::Midpoint,
                 };
                 if self.is_on(snap_type) {
                     try_pt(world, snap_type);
@@ -367,24 +368,18 @@ impl Snapper {
         }
 
         // ── Midpoint ───────────────────────────────────────────────────────
+        // Only explicit vertex sets (Line, LwPolyline) contribute per-segment
+        // midpoints. Tessellated curves (Circle, Arc, Ellipse, Spline) emit a
+        // single `SnapHint::Midpoint` snap_pt where one exists — iterating
+        // every chord here would otherwise turn a circle's tessellation into
+        // a haze of false midpoint hits. See #34.
         if self.is_on(SnapType::Midpoint) {
             for wire in wires {
                 if !wire_in_range(wire) {
                     continue;
                 }
                 if !wire.key_vertices.is_empty() {
-                    // Use explicit vertices for accurate per-segment midpoints.
                     for seg in wire.key_vertices.windows(2) {
-                        let a = Vec3::from(seg[0]);
-                        let b = Vec3::from(seg[1]);
-                        if a.distance_squared(b) > 1e-12 {
-                            try_pt((a + b) * 0.5, SnapType::Midpoint);
-                        }
-                    }
-                } else {
-                    // Tessellated curves: midpoint of whole arc (first↔last midpoint skipped
-                    // for closed curves; arcs use their own quadrant snaps instead).
-                    for seg in wire.points.windows(2) {
                         let a = Vec3::from(seg[0]);
                         let b = Vec3::from(seg[1]);
                         if a.distance_squared(b) > 1e-12 {

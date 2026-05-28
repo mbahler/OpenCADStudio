@@ -489,10 +489,10 @@ impl canvas::Program<Message> for SelectionCanvas {
             };
             match snap_type {
                 SnapType::Endpoint => {
-                    let half = 5.0_f32;
+                    let h = 5.0_f32;
                     let rect = canvas::Path::rectangle(
-                        Point::new(sp.x - half, sp.y - half),
-                        Size::new(half * 2.0, half * 2.0),
+                        Point::new(sp.x - h, sp.y - h),
+                        Size::new(h * 2.0, h * 2.0),
                     );
                     frame.stroke(&rect, stroke);
                 }
@@ -506,6 +506,149 @@ impl canvas::Program<Message> for SelectionCanvas {
                     });
                     frame.stroke(&path, stroke);
                 }
+                SnapType::Center => {
+                    let r = 5.5_f32;
+                    let path = canvas::Path::circle(sp, r);
+                    frame.stroke(&path, stroke);
+                }
+                SnapType::Node => {
+                    // Circle with an inscribed X.
+                    let r = 5.5_f32;
+                    let cpath = canvas::Path::circle(sp, r);
+                    frame.stroke(&cpath, stroke.clone());
+                    let d = r * std::f32::consts::FRAC_1_SQRT_2;
+                    let x1 = canvas::Path::new(|b| {
+                        b.move_to(Point::new(sp.x - d, sp.y - d));
+                        b.line_to(Point::new(sp.x + d, sp.y + d));
+                    });
+                    let x2 = canvas::Path::new(|b| {
+                        b.move_to(Point::new(sp.x - d, sp.y + d));
+                        b.line_to(Point::new(sp.x + d, sp.y - d));
+                    });
+                    frame.stroke(&x1, stroke.clone());
+                    frame.stroke(&x2, stroke);
+                }
+                SnapType::Quadrant => {
+                    let r = 6.0_f32;
+                    let path = canvas::Path::new(|b| {
+                        b.move_to(Point::new(sp.x, sp.y - r));
+                        b.line_to(Point::new(sp.x + r, sp.y));
+                        b.line_to(Point::new(sp.x, sp.y + r));
+                        b.line_to(Point::new(sp.x - r, sp.y));
+                        b.close();
+                    });
+                    frame.stroke(&path, stroke);
+                }
+                SnapType::Intersection => {
+                    let r = 5.0_f32;
+                    let p1 = canvas::Path::new(|b| {
+                        b.move_to(Point::new(sp.x - r, sp.y - r));
+                        b.line_to(Point::new(sp.x + r, sp.y + r));
+                    });
+                    let p2 = canvas::Path::new(|b| {
+                        b.move_to(Point::new(sp.x - r, sp.y + r));
+                        b.line_to(Point::new(sp.x + r, sp.y - r));
+                    });
+                    frame.stroke(&p1, stroke.clone());
+                    frame.stroke(&p2, stroke);
+                }
+                SnapType::ApparentIntersection => {
+                    // X like Intersection, framed by a small square so the
+                    // two are visually distinguishable.
+                    let r = 5.0_f32;
+                    let rect = canvas::Path::rectangle(
+                        Point::new(sp.x - r, sp.y - r),
+                        Size::new(r * 2.0, r * 2.0),
+                    );
+                    frame.stroke(&rect, stroke.clone());
+                    let xr = r - 1.5;
+                    let p1 = canvas::Path::new(|b| {
+                        b.move_to(Point::new(sp.x - xr, sp.y - xr));
+                        b.line_to(Point::new(sp.x + xr, sp.y + xr));
+                    });
+                    let p2 = canvas::Path::new(|b| {
+                        b.move_to(Point::new(sp.x - xr, sp.y + xr));
+                        b.line_to(Point::new(sp.x + xr, sp.y - xr));
+                    });
+                    frame.stroke(&p1, stroke.clone());
+                    frame.stroke(&p2, stroke);
+                }
+                SnapType::Insertion => {
+                    // Two overlapping rectangles (a small "tag" glyph).
+                    let r = 5.0_f32;
+                    let inner = canvas::Path::rectangle(
+                        Point::new(sp.x - r * 0.5, sp.y - r),
+                        Size::new(r, r * 2.0),
+                    );
+                    let outer = canvas::Path::rectangle(
+                        Point::new(sp.x - r, sp.y - r * 0.5),
+                        Size::new(r * 2.0, r),
+                    );
+                    frame.stroke(&outer, stroke.clone());
+                    frame.stroke(&inner, stroke);
+                }
+                SnapType::Perpendicular => {
+                    // Right-angle hook in the lower-left quadrant.
+                    let r = 6.0_f32;
+                    let p = canvas::Path::new(|b| {
+                        b.move_to(Point::new(sp.x - r, sp.y - r));
+                        b.line_to(Point::new(sp.x - r, sp.y + r));
+                        b.line_to(Point::new(sp.x + r, sp.y + r));
+                    });
+                    let foot = canvas::Path::new(|b| {
+                        b.move_to(Point::new(sp.x - r, sp.y));
+                        b.line_to(Point::new(sp.x, sp.y));
+                        b.line_to(Point::new(sp.x, sp.y + r));
+                    });
+                    frame.stroke(&p, stroke.clone());
+                    frame.stroke(&foot, stroke);
+                }
+                SnapType::Tangent => {
+                    // Circle with a tangent bar across the top.
+                    let r = 5.5_f32;
+                    let c = canvas::Path::circle(sp, r);
+                    frame.stroke(&c, stroke.clone());
+                    let bar = canvas::Path::new(|b| {
+                        b.move_to(Point::new(sp.x - r, sp.y - r));
+                        b.line_to(Point::new(sp.x + r, sp.y - r));
+                    });
+                    frame.stroke(&bar, stroke);
+                }
+                SnapType::Nearest => {
+                    // Bowtie / hourglass — two opposed triangles meeting at sp.
+                    let r = 5.5_f32;
+                    let path = canvas::Path::new(|b| {
+                        b.move_to(Point::new(sp.x - r, sp.y - r));
+                        b.line_to(Point::new(sp.x + r, sp.y - r));
+                        b.line_to(Point::new(sp.x - r, sp.y + r));
+                        b.line_to(Point::new(sp.x + r, sp.y + r));
+                        b.close();
+                    });
+                    frame.stroke(&path, stroke);
+                }
+                SnapType::Extension => {
+                    // Three dots strung along a tracked direction.
+                    let r = 1.4_f32;
+                    for k in [-7.0_f32, 0.0, 7.0] {
+                        let dot = canvas::Path::circle(Point::new(sp.x + k, sp.y), r);
+                        frame.fill(&dot, yellow);
+                    }
+                }
+                SnapType::Parallel => {
+                    // Two short parallel diagonal bars.
+                    let r = 6.0_f32;
+                    let off = 3.0_f32;
+                    let b1 = canvas::Path::new(|b| {
+                        b.move_to(Point::new(sp.x - r - off, sp.y + r));
+                        b.line_to(Point::new(sp.x + r - off, sp.y - r));
+                    });
+                    let b2 = canvas::Path::new(|b| {
+                        b.move_to(Point::new(sp.x - r + off, sp.y + r));
+                        b.line_to(Point::new(sp.x + r + off, sp.y - r));
+                    });
+                    frame.stroke(&b1, stroke.clone());
+                    frame.stroke(&b2, stroke);
+                }
                 SnapType::Grid => {
                     let arm = 4.0_f32;
                     let h = canvas::Path::new(|b| {
@@ -518,18 +661,6 @@ impl canvas::Program<Message> for SelectionCanvas {
                     });
                     frame.stroke(&h, stroke.clone());
                     frame.stroke(&v, stroke);
-                }
-                // Other snap types use the same diamond marker.
-                _ => {
-                    let r = 5.0_f32;
-                    let path = canvas::Path::new(|b| {
-                        b.move_to(Point::new(sp.x, sp.y - r));
-                        b.line_to(Point::new(sp.x + r, sp.y));
-                        b.line_to(Point::new(sp.x, sp.y + r));
-                        b.line_to(Point::new(sp.x - r, sp.y));
-                        b.close();
-                    });
-                    frame.stroke(&path, stroke);
                 }
             }
         }

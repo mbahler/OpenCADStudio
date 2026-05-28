@@ -40,6 +40,10 @@ fn to_truck(arc: &Arc) -> TruckEntity {
     };
 
     let cv = Vec3::new(cwx as f32, cwy as f32, cwz as f32);
+    // Arc-length centre — one well-defined midpoint snap. Circles and
+    // ellipses (closed curves) deliberately don't emit this; see #34.
+    let mid_pt_3 = arc_pt(mid_a);
+    let mv = Vec3::new(mid_pt_3.x as f32, mid_pt_3.y as f32, mid_pt_3.z as f32);
     let tangent = TangentGeom::Circle {
         center: [cwx as f32, cwy as f32, cwz as f32],
         radius: r as f32,
@@ -73,7 +77,7 @@ fn to_truck(arc: &Arc) -> TruckEntity {
         pts.push([pe.x + t * nx, pe.y + t * ny, pe.z + t * nz]);
         return TruckEntity {
             object: TruckObject::Lines(pts),
-            snap_pts: vec![(cv, SnapHint::Center)],
+            snap_pts: vec![(cv, SnapHint::Center), (mv, SnapHint::Midpoint)],
             tangent_geoms: vec![tangent],
             key_vertices: vec![],
             fill_tris: vec![],
@@ -88,7 +92,7 @@ fn to_truck(arc: &Arc) -> TruckEntity {
     let edge = builder::circle_arc(&v_start, &v_end, p_mid);
     TruckEntity {
         object: TruckObject::Curve(edge),
-        snap_pts: vec![(cv, SnapHint::Center)],
+        snap_pts: vec![(cv, SnapHint::Center), (mv, SnapHint::Midpoint)],
         tangent_geoms: vec![tangent],
         key_vertices: vec![],
         fill_tris: vec![],
