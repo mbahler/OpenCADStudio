@@ -2822,6 +2822,15 @@ impl Scene {
         // skip flag in compute_hatch_lod handles frustum + sub-pixel
         // culling at draw time, which keeps the GPU upload set stable
         // across pan/zoom.
+        //
+        // We INCLUDE hatches from blocks other than `current_layout`'s
+        // own block (specifically: paper-layout content viewports want
+        // model-block hatches). Every hatch's `world_origin` is already
+        // baked into the correct block coord-space at
+        // `populate_hatches_from_document` time (offset for model, 0 for
+        // paper), so projecting them through a camera built for the
+        // wrong block lands them outside the frustum and the per-vp
+        // scissor / LOD culls them out — no double-rendering.
         let mut models: Vec<HatchModel> = self
             .hatches
             .iter()
@@ -2830,9 +2839,19 @@ impl Scene {
                     return true;
                 };
                 let c = entity.common();
-                !c.invisible
-                    && !layer_hidden(&c.layer)
-                    && self.belongs_to_visible_block(handle, c.owner_handle, layout_block)
+                if c.invisible || layer_hidden(&c.layer) {
+                    return false;
+                }
+                // Reject block-defn-only hatches (entities owned by a
+                // BLOCK record that's neither model nor a paper layout
+                // block) — they're tessellated separately via Insert
+                // explosion and only the laid-out copies should appear.
+                self.belongs_to_visible_block(handle, c.owner_handle, layout_block)
+                    || self.belongs_to_visible_block(
+                        handle,
+                        c.owner_handle,
+                        self.model_space_block_handle(),
+                    )
             })
             .map(|(&handle, model)| {
                 let entity = self.document.get_entity(handle);
@@ -2959,12 +2978,7 @@ impl Scene {
         } else {
             self.bg_color
         };
-        // Paper-space entities are already in small coordinates — don't shift them.
-        let world_offset = if is_paper {
-            [0.0; 3]
-        } else {
-            self.world_offset
-        };
+        let model_block = self.model_space_block_handle();
         // No per-frame view-cull here: GPU wipeout buffer upload is
         // gated on geometry_epoch only (see render.rs), so any cull at
         // build time would freeze the visible subset at the geometry
@@ -2988,6 +3002,14 @@ impl Scene {
             {
                 continue;
             }
+            // Per-entity world_offset selection so paper-layout content
+            // viewports still see model-block wipeouts at the right local
+            // coordinates (same rationale as hatches).
+            let world_offset = if wo.common.owner_handle == model_block {
+                self.world_offset
+            } else {
+                [0.0; 3]
+            };
             let boundary = Self::wipeout_boundary_2d(wo, world_offset);
             if boundary.len() >= 3 {
                 let mut fill_color = bg_color;
