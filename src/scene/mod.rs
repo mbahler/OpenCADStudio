@@ -4644,12 +4644,30 @@ impl Scene {
             ) else {
                 continue;
             };
+            let is_active = self.active_viewport == Some(h);
+            // Skip the GPU pass for inactive viewports whose screen rect
+            // extends beyond the canvas — the per-viewport pipeline blits
+            // the full MSAA at a u32-saturated (≥0) surface offset, so a
+            // negative offset would paint the content at the canvas
+            // corner instead of where the viewport actually sits. The CPU
+            // projection in PaperCanvas already handles those correctly
+            // clipped to the canvas, so the user simply sees that copy.
+            // The active viewport always renders through the GPU so its
+            // own render mode (Hidden Line, Gouraud, …) still applies.
+            if !is_active
+                && (screen_rect.x < 0.0
+                    || screen_rect.y < 0.0
+                    || screen_rect.x + screen_rect.width > canvas_w
+                    || screen_rect.y + screen_rect.height > canvas_h)
+            {
+                continue;
+            }
             out.push(ViewportInstance {
                 handle: h,
                 screen_rect,
                 camera,
                 render_mode: vp.render_mode,
-                active: self.active_viewport == Some(h),
+                active: is_active,
             });
         }
         out
