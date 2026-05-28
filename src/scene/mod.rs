@@ -552,7 +552,7 @@ pub struct Scene {
     mesh_cache: RefCell<Option<(u64, Arc<Vec<MeshLodSet>>)>>,
     /// Per-viewport wire cache for paper-space rendering.
     /// Maps vp_handle → (geometry_epoch, Arc<Vec<WireModel>>).
-    viewport_wire_cache: RefCell<HashMap<Handle, (u64, Arc<Vec<WireModel>>)>>,
+    viewport_wire_cache: RefCell<HashMap<Handle, ((u64, u32), Arc<Vec<WireModel>>)>>,
     /// Cached tessellation of paper-space layout block entities (title block, annotations, etc.).
     /// Separate from `wire_cache` so paper_canvas_wires() doesn't re-tessellate on every frame.
     /// Keyed by `(geometry_epoch, camera_generation)` — paper view changes
@@ -1207,7 +1207,7 @@ impl Scene {
             None
         };
         let block = self.model_space_block_handle();
-        let arc = Arc::new(self.wires_for_block_culled(block, view_aabb, wpp));
+        let arc = Arc::new(self.wires_for_block_culled(block, view_aabb, wpp, None, None));
         self.model_tile_wire_cache
             .borrow_mut()
             .insert(tile_idx, (key, Arc::clone(&arc)));
@@ -1419,12 +1419,15 @@ impl Scene {
     /// Tessellate all non-invisible entities owned by `block_handle`.
     fn wires_for_block(&self, block_handle: Handle) -> Vec<WireModel> {
         // Default culling is driven by the live `Scene::camera`. Multi-tile
-        // Model layouts call `wires_for_block_culled` directly with each
-        // tile's own camera so the per-tile LOD / frustum cull is independent.
+        // Model layouts and paper-space content viewports call
+        // `wires_for_block_culled` directly with their own per-view cull
+        // parameters so each pane culls independently.
         self.wires_for_block_culled(
             block_handle,
             self.view_world_aabb(),
             self.world_per_pixel(),
+            None,
+            None,
         )
     }
 
@@ -1433,6 +1436,15 @@ impl Scene {
         block_handle: Handle,
         view_aabb: Option<[f32; 4]>,
         wpp: Option<f32>,
+        // Layers frozen specifically through the requesting viewport.
+        // Hidden in addition to the document-level off / frozen flags.
+        // `None` skips the per-viewport check (Model-space callers).
+        frozen_layers: Option<&HashSet<Handle>>,
+        // Paper-space content viewports compute their own annotation
+        // scale from `vp_effective_scale`; the Model-space and paper-
+        // sheet paths use `self.annotation_scale` / 1.0 respectively.
+        // `None` selects the default branch on `current_layout`.
+        anno_scale_override: Option<f32>,
     ) -> Vec<WireModel> {
         use acadrust::objects::ObjectType;
 
@@ -1477,14 +1489,18 @@ impl Scene {
             if matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_)) {
                 return false;
             }
-            if self
-                .document
-                .layers
-                .get(&c.layer)
-                .map(|l| l.flags.off || l.flags.frozen)
-                .unwrap_or(false)
-            {
+            let layer = self.document.layers.get(&c.layer);
+            if layer.map(|l| l.flags.off || l.flags.frozen).unwrap_or(false) {
                 return false;
+            }
+            if let Some(frozen) = frozen_layers {
+                if !frozen.is_empty() {
+                    if let Some(lh) = layer.map(|l| l.handle) {
+                        if frozen.contains(&lh) {
+                            return false;
+                        }
+                    }
+                }
             }
             self.belongs_to_visible_block(e.common().handle, c.owner_handle, block_handle)
         };
@@ -1545,9 +1561,12 @@ impl Scene {
         let doc = &self.document;
         let sel = &self.selected;
         let avp = self.active_viewport;
-        // Paper-space entities live in sheet coordinates (mm), not model-world
-        // coordinates, so world_offset must not be subtracted from them.
-        let woff = if self.current_layout == "Model" {
+        // A paper-space content viewport renders MODEL block entities while
+        // the user is sitting in a paper layout — that path expects
+        // `world_offset` subtraction even though `current_layout != "Model"`.
+        // Decide based on the block being tessellated, not the layout.
+        let is_model_block = block_handle == self.model_space_block_handle();
+        let woff = if is_model_block {
             self.world_offset
         } else {
             [0.0; 3]
@@ -1557,7 +1576,9 @@ impl Scene {
         } else {
             self.paper_bg_color
         };
-        let anno = if self.current_layout == "Model" {
+        let anno = if let Some(a) = anno_scale_override {
+            a
+        } else if self.current_layout == "Model" {
             self.annotation_scale
         } else {
             1.0
@@ -2075,7 +2096,10 @@ impl Scene {
             // ── Use cached tessellation (model_wires_for_viewport_arc) ────
             // This eliminates the per-frame tessellate_one() loop that was here
             // previously; tessellation is now O(1) on navigation frames.
-            let model_wires = self.model_wires_for_viewport_arc(vp_handle);
+            // Pass 0.0 for screen height — the CPU-projection / hit-test
+            // path wants the full-fidelity (no-LOD-stub) wire list,
+            // regardless of paper zoom.
+            let model_wires = self.model_wires_for_viewport_arc(vp_handle, 0.0);
 
             // ── Project and clip wires into viewport ──────────────────────
             let vp_x0 = pcx - hw;
@@ -5286,11 +5310,20 @@ impl Scene {
     }
 
     /// Collect model-space WireModels visible through `vp_handle`, respecting
-    /// global layer visibility and the viewport's per-viewport layer freeze list.
-    fn model_wires_for_viewport(&self, vp_handle: Handle) -> Vec<WireModel> {
+    /// global layer visibility, the viewport's per-viewport layer freeze list,
+    /// and the per-viewport frustum + LOD cull derived from
+    /// `screen_height_px` (the on-paper pixel height of this viewport).
+    fn model_wires_for_viewport(
+        &self,
+        vp_handle: Handle,
+        screen_height_px: f32,
+    ) -> Vec<WireModel> {
         use std::collections::HashSet as HSet;
 
-        let (frozen, vp_anno_scale) = match self.document.get_entity(vp_handle) {
+        let (frozen, vp_anno_scale, vp_aspect, vp_target, vp_ortho_h) = match self
+            .document
+            .get_entity(vp_handle)
+        {
             Some(EntityType::Viewport(vp)) => {
                 let f: HSet<Handle> = vp.frozen_layers.iter().cloned().collect();
                 let vp_scale =
@@ -5300,88 +5333,78 @@ impl Scene {
                 } else {
                     1.0_f32
                 };
-                (f, anno)
+                let aspect = if vp.height > 1e-9 {
+                    (vp.width / vp.height) as f32
+                } else {
+                    1.0_f32
+                };
+                let half_h = (vp.view_height as f32) * 0.5;
+                let target = glam::Vec3::new(
+                    (vp.view_target.x - self.world_offset[0]) as f32,
+                    (vp.view_target.y - self.world_offset[1]) as f32,
+                    (vp.view_target.z - self.world_offset[2]) as f32,
+                );
+                (f, anno, aspect, target, half_h)
             }
-            _ => (HSet::new(), 1.0_f32),
+            _ => (HSet::new(), 1.0_f32, 1.0_f32, glam::Vec3::ZERO, 1.0_f32),
         };
 
-        let model_block = self.model_space_block_handle();
-        let blk_cache = self.block_cache_arc();
-        // The visible background inside a paper-layout content viewport is
-        // the PaperCanvas sheet showing through the transparent shader,
-        // not the model bg. Adapt entity colours to the paper bg in that
-        // case so white wires on a light sheet turn black (and vice
-        // versa). In a Model layout this is unreachable in practice
-        // (active_viewport is a paper concept), but fall back to model bg
-        // just to stay consistent with the rest of the renderer.
-        let bg = if self.current_layout == "Model" {
-            self.bg_color
+        // Per-viewport frustum AABB in the same f32 wire space (already
+        // `world_offset`-subtracted). Matches the margin used by
+        // `view_world_aabb` so pan inertia doesn't pop edges.
+        let half_w = vp_ortho_h * vp_aspect.max(0.01);
+        let margin = 1.25_f32;
+        let view_aabb = Some([
+            vp_target.x - half_w * margin,
+            vp_target.y - vp_ortho_h * margin,
+            vp_target.x + half_w * margin,
+            vp_target.y + vp_ortho_h * margin,
+        ]);
+        // World units per on-screen pixel for LOD substitution + curve
+        // tolerance. Tracks the paper-zoom-driven pixel height the
+        // viewport currently occupies.
+        let wpp = if screen_height_px > 1.0 {
+            Some((2.0 * vp_ortho_h) / screen_height_px)
         } else {
-            self.paper_bg_color
+            None
         };
 
-        self.document
-            .entities()
-            .filter(|e| {
-                let c = e.common();
-                if c.invisible || matches!(e, EntityType::Viewport(_)) {
-                    return false;
-                }
-                if !self.belongs_to_visible_block(c.handle, c.owner_handle, model_block) {
-                    return false;
-                }
-                if self
-                    .document
-                    .layers
-                    .get(&c.layer)
-                    .map(|l| l.flags.off || l.flags.frozen)
-                    .unwrap_or(false)
-                {
-                    return false;
-                }
-                if !frozen.is_empty() {
-                    if let Some(lh) = self.document.layers.get(&c.layer).map(|l| l.handle) {
-                        if frozen.contains(&lh) {
-                            return false;
-                        }
-                    }
-                }
-                true
-            })
-            .flat_map(|e| {
-                // Per-viewport tessellation uses the viewport's own camera —
-                // not the model-space camera — so we don't pass a view_aabb
-                // here. (Viewports are typically small enough that culling
-                // them isn't worth the added complexity.)
-                tessellate_entity(
-                    &self.document,
-                    &self.selected,
-                    self.active_viewport,
-                    self.world_offset,
-                    bg,
-                    vp_anno_scale,
-                    e,
-                    Some(&blk_cache),
-                    None,
-                    None,
-                )
-            })
-            .collect()
+        self.wires_for_block_culled(
+            self.model_space_block_handle(),
+            view_aabb,
+            wpp,
+            Some(&frozen),
+            Some(vp_anno_scale),
+        )
     }
 
-    pub(super) fn model_wires_for_viewport_arc(&self, vp_handle: Handle) -> Arc<Vec<WireModel>> {
+    /// Cached per-paper-viewport tessellation. Each viewport's wpp tracks
+    /// the on-paper pixel height (paper-zoom dependent), so the cache key
+    /// includes a quantized form of that height in addition to the
+    /// geometry epoch — every paper zoom step that actually changes the
+    /// LOD bucket invalidates this viewport's entry.
+    pub(super) fn model_wires_for_viewport_arc(
+        &self,
+        vp_handle: Handle,
+        screen_height_px: f32,
+    ) -> Arc<Vec<WireModel>> {
+        // Drop sub-pixel noise so trivial paper-zoom jitter does not
+        // re-tessellate a 100k-entity drawing every frame; round to an
+        // integer pixel.
+        let height_key = screen_height_px.max(1.0).round() as u32;
+        let key = (self.geometry_epoch, height_key);
         {
             let cache = self.viewport_wire_cache.borrow();
-            if let Some((cached_epoch, ref arc)) = cache.get(&vp_handle) {
-                if *cached_epoch == self.geometry_epoch {
+            if let Some((cached_key, ref arc)) = cache.get(&vp_handle) {
+                if *cached_key == key {
                     return Arc::clone(arc);
                 }
             }
         }
-        let arc = Arc::new(self.model_wires_for_viewport(vp_handle));
+        let arc = Arc::new(self.model_wires_for_viewport(vp_handle, screen_height_px));
         self.viewport_wire_cache
             .borrow_mut()
-            .insert(vp_handle, (self.geometry_epoch, Arc::clone(&arc)));
+            .insert(vp_handle, (key, Arc::clone(&arc)));
         arc
     }
 }

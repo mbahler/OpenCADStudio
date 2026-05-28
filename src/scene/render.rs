@@ -594,7 +594,7 @@ impl Scene {
         } else if inst.handle == acadrust::Handle::NULL {
             self.entity_wires_arc()
         } else {
-            self.model_wires_for_viewport_arc(inst.handle)
+            self.model_wires_for_viewport_arc(inst.handle, full.height)
         };
         let (face3d_wires, other_wires) = split_face3d_wires(&base_arc, &self.document);
         let all_wires = if self.interim_wire.is_none() && self.preview_wires.is_empty() {
