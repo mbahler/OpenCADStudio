@@ -2,6 +2,21 @@ use super::OpenCADStudio;
 use crate::ui;
 
 impl OpenCADStudio {
+    /// Reload the `LayerPanel` cache from the document and push the
+    /// fresh state through to the ribbon dropdown + every other
+    /// layer-aware UI mirror. Use this whenever a command mutates the
+    /// document's layer table directly (LAYOFF / LAYFRZ / LAYLCK …) so
+    /// the panel + dropdown reflect the change. See #39.
+    pub(super) fn refresh_layer_panel(&mut self) {
+        let i = self.active_tab;
+        let doc_layers = self.tabs[i].scene.document.layers.clone();
+        let vp_info = self.tabs[i].scene.viewport_list();
+        self.tabs[i]
+            .layers
+            .sync_with_viewports(&doc_layers, vp_info);
+        self.sync_ribbon_layers();
+    }
+
     pub(super) fn sync_ribbon_layers(&mut self) {
         let i = self.active_tab;
         let active = self.tabs[i].active_layer.clone();

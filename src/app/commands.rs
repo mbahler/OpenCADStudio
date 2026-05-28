@@ -131,7 +131,7 @@ impl OpenCADStudio {
                         }
                     }
                     self.tabs[i].dirty = true;
-                    self.sync_ribbon_layers();
+                    self.refresh_layer_panel();
                     self.command_line.push_info("Layer(s) turned off.");
                 }
             }
@@ -165,7 +165,7 @@ impl OpenCADStudio {
                         }
                     }
                     self.tabs[i].dirty = true;
-                    self.sync_ribbon_layers();
+                    self.refresh_layer_panel();
                     self.command_line.push_info("Layer(s) frozen.");
                 }
             }
@@ -196,7 +196,7 @@ impl OpenCADStudio {
                         }
                     }
                     self.tabs[i].dirty = true;
-                    self.sync_ribbon_layers();
+                    self.refresh_layer_panel();
                     self.command_line.push_info("Layer(s) locked.");
                 }
             }
@@ -215,7 +215,7 @@ impl OpenCADStudio {
                     self.tabs[i].layers.current_layer = layer.clone();
                     self.command_line
                         .push_info(&format!("Current layer set to \"{layer}\"."));
-                    self.sync_ribbon_layers();
+                    self.refresh_layer_panel();
                 }
             }
 
@@ -234,7 +234,7 @@ impl OpenCADStudio {
                     }
                 }
                 self.tabs[i].dirty = true;
-                self.sync_ribbon_layers();
+                self.refresh_layer_panel();
                 self.command_line.push_info("All layers turned on.");
             }
 
@@ -253,7 +253,7 @@ impl OpenCADStudio {
                     }
                 }
                 self.tabs[i].dirty = true;
-                self.sync_ribbon_layers();
+                self.refresh_layer_panel();
                 self.command_line.push_info("All layers thawed.");
             }
 
@@ -283,7 +283,7 @@ impl OpenCADStudio {
                         }
                     }
                     self.tabs[i].dirty = true;
-                    self.sync_ribbon_layers();
+                    self.refresh_layer_panel();
                     self.command_line.push_info("Layer(s) unlocked.");
                 }
             }
@@ -316,7 +316,7 @@ impl OpenCADStudio {
                         }
                     }
                     self.tabs[i].dirty = true;
-                    self.sync_ribbon_layers();
+                    self.refresh_layer_panel();
                     self.command_line
                         .push_info(&format!("LAYISO: isolated {} layer(s).", sel_layers.len()));
                 }
@@ -338,7 +338,7 @@ impl OpenCADStudio {
                     }
                 }
                 self.tabs[i].dirty = true;
-                self.sync_ribbon_layers();
+                self.refresh_layer_panel();
                 self.command_line
                     .push_info("LAYUNISO: all layers restored.");
             }
