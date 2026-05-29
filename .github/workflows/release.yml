@@ -99,14 +99,25 @@ jobs:
           # and light links it into the final .msi.
           $candle = Join-Path $env:WIX "bin\candle.exe"
           $light  = Join-Path $env:WIX "bin\light.exe"
+          # Resolve to absolute paths and pass each `-d<name>=<value>`
+          # as one quoted argument. PowerShell's native-command argument
+          # passing strips unquoted `-d…=…` strings on the `=` sign,
+          # which would otherwise hand candle an empty Source variable
+          # and `target\release\OpenCADStudio.exe` as a stray input
+          # filename.
+          $exePath  = (Resolve-Path target\release\OpenCADStudio.exe).Path
+          $iconPath = (Resolve-Path packaging\windows\AppIcon.ico).Path
+          $wxsPath  = (Resolve-Path packaging\windows\main.wxs).Path
+          $wixObj   = Join-Path $PWD "packaging\windows\main.wixobj"
+          $msiPath  = Join-Path $PWD "OpenCADStudio.msi"
           & $candle -arch x64 `
-            -dVersion=$version `
-            -dSource=target\release\OpenCADStudio.exe `
-            -dIcon=packaging\windows\AppIcon.ico `
-            packaging\windows\main.wxs `
-            -out packaging\windows\main.wixobj
+            "-dVersion=$version" `
+            "-dSource=$exePath" `
+            "-dIcon=$iconPath" `
+            $wxsPath `
+            -out $wixObj
           if ($LASTEXITCODE -ne 0) { throw "candle failed" }
-          & $light packaging\windows\main.wixobj -out OpenCADStudio.msi
+          & $light $wixObj -out $msiPath
           if ($LASTEXITCODE -ne 0) { throw "light failed" }
 
       - name: Upload artifacts to release
