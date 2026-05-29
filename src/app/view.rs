@@ -932,9 +932,20 @@ impl OpenCADStudio {
         } else {
             Subscription::none()
         };
+        // While the cursor sits over a grip, request animation frames
+        // so the multi-functional popup opens even when the user keeps
+        // the mouse perfectly still — `ViewportMove` alone would never
+        // fire again. Auto-stops once the hover clears or the popup is
+        // already open.
+        let grip_dwell = if self.grip_hover.is_some() && self.grip_popup.is_none() {
+            window::frames().map(|_| Message::GripDwellTick)
+        } else {
+            Subscription::none()
+        };
         iced::Subscription::batch([
             frames,
             history_tick,
+            grip_dwell,
             event::listen_with(|ev, status, win_id| {
                 use iced::event::Status;
                 match ev {

@@ -453,6 +453,9 @@ pub enum Message {
     /// User picked an item in the multi-functional grip popup menu —
     /// the index is into `grip_popup.items`.
     GripMenuPick(usize),
+    /// Timer pulse while the cursor is dwelling on a grip; drives the
+    /// dwell-to-popup transition without requiring further mouse motion.
+    GripDwellTick,
     WindowResized(f32, f32),
     /// Enter pressed globally — finalises the active command (no text-input involvement).
     CommandFinalize,

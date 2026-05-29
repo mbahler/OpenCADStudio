@@ -3067,6 +3067,21 @@ impl OpenCADStudio {
                 Task::none()
             }
 
+            Message::GripDwellTick => {
+                let i = self.active_tab;
+                // Reuse the move-time logic — `p` is the last cursor
+                // position the viewport saw, which is also what the
+                // hover state was last set with.
+                let p = self.tabs[i]
+                    .scene
+                    .selection
+                    .borrow()
+                    .last_move_pos
+                    .unwrap_or(self.cursor_pos);
+                self.update_grip_hover(i, p);
+                Task::none()
+            }
+
             Message::GripMenuPick(idx) => {
                 let i = self.active_tab;
                 let Some(popup) = self.grip_popup.take() else {
