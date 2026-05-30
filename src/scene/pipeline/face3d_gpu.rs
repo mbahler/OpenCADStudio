@@ -29,6 +29,10 @@ use iced::wgpu::util::DeviceExt;
 pub struct Face3DVertex {
     pub position: [f32; 3],
     pub color: [f32; 4],
+    /// Normalized draw-order depth in (0,1) for 2D fills / 3DFACE quads;
+    /// applied as a small clip-z bias in the shader. 0.0 for true 3D mesh
+    /// faces (PolyfaceMesh / PolygonMesh) so their real depth is preserved.
+    pub draw_depth: f32,
 }
 
 impl Face3DVertex {
@@ -46,6 +50,11 @@ impl Face3DVertex {
                     offset: 12,
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 28,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32,
                 },
             ],
         }
@@ -84,7 +93,15 @@ impl Face3DGpu {
         face3d_wires: &[WireModel],
         all_wires: &[WireModel],
         keep_3d_mesh_fills: bool,
+        depth_map: &std::collections::HashMap<u64, f32>,
     ) -> Self {
+        let depth_of = |w: &WireModel| -> f32 {
+            w.name
+                .parse::<u64>()
+                .ok()
+                .and_then(|h| depth_map.get(&h).copied())
+                .unwrap_or(0.0)
+        };
         let mut verts_3d: Vec<Face3DVertex> = Vec::with_capacity(face3d_wires.len() * 6);
         let mut verts_2d: Vec<Face3DVertex> = Vec::new();
 
@@ -97,10 +114,12 @@ impl Face3DGpu {
                 }
                 let [r, g, b, a] = wire.color;
                 let fill_color = [r * 0.45, g * 0.45, b * 0.45, a];
+                let depth = depth_of(wire);
                 let p = &wire.key_vertices;
                 let v = |i: usize| Face3DVertex {
                     position: p[i],
                     color: fill_color,
+                    draw_depth: depth,
                 };
                 verts_3d.push(v(0));
                 verts_3d.push(v(1));
@@ -132,18 +151,23 @@ impl Face3DGpu {
                     continue;
                 }
                 let fill_color = [r * 0.45, g * 0.45, b * 0.45, a];
+                // True 3D surface: keep real depth (no draw-order bias) so
+                // hidden-surface shading is preserved.
                 for &position in &wire.fill_tris {
                     verts_3d.push(Face3DVertex {
                         position,
                         color: fill_color,
+                        draw_depth: 0.0,
                     });
                 }
             } else {
                 let fill_color = [r, g, b, a];
+                let depth = depth_of(wire);
                 for &position in &wire.fill_tris {
                     verts_2d.push(Face3DVertex {
                         position,
                         color: fill_color,
+                        draw_depth: depth,
                     });
                 }
             }

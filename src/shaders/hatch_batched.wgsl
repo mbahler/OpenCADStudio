@@ -45,8 +45,13 @@ struct HatchInstance {
     boundary_count:  u32,
     family_offset:   u32,
     family_count:    u32,
-    _pad0:           vec2<u32>,
+    draw_depth:      f32,          // signed (-1,1) draw-order bias; 0 = neutral
+    _pad0:           u32,
 }
+
+// Draw-order depth bias (see wire.wgsl). Higher draw_depth → smaller z →
+// drawn on top, ordering this fill against other entity types.
+const DRAW_ORDER_BIAS: f32 = 0.001;
 
 struct LineFamily {
     cos_a:       f32,
@@ -122,6 +127,7 @@ fn corner_xy(c: u32, aabb: vec4<f32>) -> vec2<f32> {
                           local.y + inst.world_origin.y,
                           0.0);
     o.clip = u.view_proj * vec4<f32>(world, 1.0);
+    o.clip.z = o.clip.z - inst.draw_depth * DRAW_ORDER_BIAS * o.clip.w;
     o.xz = local;
     o.instance_index = v.instance_index;
     return o;

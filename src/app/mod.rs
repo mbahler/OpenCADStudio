@@ -702,6 +702,12 @@ pub enum Message {
     /// Extend the current selection with every entity in the active
     /// layout that matches a selected entity by (type, layer).
     SelectSimilar,
+    // ── Draw Order context menu ─────────────────────────────────────────
+    /// Toggle the Draw Order sub-items in the viewport context menu.
+    DrawOrderSubmenuToggle,
+    /// Begin an interactive reference-object pick to move the current
+    /// selection above (`true`) or below (`false`) the picked object.
+    DrawOrderPickRef(bool),
     /// Open the Quick Select panel. Initialises filters from the current
     /// selection's first entity (type + layer) when one is selected.
     QSelectOpen,

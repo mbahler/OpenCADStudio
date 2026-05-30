@@ -35,7 +35,14 @@ struct InstanceIn {
     @location(6) pattern_length: f32,
     @location(7) pat0:           vec4<f32>,
     @location(8) pat1:           vec4<f32>,
+    @location(9) draw_depth:     f32,
 }
+
+// Draw-order depth bias: shifts clip-space z so 2D entities of different
+// types order against each other through the shared LessEqual depth test.
+// draw_depth is signed (-1,1): front → positive → smaller z → drawn on top;
+// 0.0 = neutral (real depth). Depth32Float gives ample precision.
+const DRAW_ORDER_BIAS: f32 = 0.001;
 
 struct VertexOut {
     @builtin(position)              clip_pos:       vec4<f32>,
@@ -111,6 +118,7 @@ struct VertexOut {
 
     var out: VertexOut;
     out.clip_pos       = final_clip;
+    out.clip_pos.z     = out.clip_pos.z - in.draw_depth * DRAW_ORDER_BIAS * out.clip_pos.w;
     out.color          = in.color;
     out.distance       = mix(in.distance_a, in.distance_b, which_end);
     out.pattern_length = in.pattern_length;

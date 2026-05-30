@@ -35,6 +35,11 @@ pub struct ViewportData {
     /// 3DFACE entity wires — separated so they are uploaded to the dedicated
     /// face3d pipeline (fill + batched edges) instead of N individual WireGpu.
     pub(super) face3d_wires: Arc<Vec<WireModel>>,
+    /// Per-entity normalized draw-order depth (handle.value() → (0,1)), used
+    /// by the wire / face3d pipelines as a clip-z bias. WireModels carry no
+    /// depth field (84 construction sites); the bias is looked up by handle
+    /// at GPU-upload time from this map instead.
+    pub(super) draw_depths: Arc<std::collections::HashMap<u64, f32>>,
     pub(super) hatches: Arc<Vec<HatchModel>>,
     /// Wipeout fills — rendered in a separate pass AFTER wires.
     pub(super) wipeout_hatches: Arc<Vec<HatchModel>>,
@@ -224,12 +229,13 @@ impl shader::Primitive for Primitive {
                 }
                 // Wires re-upload on every camera change because the visible
                 // subset shifts under frustum culling.
-                inner.upload_wires(device, &vp.wires[..]);
+                inner.upload_wires(device, &vp.wires[..], &vp.draw_depths);
                 inner.upload_face3d(
                     device,
                     &vp.face3d_wires[..],
                     &vp.wires[..],
                     !face3d_fill_active,
+                    &vp.draw_depths,
                 );
                 inner.cached_epoch = cur_key;
             }
@@ -645,6 +651,7 @@ impl Scene {
         Some(ViewportData {
             wires: all_wires,
             face3d_wires: Arc::new(face3d_wires),
+            draw_depths: self.draw_depth_map(),
             hatches: self.hatch_models_arc(),
             wipeout_hatches: self.wipeout_models_arc(),
             images: self.images_arc(),

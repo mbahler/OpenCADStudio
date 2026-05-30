@@ -15,6 +15,8 @@ pub struct SelectionState {
     pub poly_crossing: bool,
     pub poly_last_crossing: bool,
     pub context_menu: Option<Point>,
+    /// True while the context menu's Draw Order sub-items are expanded.
+    pub draworder_submenu: bool,
     pub last_move_pos: Option<Point>,
     pub left_down: bool,
     pub left_press_pos: Option<Point>,

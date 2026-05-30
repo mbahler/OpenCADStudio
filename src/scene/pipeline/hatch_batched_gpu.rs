@@ -64,7 +64,10 @@ pub struct HatchInstance {
     pub boundary_count: u32,        //  92
     pub family_offset: u32,         //  96
     pub family_count: u32,          // 100
-    pub _pad0: [u32; 2],            // 104  (pad to 112 = 16-byte stride)
+    /// Signed draw-order depth (-1,1); 0.0 = neutral. Applied as a clip-z
+    /// bias in the vertex shader so this fill orders against other types.
+    pub draw_depth: f32,            // 104
+    pub _pad0: u32,                 // 108  (pad to 112 = 16-byte stride)
 }
 
 const _: () = assert!(std::mem::size_of::<HatchInstance>() == 112);
@@ -274,7 +277,8 @@ impl HatchBatchedGpu {
                     boundary_count,
                     family_offset,
                     family_count,
-                    _pad0: [0; 2],
+                    draw_depth: h.draw_depth,
+                    _pad0: 0,
                 });
                 continue;
             }
@@ -312,7 +316,8 @@ impl HatchBatchedGpu {
                 boundary_count,
                 family_offset,
                 family_count,
-                _pad0: [0; 2],
+                draw_depth: h.draw_depth,
+                _pad0: 0,
             });
         }
 

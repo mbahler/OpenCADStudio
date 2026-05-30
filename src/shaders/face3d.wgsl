@@ -14,8 +14,9 @@ struct Uniforms {
 var<uniform> u: Uniforms;
 
 struct VertexIn {
-    @location(0) position: vec3<f32>,
-    @location(1) color:    vec4<f32>,
+    @location(0) position:   vec3<f32>,
+    @location(1) color:      vec4<f32>,
+    @location(2) draw_depth: f32,
 };
 
 struct VertexOut {
@@ -23,10 +24,15 @@ struct VertexOut {
     @location(0)       color:    vec4<f32>,
 };
 
+// Draw-order depth bias (see wire.wgsl). Signed draw_depth; 0.0 (3D mesh
+// faces) leaves real depth untouched; 2D fills / 3DFACE quads order by rank.
+const DRAW_ORDER_BIAS: f32 = 0.001;
+
 @vertex
 fn vs_main(v: VertexIn) -> VertexOut {
     var out: VertexOut;
     out.clip_pos = u.view_proj * vec4<f32>(v.position, 1.0);
+    out.clip_pos.z = out.clip_pos.z - v.draw_depth * DRAW_ORDER_BIAS * out.clip_pos.w;
     out.color    = v.color;
     return out;
 }

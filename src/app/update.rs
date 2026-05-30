@@ -3006,6 +3006,7 @@ impl OpenCADStudio {
                 if sel.right_down {
                     if !sel.right_dragging {
                         sel.context_menu = sel.last_move_pos;
+                        sel.draworder_submenu = false;
                     }
                     sel.right_down = false;
                     sel.right_press_pos = None;
@@ -3375,6 +3376,29 @@ impl OpenCADStudio {
                     self.tabs[i].scene.erase_entities(&handles);
                     self.tabs[i].dirty = true;
                     self.refresh_properties();
+                }
+                Task::none()
+            }
+
+            Message::DrawOrderSubmenuToggle => {
+                let i = self.active_tab;
+                let mut sel = self.tabs[i].scene.selection.borrow_mut();
+                sel.draworder_submenu = !sel.draworder_submenu;
+                Task::none()
+            }
+
+            Message::DrawOrderPickRef(above) => {
+                let i = self.active_tab;
+                self.tabs[i].scene.selection.borrow_mut().context_menu = None;
+                let to_move: Vec<_> = self.tabs[i].scene.selected.iter().cloned().collect();
+                if to_move.is_empty() {
+                    self.command_line
+                        .push_error("DRAWORDER: select entities first.");
+                } else {
+                    use crate::command::CadCommand;
+                    let cmd = super::commands::DrawOrderRefCommand::new(to_move, above);
+                    self.command_line.push_info(&cmd.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(cmd));
                 }
                 Task::none()
             }

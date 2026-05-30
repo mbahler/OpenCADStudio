@@ -769,7 +769,10 @@ impl OpenCADStudio {
         // the cursor position (canvas-relative) anchors the menu under
         // the cursor instead of drifting into window-relative space.
         if !tab.is_start {
-            let ctx_pos = tab.scene.selection.borrow().context_menu;
+            let (ctx_pos, draworder_open) = {
+                let sel = tab.scene.selection.borrow();
+                (sel.context_menu, sel.draworder_submenu)
+            };
             if let Some(p) = ctx_pos {
                 let has_cmd = tab.active_cmd.is_some();
                 let has_selection = !tab.scene.selected.is_empty();
@@ -781,8 +784,13 @@ impl OpenCADStudio {
                     .take(3)
                     .cloned()
                     .collect();
-                viewport_stack = viewport_stack
-                    .push(viewport_context_menu_overlay(p, has_cmd, has_selection, last_cmds));
+                viewport_stack = viewport_stack.push(viewport_context_menu_overlay(
+                    p,
+                    has_cmd,
+                    has_selection,
+                    last_cmds,
+                    draworder_open,
+                ));
             }
         }
 
@@ -1302,6 +1310,7 @@ fn viewport_context_menu_overlay(
     has_cmd: bool,
     has_selection: bool,
     last_cmds: Vec<String>,
+    draworder_open: bool,
 ) -> Element<'static, Message> {
     const MENU_BG: Color = Color {
         r: 0.17,
@@ -1364,6 +1373,30 @@ fn viewport_context_menu_overlay(
             .into()
     };
 
+    // Indented variant for sub-menu rows (e.g. Draw Order children).
+    let subitem = |label: String, msg: Message| -> Element<'static, Message> {
+        button(text(label).size(12).color(TEXT_COL))
+            .on_press(msg)
+            .style(|_: &Theme, status| button::Style {
+                background: Some(Background::Color(match status {
+                    button::Status::Hovered | button::Status::Pressed => ITEM_HOVER,
+                    _ => Color::TRANSPARENT,
+                })),
+                text_color: TEXT_COL,
+                border: Border::default(),
+                shadow: iced::Shadow::default(),
+                snap: false,
+            })
+            .padding(iced::Padding {
+                top: 4.0,
+                right: 12.0,
+                bottom: 4.0,
+                left: 26.0,
+            })
+            .width(Fill)
+            .into()
+    };
+
     let mut items: Vec<Element<'static, Message>> = Vec::new();
 
     if has_cmd {
@@ -1394,6 +1427,27 @@ fn viewport_context_menu_overlay(
                 "Copy".to_string(),
                 Message::Command("COPY".to_string()),
             ));
+            items.push(sep());
+            let arrow = if draworder_open { "Draw Order  \u{25be}" } else { "Draw Order  \u{25b8}" };
+            items.push(item(arrow.to_string(), Message::DrawOrderSubmenuToggle));
+            if draworder_open {
+                items.push(subitem(
+                    "Bring to Front".to_string(),
+                    Message::Command("DRAWORDER F".to_string()),
+                ));
+                items.push(subitem(
+                    "Send to Back".to_string(),
+                    Message::Command("DRAWORDER B".to_string()),
+                ));
+                items.push(subitem(
+                    "Bring Above Object".to_string(),
+                    Message::DrawOrderPickRef(true),
+                ));
+                items.push(subitem(
+                    "Send Under Object".to_string(),
+                    Message::DrawOrderPickRef(false),
+                ));
+            }
             items.push(sep());
             items.push(item("Select Similar".to_string(), Message::SelectSimilar));
         }

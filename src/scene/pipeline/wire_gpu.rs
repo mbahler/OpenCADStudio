@@ -71,6 +71,9 @@ pub struct WireInstance {
     pub pattern_length: f32,
     pub pat0: [f32; 4],
     pub pat1: [f32; 4],
+    /// Normalized draw-order depth in (0,1); applied as a small clip-z bias
+    /// in the shader so this wire orders against other entity types.
+    pub draw_depth: f32,
 }
 
 impl WireInstance {
@@ -124,6 +127,11 @@ impl WireInstance {
                     shader_location: 8,
                     format: wgpu::VertexFormat::Float32x4,
                 }, // pat1
+                wgpu::VertexAttribute {
+                    offset: 76,
+                    shader_location: 9,
+                    format: wgpu::VertexFormat::Float32,
+                }, // draw_depth
             ],
         }
     }
@@ -158,7 +166,7 @@ fn pack_color(color: [f32; 4]) -> [u8; 4] {
     ]
 }
 
-fn emit_wire_instances(wire: &WireModel, color: [f32; 4]) -> Vec<WireInstance> {
+fn emit_wire_instances(wire: &WireModel, color: [f32; 4], draw_depth: f32) -> Vec<WireInstance> {
     let color_u8 = pack_color(color);
     let pat0 = [
         wire.pattern[0],
@@ -222,14 +230,27 @@ fn emit_wire_instances(wire: &WireModel, color: [f32; 4]) -> Vec<WireInstance> {
             pattern_length: wire.pattern_length,
             pat0,
             pat1,
+            draw_depth,
         });
     }
     instances
 }
 
+/// Looks up a wire's draw-order depth from the per-entity map using the
+/// handle encoded in its `name`. Falls back to 0.0 (transient / preview
+/// wires that carry no document handle).
+fn wire_draw_depth(wire: &WireModel, depth_map: &std::collections::HashMap<u64, f32>) -> f32 {
+    wire
+        .name
+        .parse::<u64>()
+        .ok()
+        .and_then(|h| depth_map.get(&h).copied())
+        .unwrap_or(0.0)
+}
+
 impl WireGpu {
-    pub fn new(device: &wgpu::Device, wire: &WireModel) -> Self {
-        let mut g = Self::build(device, wire, wire.color);
+    pub fn new(device: &wgpu::Device, wire: &WireModel, draw_depth: f32) -> Self {
+        let mut g = Self::build(device, wire, wire.color, draw_depth);
         g.vp_scissor = wire.vp_scissor;
         g.is_3d_mesh_edge = !wire.fill_tris.is_empty();
         g
@@ -238,7 +259,11 @@ impl WireGpu {
     /// Merge multiple WireModels into GPU instance buffers, chunked to fit the
     /// 256 MB GPU limit. Each wire keeps its own color and pattern — they live
     /// per-instance.
-    pub fn from_batch(device: &wgpu::Device, wires: &[WireModel]) -> Vec<Self> {
+    pub fn from_batch(
+        device: &wgpu::Device,
+        wires: &[WireModel],
+        depth_map: &std::collections::HashMap<u64, f32>,
+    ) -> Vec<Self> {
         let total_segs: usize = wires.iter().map(|w| w.points.len().saturating_sub(1)).sum();
         if total_segs == 0 {
             return vec![];
@@ -251,7 +276,7 @@ impl WireGpu {
         // across cores.
         let instances: Vec<WireInstance> = wires
             .par_iter()
-            .map(|wire| emit_wire_instances(wire, wire.color))
+            .map(|wire| emit_wire_instances(wire, wire.color, wire_draw_depth(wire, depth_map)))
             .reduce(Vec::new, |mut acc, mut chunk| {
                 if acc.is_empty() {
                     chunk
@@ -286,8 +311,8 @@ impl WireGpu {
             .collect()
     }
 
-    fn build(device: &wgpu::Device, wire: &WireModel, color: [f32; 4]) -> Self {
-        let instances = emit_wire_instances(wire, color);
+    fn build(device: &wgpu::Device, wire: &WireModel, color: [f32; 4], draw_depth: f32) -> Self {
+        let instances = emit_wire_instances(wire, color, draw_depth);
         let label = format!("wire.ibuf.{}", wire.name);
         let instance_buffer = instance_buffer_mapped(device, &label, &instances);
 

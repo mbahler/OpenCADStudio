@@ -646,10 +646,11 @@ impl Pipeline {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-                // binding 2: ImageParams uniform
+                // binding 2: ImageParams uniform (read in vertex for the
+                // draw-order z bias and in fragment for opacity).
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -886,15 +887,30 @@ impl Pipeline {
         }
     }
 
-    pub fn upload_wires(&mut self, device: &wgpu::Device, wires: &[WireModel]) {
-        self.gpu_wires = wires.iter().map(|w| WireGpu::new(device, w)).collect();
+    pub fn upload_wires(
+        &mut self,
+        device: &wgpu::Device,
+        wires: &[WireModel],
+        depth_map: &std::collections::HashMap<u64, f32>,
+    ) {
+        let depth_of = |w: &WireModel| -> f32 {
+            w.name
+                .parse::<u64>()
+                .ok()
+                .and_then(|h| depth_map.get(&h).copied())
+                .unwrap_or(0.0)
+        };
+        self.gpu_wires = wires
+            .iter()
+            .map(|w| WireGpu::new(device, w, depth_of(w)))
+            .collect();
 
         // Full-brightness copies of selected wires, drawn on top of everything
         // in the selection overlay pass so they're always visible.
         self.gpu_selected_wires = wires
             .iter()
             .filter(|w| w.selected)
-            .map(|w| WireGpu::new(device, w))
+            .map(|w| WireGpu::new(device, w, depth_of(w)))
             .collect();
     }
 
@@ -971,10 +987,11 @@ impl Pipeline {
         face3d_wires: &[WireModel],
         all_wires: &[WireModel],
         wireframe_only: bool,
+        depth_map: &std::collections::HashMap<u64, f32>,
     ) {
         // Edge buffer is always built from `face3d_wires`, so 3DFACE
         // outlines stay on the screen regardless of mode.
-        self.gpu_face3d_edges = WireGpu::from_batch(device, face3d_wires);
+        self.gpu_face3d_edges = WireGpu::from_batch(device, face3d_wires, depth_map);
         // Fill buffer split: 3D quads + PolyfaceMesh / PolygonMesh face
         // tris go to `vertex_buffer_3d` (gated by `keep_3d_mesh_fills`);
         // 2D fills (text-LOD greek, MultiLeader background) go to
@@ -996,6 +1013,7 @@ impl Pipeline {
                 face3d_wires,
                 all_wires,
                 keep_3d_mesh_fills,
+                depth_map,
             ));
         }
     }

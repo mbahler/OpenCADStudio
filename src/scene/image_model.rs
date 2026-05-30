@@ -27,6 +27,10 @@ pub struct ImageModel {
     /// viewport clipping. Mirrors `WireModel.vp_scissor` /
     /// `HatchModel.vp_scissor`.
     pub vp_scissor: Option<[f32; 4]>,
+    /// Normalized draw-order depth in (0,1); higher draws on top. Fed to the
+    /// image pipeline as a small clip-z bias so the raster orders correctly
+    /// against other entity types.
+    pub draw_depth: f32,
 }
 
 impl ImageModel {
@@ -61,6 +65,7 @@ impl ImageModel {
             opacity,
             corners,
             vp_scissor: None,
+            draw_depth: 0.0,
         })
     }
 }

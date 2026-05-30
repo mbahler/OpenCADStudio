@@ -45,7 +45,10 @@ impl ImageVertex {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct ImageParams {
     opacity: f32,
-    _pad: [f32; 3],
+    /// Signed draw-order depth (-1,1); applied as a clip-z bias in the shader
+    /// so the raster orders against other entity types. 0.0 = neutral.
+    draw_depth: f32,
+    _pad: [f32; 2],
 } // 16 bytes
 
 // ── Per-image GPU handle ──────────────────────────────────────────────────
@@ -118,7 +121,8 @@ impl ImageGpu {
         // ── Opacity uniform ───────────────────────────────────────────────
         let params = ImageParams {
             opacity: model.opacity.clamp(0.0, 1.0),
-            _pad: [0.0; 3],
+            draw_depth: model.draw_depth,
+            _pad: [0.0; 2],
         };
         let _params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("image.params"),

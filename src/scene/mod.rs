@@ -570,6 +570,14 @@ pub struct Scene {
     /// Maps block_handle → (entity_handle.value() → sort_handle.value()).
     /// Replaces the O(objects) linear scan inside `wires_for_block()` with an O(1) lookup.
     sort_cache: RefCell<Option<(u64, HashMap<Handle, HashMap<u64, u64>>)>>,
+    /// Per-entity normalized draw-order depth in (0,1), keyed by
+    /// entity_handle.value(). Higher = drawn on top. Built once per
+    /// geometry epoch by ranking every entity within its owning block by
+    /// effective sort key (SortEntitiesTable override or own handle), then
+    /// fed to the 2D pipelines as a small clip-z bias so entities of
+    /// *different* types order correctly against each other. 3D meshes are
+    /// excluded (they keep real geometric depth).
+    draw_depth_cache: RefCell<Option<(u64, Arc<HashMap<u64, f32>>)>>,
     /// Cached hatch fill models, keyed by geometry_epoch. View culling
     /// is handled at draw time via `hatch_skip_flags` in the pipeline,
     /// not at build time — that lets the GPU buffer stay stable across
@@ -683,6 +691,7 @@ impl Scene {
             wire_cache: RefCell::new(None),
             model_tile_wire_cache: RefCell::new(HashMap::new()),
             sort_cache: RefCell::new(None),
+            draw_depth_cache: RefCell::new(None),
             hatch_cache: RefCell::new(None),
             wipeout_cache: RefCell::new(None),
             image_cache: RefCell::new(None),
@@ -1328,6 +1337,79 @@ impl Scene {
         (*self.entity_wires_arc()).clone()
     }
 
+    /// Per-entity normalized draw-order depth, keyed by entity handle value.
+    /// Built (and cached per geometry epoch) by ranking every entity within
+    /// its owning block by effective sort key (SortEntitiesTable override or
+    /// own handle). The result feeds the 2D pipelines as a clip-z bias so
+    /// entities of different types order correctly against each other.
+    pub(super) fn draw_depth_map(&self) -> Arc<HashMap<u64, f32>> {
+        {
+            let cache = self.draw_depth_cache.borrow();
+            if let Some((epoch, ref arc)) = *cache {
+                if epoch == self.geometry_epoch {
+                    return Arc::clone(arc);
+                }
+            }
+        }
+        use acadrust::objects::ObjectType;
+        // Per-block SortEntitiesTable overrides: block -> (entity_val -> sort_val).
+        let mut overrides: HashMap<Handle, HashMap<u64, u64>> = HashMap::new();
+        for obj in self.document.objects.values() {
+            if let ObjectType::SortEntitiesTable(t) = obj {
+                if !t.is_empty() {
+                    overrides.insert(
+                        t.block_owner_handle,
+                        t.entries()
+                            .map(|e| (e.entity_handle.value(), e.sort_handle.value()))
+                            .collect(),
+                    );
+                }
+            }
+        }
+        let ms = self.model_space_block_handle();
+        // Group entities by owning block, carrying each entity's effective key.
+        let mut by_block: HashMap<Handle, Vec<(u64, u64)>> = HashMap::new();
+        for e in self.document.entities() {
+            let c = e.common();
+            // 3D meshes keep real geometric depth — exclude them from
+            // draw-order biasing so 3D occlusion is never flattened.
+            if matches!(
+                e,
+                EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_)
+            ) {
+                continue;
+            }
+            let block = if c.owner_handle.is_null() {
+                ms
+            } else {
+                c.owner_handle
+            };
+            let hv = c.handle.value();
+            let eff = overrides
+                .get(&block)
+                .and_then(|m| m.get(&hv))
+                .copied()
+                .unwrap_or(hv);
+            by_block.entry(block).or_default().push((hv, eff));
+        }
+        let mut depth_map: HashMap<u64, f32> = HashMap::new();
+        for (_block, mut v) in by_block {
+            v.sort_by_key(|(_, eff)| *eff);
+            let denom = (v.len() as f32) + 1.0;
+            for (rank, (hv, _)) in v.into_iter().enumerate() {
+                // Signed (-1,1): back ranks → negative, front → positive,
+                // mid → ~0. The shader applies `z -= draw_depth * BIAS`, so a
+                // default/unranked 0.0 means "no bias" (neutral) — which keeps
+                // 3D mesh faces and transient wires at their real depth.
+                let norm = (rank as f32 + 1.0) / denom; // (0,1)
+                depth_map.insert(hv, (norm - 0.5) * 2.0);
+            }
+        }
+        let arc = Arc::new(depth_map);
+        *self.draw_depth_cache.borrow_mut() = Some((self.geometry_epoch, Arc::clone(&arc)));
+        arc
+    }
+
     pub(super) fn hatch_models_arc(&self) -> Arc<Vec<HatchModel>> {
         {
             let cache = self.hatch_cache.borrow();
@@ -1365,7 +1447,17 @@ impl Scene {
                 }
             }
         }
-        let arc = Arc::new(self.images.values().cloned().collect());
+        let depth_map = self.draw_depth_map();
+        let arc = Arc::new(
+            self.images
+                .iter()
+                .map(|(handle, model)| {
+                    let mut m = model.clone();
+                    m.draw_depth = depth_map.get(&handle.value()).copied().unwrap_or(0.0);
+                    m
+                })
+                .collect(),
+        );
         *self.image_cache.borrow_mut() = Some((self.geometry_epoch, Arc::clone(&arc)));
         arc
     }
@@ -1688,7 +1780,11 @@ impl Scene {
                         let key = Self::handle_from_wire_name(&w.name)
                             .map(|h| h.value())
                             .unwrap_or(u64::MAX);
-                        sort_map.get(&key).copied().unwrap_or(u64::MAX / 2)
+                        // Entities absent from the table sort by their own
+                        // handle — the same key space the table's sort handles
+                        // live in — so reordered and untouched entities interleave
+                        // correctly instead of all collapsing to one constant.
+                        sort_map.get(&key).copied().unwrap_or(key)
                     });
                 }
             }
@@ -2861,6 +2957,7 @@ impl Scene {
         // paper), so projecting them through a camera built for the
         // wrong block lands them outside the frustum and the per-vp
         // scissor / LOD culls them out — no double-rendering.
+        let depth_map = self.draw_depth_map();
         let mut models: Vec<HatchModel> = self
             .hatches
             .iter()
@@ -2909,6 +3006,7 @@ impl Scene {
                 if self.selected.contains(&handle) {
                     m.color = [0.15, 0.55, 1.00, m.color[3]];
                 }
+                m.draw_depth = depth_map.get(&handle.value()).copied().unwrap_or(0.0);
                 m
             })
             .collect();
@@ -2992,6 +3090,7 @@ impl Scene {
                     scale: 1.0,
                     world_origin: [0.0; 2],
                     vp_scissor: None,
+                    draw_depth: depth_map.get(&common.handle.value()).copied().unwrap_or(0.0),
                 });
             }
         }
@@ -3055,6 +3154,7 @@ impl Scene {
                     scale: 1.0,
                     world_origin: [0.0; 2],
                     vp_scissor: None,
+                    draw_depth: 0.0,
                 });
             }
         }
@@ -3453,6 +3553,7 @@ impl Scene {
             scale: dxf.pattern_scale as f32,
             world_origin,
             vp_scissor: None,
+            draw_depth: 0.0,
         })
     }
 
@@ -3602,6 +3703,7 @@ impl Scene {
             scale: 1.0,
             world_origin: [0.0; 2],
             vp_scissor: None,
+            draw_depth: 0.0,
         }
     }
 
@@ -5655,6 +5757,7 @@ impl Scene {
                 scale: 1.0,
                 world_origin: [0.0; 2],
                 vp_scissor: None,
+                draw_depth: 0.0,
             });
         }
         Arc::new(models)

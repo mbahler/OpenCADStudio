@@ -19,12 +19,15 @@ struct Uniforms {
 
 // Per-image params (fade, clip flag, etc.)
 struct ImageParams {
-    opacity: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    opacity:    f32,
+    draw_depth: f32,   // signed (-1,1) draw-order bias; 0 = neutral
+    _pad1:      f32,
+    _pad2:      f32,
 };
 @group(1) @binding(2) var<uniform> img_params: ImageParams;
+
+// Draw-order depth bias (see wire.wgsl).
+const DRAW_ORDER_BIAS: f32 = 0.001;
 
 // ── Vertex stage ──────────────────────────────────────────────────────────────
 struct VertIn {
@@ -41,6 +44,7 @@ struct VertOut {
 fn vs_main(in: VertIn) -> VertOut {
     var out: VertOut;
     out.clip_pos = u.mvp * vec4<f32>(in.pos, 1.0);
+    out.clip_pos.z = out.clip_pos.z - img_params.draw_depth * DRAW_ORDER_BIAS * out.clip_pos.w;
     out.uv = in.uv;
     return out;
 }

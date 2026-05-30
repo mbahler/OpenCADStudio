@@ -3026,6 +3026,60 @@ impl OpenCADStudio {
                     if relative_target.is_some() || to_front_opt.is_some() {
                         self.push_undo_snapshot(i, "DRAWORDER");
                         let block_handle = self.tabs[i].scene.current_layout_block_handle_pub();
+
+                        // For FRONT/BACK, anchor the new sort handle to the
+                        // block's current effective draw-order range so the moved
+                        // entities land strictly above/below every sibling —
+                        // including ones not yet in the table, which sort by
+                        // their own handle. (min_eff, max_eff) over siblings.
+                        let fb_baseline: Option<(u64, u64)> = if to_front_opt.is_some() {
+                            let selected_set: std::collections::HashSet<u64> =
+                                selected.iter().map(|h| h.value()).collect();
+                            let doc_ref = &self.tabs[i].scene.document;
+                            let overrides: std::collections::HashMap<u64, u64> = doc_ref
+                                .objects
+                                .values()
+                                .find_map(|obj| {
+                                    if let ObjectType::SortEntitiesTable(t) = obj {
+                                        if t.block_owner_handle == block_handle {
+                                            return Some(
+                                                t.entries()
+                                                    .map(|e| {
+                                                        (
+                                                            e.entity_handle.value(),
+                                                            e.sort_handle.value(),
+                                                        )
+                                                    })
+                                                    .collect(),
+                                            );
+                                        }
+                                    }
+                                    None
+                                })
+                                .unwrap_or_default();
+                            let mut max_eff = 0u64;
+                            let mut min_eff = u64::MAX;
+                            for e in doc_ref.entities() {
+                                let c = e.common();
+                                let hv = c.handle.value();
+                                if selected_set.contains(&hv) {
+                                    continue;
+                                }
+                                if c.owner_handle != block_handle && !c.owner_handle.is_null() {
+                                    continue;
+                                }
+                                let eff = overrides.get(&hv).copied().unwrap_or(hv);
+                                max_eff = max_eff.max(eff);
+                                min_eff = min_eff.min(eff);
+                            }
+                            if min_eff == u64::MAX {
+                                min_eff = 1;
+                            }
+                            Some((min_eff, max_eff))
+                        } else {
+                            None
+                        };
+
                         let doc = &mut self.tabs[i].scene.document;
                         let table_handle = doc.objects.iter().find_map(|(h, obj)| {
                             if let ObjectType::SortEntitiesTable(t) = obj {
@@ -3071,6 +3125,14 @@ impl OpenCADStudio {
                         if let Some(ObjectType::SortEntitiesTable(table)) = doc.objects.get_mut(&th)
                         {
                             if let Some((above, target)) = relative_target {
+                                // move_above/move_below read the target's sort
+                                // handle from the table and no-op when it is
+                                // absent. A reference object that was never
+                                // reordered isn't in the table yet, so seed it
+                                // with its own handle as the implicit sort key.
+                                if !table.contains(target) {
+                                    table.add_entry(target, target);
+                                }
                                 for h in &selected {
                                     if above {
                                         table.move_above(*h, target);
@@ -3086,12 +3148,14 @@ impl OpenCADStudio {
                                     target.value()
                                 ));
                             } else if let Some(to_front) = to_front_opt {
-                                for h in &selected {
-                                    if to_front {
-                                        table.bring_to_front(*h);
+                                let (min_eff, max_eff) = fb_baseline.unwrap_or((1, 0));
+                                for (k, h) in selected.iter().enumerate() {
+                                    let sort = if to_front {
+                                        max_eff.saturating_add(1 + k as u64)
                                     } else {
-                                        table.send_to_back(*h);
-                                    }
+                                        min_eff.saturating_sub(1 + k as u64).max(1)
+                                    };
+                                    table.add_entry(*h, acadrust::Handle::new(sort));
                                 }
                                 let dir = if to_front { "front" } else { "back" };
                                 self.command_line.push_info(&format!(
@@ -3101,6 +3165,11 @@ impl OpenCADStudio {
                                 ));
                             }
                         }
+                        // Sort order lives in SortEntitiesTable, which the
+                        // render-side `sort_cache` rebuilds per geometry epoch.
+                        // Bump it so the new draw order shows immediately
+                        // instead of waiting for an unrelated geometry change.
+                        self.tabs[i].scene.bump_geometry();
                         self.tabs[i].dirty = true;
                     } else {
                         self.command_line.push_info(
@@ -5491,6 +5560,62 @@ fn entity_extra_info(entity: &acadrust::EntityType) -> String {
         EntityType::Dimension(e) => format!("{:.3}", e.base().actual_measurement),
         EntityType::Spline(e) => format!("{} ctrl pts", e.control_points.len()),
         _ => String::new(),
+    }
+}
+
+// ── Draw Order: interactive reference-object pick ──────────────────────────
+
+/// Moves a captured selection above or below a reference object the user
+/// picks in the viewport. On pick it relaunches `DRAWORDER A|U <handle>`
+/// with the captured handles reinstalled as the selection, so the existing
+/// command path performs the actual reorder.
+pub(crate) struct DrawOrderRefCommand {
+    to_move: Vec<acadrust::Handle>,
+    above: bool,
+}
+
+impl DrawOrderRefCommand {
+    pub(crate) fn new(to_move: Vec<acadrust::Handle>, above: bool) -> Self {
+        Self { to_move, above }
+    }
+}
+
+impl CadCommand for DrawOrderRefCommand {
+    fn name(&self) -> &'static str {
+        "DRAWORDER"
+    }
+
+    fn prompt(&self) -> String {
+        if self.above {
+            "DRAWORDER  Select reference object (move selection above):".into()
+        } else {
+            "DRAWORDER  Select reference object (move selection under):".into()
+        }
+    }
+
+    fn needs_entity_pick(&self) -> bool {
+        true
+    }
+
+    fn on_entity_pick(
+        &mut self,
+        handle: acadrust::Handle,
+        _pt: glam::Vec3,
+    ) -> crate::command::CmdResult {
+        if handle.is_null() {
+            return crate::command::CmdResult::NeedPoint;
+        }
+        let opt = if self.above { "A" } else { "U" };
+        let cmd = format!("DRAWORDER {} {:x}", opt, handle.value());
+        crate::command::CmdResult::Relaunch(cmd, std::mem::take(&mut self.to_move))
+    }
+
+    fn on_point(&mut self, _pt: glam::Vec3) -> crate::command::CmdResult {
+        crate::command::CmdResult::NeedPoint
+    }
+
+    fn on_enter(&mut self) -> crate::command::CmdResult {
+        crate::command::CmdResult::Cancel
     }
 }
 

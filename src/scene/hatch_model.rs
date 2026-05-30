@@ -78,6 +78,10 @@ pub struct HatchModel {
     /// preventing viewport-projected content from bleeding past the
     /// viewport frame. Mirrors `WireModel.vp_scissor`.
     pub vp_scissor: Option<[f32; 4]>,
+    /// Normalized draw-order depth in (0,1); higher draws on top. Fed to the
+    /// hatch pipeline as a small clip-z bias so this fill orders correctly
+    /// against other entity types. 0.0 for transient/preview hatches.
+    pub draw_depth: f32,
 }
 
 impl HatchModel {
