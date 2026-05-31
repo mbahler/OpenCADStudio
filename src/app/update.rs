@@ -879,6 +879,13 @@ impl OpenCADStudio {
             }
 
             Message::CommandAppendChar(s) => {
+                // While the MText preview is up, typed glyphs edit it directly.
+                if self.mtext_editor.as_ref().is_some_and(|e| e.show_preview) {
+                    if s.chars().all(|c| !c.is_control()) {
+                        self.mtext_type(&s);
+                    }
+                    return Task::none();
+                }
                 // Filter out control characters — only push the typed
                 // glyph(s). `Tab`, etc. arrive as Named keys, not here.
                 if s.chars().all(|c| !c.is_control()) {
@@ -919,6 +926,10 @@ impl OpenCADStudio {
             }
 
             Message::CommandBackspace => {
+                if self.mtext_editor.as_ref().is_some_and(|e| e.show_preview) {
+                    self.mtext_backspace();
+                    return Task::none();
+                }
                 let i = self.active_tab;
                 // Backspace edits the focused dynamic-input field first;
                 // emptying it unlocks the field (back to cursor tracking).
@@ -1201,6 +1212,11 @@ impl OpenCADStudio {
             }
 
             Message::CommandFinalize => {
+                // In the MText preview, Enter inserts a line break.
+                if self.mtext_editor.as_ref().is_some_and(|e| e.show_preview) {
+                    self.mtext_type("\n");
+                    return Task::none();
+                }
                 // Grip popup open → Enter commits the highlighted item.
                 if self.grip_popup.is_some() {
                     let idx = self
@@ -3443,6 +3459,11 @@ impl OpenCADStudio {
             }
 
             Message::DeleteSelected => {
+                // In the MText preview, Delete removes text at the caret.
+                if self.mtext_editor.as_ref().is_some_and(|e| e.show_preview) {
+                    self.mtext_delete();
+                    return Task::none();
+                }
                 let i = self.active_tab;
                 self.tabs[i].scene.selection.borrow_mut().context_menu = None;
                 let handles: Vec<_> = self.tabs[i].scene.selected.iter().cloned().collect();
@@ -3544,12 +3565,21 @@ impl OpenCADStudio {
                     ed.show_preview = on;
                 }
                 self.rebuild_mtext_preview();
-                Task::none()
+                // Focus the text area when switching to Edit so the caret
+                // shows and typing/clicking edits immediately.
+                if on {
+                    Task::none()
+                } else {
+                    iced::widget::operation::focus(iced::widget::Id::new(
+                        super::view::MTEXT_TEXT_ID,
+                    ))
+                }
             }
             Message::MTextSelStart(off) => {
                 if let Some(ed) = self.mtext_editor.as_mut() {
                     ed.sel_anchor = off;
                     ed.sel = Some((off, off));
+                    ed.caret = off;
                 }
                 Task::none()
             }
@@ -3557,7 +3587,24 @@ impl OpenCADStudio {
                 if let Some(ed) = self.mtext_editor.as_mut() {
                     let a = ed.sel_anchor;
                     ed.sel = Some((a.min(off), a.max(off)));
+                    ed.caret = off;
                 }
+                Task::none()
+            }
+            Message::MTextType(s) => {
+                self.mtext_type(&s);
+                Task::none()
+            }
+            Message::MTextBackspace => {
+                self.mtext_backspace();
+                Task::none()
+            }
+            Message::MTextDelete => {
+                self.mtext_delete();
+                Task::none()
+            }
+            Message::MTextCaretMove(d) => {
+                self.mtext_caret_move(d);
                 Task::none()
             }
             Message::MTextOk => {

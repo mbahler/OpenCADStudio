@@ -189,10 +189,12 @@ fn emit_wire_instances(wire: &WireModel, color: [f32; 4], draw_depth: f32) -> Ve
     }
 
     let mut dists = vec![0.0_f32; n];
+    let mut has_break = false;
     for i in 1..n {
         let p = wire.points[i - 1];
         let q = wire.points[i];
         if !p[0].is_finite() || !q[0].is_finite() {
+            has_break = true;
             // plinegen=false: reset to 0 at the first real point after a NaN separator.
             dists[i] = if !wire.plinegen && !p[0].is_finite() && q[0].is_finite() {
                 0.0
@@ -204,6 +206,32 @@ fn emit_wire_instances(wire: &WireModel, color: [f32; 4], draw_depth: f32) -> Ve
             let dy = q[1] - p[1];
             let dz = q[2] - p[2];
             dists[i] = dists[i - 1] + (dx * dx + dy * dy + dz * dz).sqrt();
+        }
+    }
+
+    // Center the dash pattern on the wire instead of starting it at the first
+    // vertex. The shader reads the pattern phase as `dist % pattern_length`, so
+    // adding a constant offset to every arc-length shifts that phase. We place
+    // the wire midpoint at the center of the first dash element, which makes the
+    // line begin and end with matching partial dashes. Skipped for wires with
+    // NaN breaks (per-segment dash restarts), where a single offset can't center
+    // every segment.
+    let pat_len = wire.pattern_length;
+    if pat_len > 1e-6 && !has_break && n >= 2 {
+        let total = dists[n - 1];
+        if total > 1e-6 {
+            // First dash element (positive), else fall back to the first element.
+            let first_dash = wire
+                .pattern
+                .iter()
+                .copied()
+                .find(|&v| v > 0.0)
+                .unwrap_or_else(|| wire.pattern[0].abs());
+            // Phase that puts the wire midpoint at the dash center.
+            let offset = first_dash * 0.5 - total * 0.5;
+            for d in dists.iter_mut() {
+                *d += offset;
+            }
         }
     }
 

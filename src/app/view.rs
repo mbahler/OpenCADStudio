@@ -828,8 +828,12 @@ impl OpenCADStudio {
         let allow_autocomplete = tab.active_cmd.is_none();
         // Dynamic input captures keystrokes when its fields are showing,
         // so the command-line field must release focus / its on_input.
-        let dyn_capturing =
-            self.dyn_input && tab.active_cmd.is_some() && !tab.dyn_fields.is_empty();
+        // The MText preview also captures keystrokes (typing edits it), so the
+        // command line must likewise release its on_input there.
+        let dyn_capturing = (self.dyn_input
+            && tab.active_cmd.is_some()
+            && !tab.dyn_fields.is_empty())
+            || self.mtext_editor.as_ref().is_some_and(|e| e.show_preview);
         let command_line_overlay =
             iced::widget::container(self.command_line.view(allow_autocomplete, dyn_capturing))
             .width(Fill)
@@ -1060,11 +1064,27 @@ impl OpenCADStudio {
                             {
                                 Some(Message::DynTabNext)
                             }
-                            keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
+                            keyboard::Key::Named(keyboard::key::Named::ArrowUp)
+                                if status == Status::Ignored =>
+                            {
                                 Some(Message::CommandHistoryPrev)
                             }
-                            keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
+                            keyboard::Key::Named(keyboard::key::Named::ArrowDown)
+                                if status == Status::Ignored =>
+                            {
                                 Some(Message::CommandHistoryNext)
+                            }
+                            // Caret movement in the MText preview (no-op
+                            // otherwise; these arrows are unused elsewhere).
+                            keyboard::Key::Named(keyboard::key::Named::ArrowLeft)
+                                if status == Status::Ignored =>
+                            {
+                                Some(Message::MTextCaretMove(-1))
+                            }
+                            keyboard::Key::Named(keyboard::key::Named::ArrowRight)
+                                if status == Status::Ignored =>
+                            {
+                                Some(Message::MTextCaretMove(1))
                             }
                             keyboard::Key::Named(keyboard::key::Named::F3) => {
                                 Some(Message::ToggleSnapEnabled)
@@ -1323,6 +1343,9 @@ fn position_canvas_overlay<'a>(
 
 // ── In-place MText editor overlay ───────────────────────────────────────────
 
+/// Widget id for the MText editor's text area (focused when Edit mode opens).
+pub(super) const MTEXT_TEXT_ID: &str = "mtext_editor_text";
+
 // Stroke-font families the renderer ships (LibreCAD LFF; see scene/lff.rs).
 const MTEXT_FONTS: [&str; 10] = [
     "[Style default]",
@@ -1360,6 +1383,8 @@ struct MTextPreview {
     boxes: Vec<crate::entities::text_support::GlyphBox>,
     /// Current selection as a visible-char range.
     sel: Option<(usize, usize)>,
+    /// Caret position as a visible-char offset.
+    caret: usize,
     /// World-space min corner (bbox) and pixels-per-world-unit scale.
     minx: f32,
     miny: f32,
@@ -1494,6 +1519,50 @@ impl iced::widget::canvas::Program<Message> for MTextPreview {
                 }
             });
             frame.stroke(&path, Stroke::default().with_color(*col).with_width(1.4));
+        }
+        // Caret — a vertical bar at the caret's glyph boundary, shown when the
+        // selection is empty (a plain text cursor).
+        let collapsed = self.sel.map(|(a, b)| a == b).unwrap_or(true);
+        if collapsed && self.boxes.is_empty() {
+            // Empty text: show a caret at the top-left so the user can type.
+            let path = Path::new(|p| {
+                p.move_to(iced::Point::new(MTEXT_PREVIEW_PAD, MTEXT_PREVIEW_PAD));
+                p.line_to(iced::Point::new(
+                    MTEXT_PREVIEW_PAD,
+                    (MTEXT_PREVIEW_PAD + 22.0).min(self.content_h),
+                ));
+            });
+            frame.stroke(
+                &path,
+                Stroke::default()
+                    .with_color(Color { r: 0.95, g: 0.95, b: 0.55, a: 1.0 })
+                    .with_width(1.5),
+            );
+        } else if collapsed {
+            let bar = if let Some(b) = self.boxes.iter().find(|b| b.vis == self.caret) {
+                Some((b.xmin, b.ymin, b.ymax)) // left edge of the caret's glyph
+            } else if self.caret > 0 {
+                self.boxes
+                    .iter()
+                    .find(|b| b.vis == self.caret - 1)
+                    .map(|b| (b.xmax, b.ymin, b.ymax)) // after the last glyph
+            } else {
+                self.boxes.first().map(|b| (b.xmin, b.ymin, b.ymax))
+            };
+            if let Some((cx, y0, y1)) = bar {
+                let p0 = map(cx, y0);
+                let p1 = map(cx, y1);
+                let path = Path::new(|p| {
+                    p.move_to(p0);
+                    p.line_to(p1);
+                });
+                frame.stroke(
+                    &path,
+                    Stroke::default()
+                        .with_color(Color { r: 0.95, g: 0.95, b: 0.55, a: 1.0 })
+                        .with_width(1.5),
+                );
+            }
         }
         vec![frame.into_geometry()]
     }
@@ -1729,6 +1798,7 @@ fn mtext_editor_overlay<'a>(
             segments,
             boxes: ed.glyph_boxes.clone(),
             sel: ed.sel,
+            caret: ed.caret,
             minx,
             miny,
             scale,
@@ -1746,6 +1816,7 @@ fn mtext_editor_overlay<'a>(
             .into()
     } else {
         text_editor(&ed.content)
+            .id(iced::widget::Id::new(MTEXT_TEXT_ID))
             .on_action(Message::MTextEdit)
             .height(iced::Length::Fixed(VIEW_H))
             .padding(6)

@@ -121,6 +121,9 @@ pub struct MTextEditorState {
     pub sel: Option<(usize, usize)>,
     /// Anchor offset for an in-progress drag selection.
     pub sel_anchor: usize,
+    /// Text caret as a visible-character offset (0..=count). Used for typing
+    /// directly into the preview.
+    pub caret: usize,
     /// Canvas-space anchor where the toolbar + text area are drawn (the
     /// insertion-point click position).
     pub screen_anchor: iced::Point,
@@ -146,6 +149,7 @@ impl MTextEditorState {
             glyph_boxes: Vec::new(),
             sel: None,
             sel_anchor: 0,
+            caret: 0,
             attachment: AttachmentPoint::TopLeft,
             line_spacing: 1.0,
             // Default box ~20 characters wide; overwritten with the entity's
@@ -263,6 +267,7 @@ pub fn visible_spans(raw: &str) -> Vec<(usize, usize)> {
                 None => {}
             },
             '{' | '}' => { /* group markers — not visible */ }
+            '\n' | '\r' => flush(&mut para, &mut result), // raw line break = paragraph
             '%' if it.peek().map(|&(_, c)| c) == Some('%') => {
                 it.next(); // second '%'
                 match it.peek().copied() {
@@ -340,6 +345,12 @@ impl super::OpenCADStudio {
         }
         self.mtext_editor = Some(state);
         self.rebuild_mtext_preview();
+        // Place the caret at the end so typing works without a click first.
+        let end = self.mtext_vis_count();
+        if let Some(ed) = self.mtext_editor.as_mut() {
+            ed.caret = end;
+            ed.sel = Some((end, end));
+        }
     }
 
     /// Re-tessellate the current editor text into the editor's OWN preview
@@ -466,6 +477,116 @@ impl super::OpenCADStudio {
             }
         }
         self.rebuild_mtext_preview();
+    }
+
+    // ── Caret editing directly on the preview ───────────────────────────────
+
+    /// Insert text (or replace the current selection) at the preview caret.
+    pub(super) fn mtext_type(&mut self, s: &str) {
+        if let Some(ed) = self.mtext_editor.as_mut() {
+            let raw0 = ed.content.text();
+            let raw = raw0.strip_suffix('\n').unwrap_or(&raw0).to_string();
+            let spans = visible_spans(&raw);
+            let added = visible_spans(s).len();
+            let (new_text, new_caret) = match ed.sel {
+                Some((a, b)) if a < b && a < spans.len() && b <= spans.len() => {
+                    let (start, end) = (spans[a].0, spans[b - 1].1);
+                    let mut t = raw.clone();
+                    t.replace_range(start..end, s);
+                    (t, a + added)
+                }
+                _ => {
+                    let byte = spans.get(ed.caret).map(|s| s.0).unwrap_or(raw.len());
+                    let mut t = raw.clone();
+                    t.insert_str(byte, s);
+                    (t, ed.caret + added)
+                }
+            };
+            ed.content = iced::widget::text_editor::Content::with_text(&new_text);
+            ed.caret = new_caret;
+            ed.sel = Some((new_caret, new_caret));
+        }
+        self.rebuild_mtext_preview();
+    }
+
+    /// Delete the selection, or the visible character before the caret.
+    pub(super) fn mtext_backspace(&mut self) {
+        if let Some(ed) = self.mtext_editor.as_mut() {
+            let raw0 = ed.content.text();
+            let raw = raw0.strip_suffix('\n').unwrap_or(&raw0).to_string();
+            let spans = visible_spans(&raw);
+            let (new_text, new_caret) = match ed.sel {
+                Some((a, b)) if a < b && a < spans.len() && b <= spans.len() => {
+                    let (start, end) = (spans[a].0, spans[b - 1].1);
+                    let mut t = raw.clone();
+                    t.replace_range(start..end, "");
+                    (t, a)
+                }
+                _ if ed.caret > 0 && ed.caret <= spans.len() => {
+                    let (start, end) = (spans[ed.caret - 1].0, spans[ed.caret - 1].1);
+                    let mut t = raw.clone();
+                    t.replace_range(start..end, "");
+                    (t, ed.caret - 1)
+                }
+                _ => (raw, ed.caret),
+            };
+            ed.content = iced::widget::text_editor::Content::with_text(&new_text);
+            ed.caret = new_caret;
+            ed.sel = Some((new_caret, new_caret));
+        }
+        self.rebuild_mtext_preview();
+    }
+
+    /// Delete the selection, or the visible character at the caret.
+    pub(super) fn mtext_delete(&mut self) {
+        if let Some(ed) = self.mtext_editor.as_mut() {
+            let raw0 = ed.content.text();
+            let raw = raw0.strip_suffix('\n').unwrap_or(&raw0).to_string();
+            let spans = visible_spans(&raw);
+            let (new_text, new_caret) = match ed.sel {
+                Some((a, b)) if a < b && a < spans.len() && b <= spans.len() => {
+                    let (start, end) = (spans[a].0, spans[b - 1].1);
+                    let mut t = raw.clone();
+                    t.replace_range(start..end, "");
+                    (t, a)
+                }
+                _ if ed.caret < spans.len() => {
+                    let (start, end) = (spans[ed.caret].0, spans[ed.caret].1);
+                    let mut t = raw.clone();
+                    t.replace_range(start..end, "");
+                    (t, ed.caret)
+                }
+                _ => (raw, ed.caret),
+            };
+            ed.content = iced::widget::text_editor::Content::with_text(&new_text);
+            ed.caret = new_caret;
+            ed.sel = Some((new_caret, new_caret));
+        }
+        self.rebuild_mtext_preview();
+    }
+
+    /// Move the caret by `delta` visible characters (clears the selection).
+    pub(super) fn mtext_caret_move(&mut self, delta: i32) {
+        if let Some(ed) = self.mtext_editor.as_mut() {
+            let raw0 = ed.content.text();
+            let raw = raw0.strip_suffix('\n').unwrap_or(&raw0);
+            let n = visible_spans(raw).len() as i32;
+            let c = (ed.caret as i32 + delta).clamp(0, n) as usize;
+            ed.caret = c;
+            ed.sel = Some((c, c));
+        }
+    }
+
+    /// Visible-character count of the current text.
+    pub(super) fn mtext_vis_count(&self) -> usize {
+        self.mtext_editor
+            .as_ref()
+            .map(|ed| {
+                let raw0 = ed.content.text();
+                let raw = raw0.strip_suffix('\n').unwrap_or(&raw0);
+                visible_spans(raw).len()
+            })
+            .unwrap_or(0)
     }
 
     /// Commit the editor — create a new MText or update the edited one.

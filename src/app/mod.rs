@@ -744,6 +744,14 @@ pub enum Message {
     MTextSelStart(usize),
     /// Extend the preview selection to the given visible-character offset.
     MTextSelTo(usize),
+    /// Type text at the preview caret (replacing any selection).
+    MTextType(String),
+    /// Backspace at the preview caret.
+    MTextBackspace,
+    /// Delete-forward at the preview caret.
+    MTextDelete,
+    /// Move the preview caret by N visible characters.
+    MTextCaretMove(i32),
     /// Commit the editor: create or update the MText entity.
     MTextOk,
     /// Discard the editor without creating / changing the entity.
