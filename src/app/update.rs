@@ -2297,6 +2297,10 @@ impl OpenCADStudio {
 
             Message::ViewportLeftPress => {
                 let i = self.active_tab;
+                // A click in the viewport dismisses any open ribbon dropdown
+                // (e.g. the annotation style combo), which has no backdrop of
+                // its own to catch outside clicks.
+                self.ribbon.close_dropdown();
                 // Click anywhere outside the popup dismisses it. The
                 // menu's own buttons live above this mouse_area, so a
                 // press that reaches here means the cursor is not on
@@ -3062,6 +3066,7 @@ impl OpenCADStudio {
 
             Message::ViewportRightPress => {
                 let i = self.active_tab;
+                self.ribbon.close_dropdown();
                 let mut sel = self.tabs[i].scene.selection.borrow_mut();
                 let Some(p) = sel.last_move_pos else {
                     return Task::none();
@@ -3095,6 +3100,7 @@ impl OpenCADStudio {
 
             Message::ViewportMiddlePress => {
                 let i = self.active_tab;
+                self.ribbon.close_dropdown();
                 let now = Instant::now();
                 let is_double = {
                     let sel = self.tabs[i].scene.selection.borrow();

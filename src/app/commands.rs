@@ -7,6 +7,9 @@ use std::path::PathBuf;
 impl OpenCADStudio {
     pub(super) fn dispatch_command(&mut self, cmd: &str) -> Task<Message> {
         let i = self.active_tab;
+        // Starting a command closes any open ribbon dropdown (e.g. a style
+        // combo left open) so it does not stay stuck behind the new tool.
+        self.ribbon.close_dropdown();
         // Cancel any running command before starting a new one.
         if self.tabs[i].active_cmd.is_some() {
             self.tabs[i].scene.clear_preview_wire();
