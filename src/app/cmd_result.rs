@@ -125,6 +125,16 @@ impl OpenCADStudio {
                 self.tabs[i].snap_result = None;
                 self.restore_pre_cmd_tangent();
             }
+            CmdResult::CommitSolid { entity, solid } => {
+                let label = self.history_label_from_active_cmd(i, "SOLID");
+                self.push_undo_snapshot(i, label);
+                self.add_model_solid(entity, *solid);
+                self.tabs[i].dirty = true;
+                self.tabs[i].scene.clear_preview_wire();
+                self.tabs[i].active_cmd = None;
+                self.tabs[i].snap_result = None;
+                self.restore_pre_cmd_tangent();
+            }
             CmdResult::CommitAndEditText(entity) => {
                 let label = self.history_label_from_active_cmd(i, "ENTITY");
                 self.push_undo_snapshot(i, label);

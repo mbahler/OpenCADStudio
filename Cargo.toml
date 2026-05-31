@@ -20,6 +20,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 rayon = "1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 inventory = "0.3"
+truck-shapeops = "0.4"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

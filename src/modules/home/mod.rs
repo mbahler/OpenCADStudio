@@ -23,7 +23,7 @@ impl CadModule for HomeModule {
         "home"
     }
     fn title(&self) -> &'static str {
-        "Home"
+        "Draw"
     }
 
     fn ribbon_groups(&self) -> Vec<RibbonGroup> {

@@ -22,7 +22,7 @@ use std::fs;
 use std::path::Path;
 
 // Display order for known modules; unknown modules follow alphabetically.
-const PRIORITY: &[&str] = &["home", "insert", "annotate", "view", "manage"];
+const PRIORITY: &[&str] = &["home", "model", "insert", "annotate", "view", "manage"];
 
 fn main() {
     let mods_dir = Path::new("src/modules");

@@ -5,6 +5,7 @@ mod helpers;
 mod history;
 mod layers;
 mod mtext_editor;
+mod model_ops;
 mod properties;
 mod text_inline;
 mod update;

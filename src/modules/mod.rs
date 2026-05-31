@@ -134,6 +134,7 @@ pub trait CadModule: Send + Sync {
 pub mod annotate;
 pub mod home;
 pub mod insert;
+pub mod model;
 pub mod layout;
 pub mod manage;
 pub mod view;

@@ -1190,6 +1190,22 @@ impl OpenCADStudio {
                 }
             }
 
+            // ── Model commands (3D primitives) ─────────────────────────────
+            "BOX" | "WEDGE" | "CYLINDER" | "CONE" | "SPHERE" | "TORUS" => {
+                use crate::modules::model::primitive_cmd::PrimitiveCommand;
+                let new_cmd = PrimitiveCommand::new(cmd);
+                self.command_line.push_info(&new_cmd.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(new_cmd));
+            }
+
+            // ── Design commands (solid booleans) ───────────────────────────
+            "UNION" | "SUBTRACT" | "INTERSECT" => {
+                use crate::modules::model::boolean_cmd::BoolOp;
+                if let Some(op) = BoolOp::from_id(cmd) {
+                    return self.solid_boolean(op);
+                }
+            }
+
             // ── Annotate commands ──────────────────────────────────────────
             "TEXT" | "T" | "DT" => {
                 use crate::modules::annotate::text::TextCommand;
@@ -5038,32 +5054,8 @@ impl OpenCADStudio {
                 }
             }
 
-            // ── 3D Primitive — BOX ────────────────────────────────────────
-            "BOX" => {
-                use crate::modules::insert::solid3d_cmds::BoxCommand;
-                let color = self.tabs[i].scene.layer_color(&self.tabs[i].active_layer);
-                let cmd = BoxCommand::new(color);
-                self.command_line.push_info(&cmd.prompt());
-                self.tabs[i].active_cmd = Some(Box::new(cmd));
-            }
-
-            // ── 3D Primitive — SPHERE ─────────────────────────────────────
-            "SPHERE" => {
-                use crate::modules::insert::solid3d_cmds::SphereCommand;
-                let color = self.tabs[i].scene.layer_color(&self.tabs[i].active_layer);
-                let cmd = SphereCommand::new(color);
-                self.command_line.push_info(&cmd.prompt());
-                self.tabs[i].active_cmd = Some(Box::new(cmd));
-            }
-
-            // ── 3D Primitive — CYLINDER ───────────────────────────────────
-            "CYLINDER" => {
-                use crate::modules::insert::solid3d_cmds::CylinderCommand;
-                let color = self.tabs[i].scene.layer_color(&self.tabs[i].active_layer);
-                let cmd = CylinderCommand::new(color);
-                self.command_line.push_info(&cmd.prompt());
-                self.tabs[i].active_cmd = Some(Box::new(cmd));
-            }
+            // BOX / SPHERE / CYLINDER / CONE / WEDGE / TORUS are handled by the
+            // Model-tab primitive command above (with truck boolean caching).
 
             // ── EXTRUDE ────────────────────────────────────────────────────
             "EXTRUDE" | "EXT" => {

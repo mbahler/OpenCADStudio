@@ -10,6 +10,7 @@ pub mod hatch_patterns;
 pub mod hit_test;
 pub mod image_model;
 pub mod mesh_model;
+pub mod model_solid;
 pub mod object;
 pub mod paper_canvas;
 pub mod pipeline;
@@ -614,6 +615,11 @@ pub struct Scene {
     pub hatches: HashMap<Handle, HatchModel>,
     /// GPU render data for solid meshes (truck Shell/Solid tessellation).
     pub meshes: HashMap<Handle, MeshLodSet>,
+    /// Live truck B-reps for solids created this session by the Model tab,
+    /// keyed by entity handle. Backs the Design-group boolean tools (a solid
+    /// must be here to be combined). Not persisted — rebuilt only by creating
+    /// or combining primitives in-session.
+    pub model_solids: HashMap<Handle, truck_modeling::Solid>,
     /// GPU render data for raster images (RasterImage entities), keyed by handle.
     pub images: HashMap<Handle, ImageModel>,
     /// The viewport that is currently "entered" (MSPACE mode).
@@ -703,6 +709,7 @@ impl Scene {
             current_layout: "Model".to_string(),
             hatches: HashMap::new(),
             meshes: HashMap::new(),
+            model_solids: HashMap::new(),
             images: HashMap::new(),
             active_viewport: None,
             bg_color: [0.11, 0.11, 0.11, 1.0],
@@ -833,6 +840,23 @@ impl Scene {
     }
 
     /// Re-evaluate every cached mesh's color through `render_style` so a
+    /// Register a Model-tab solid: cache its truck B-rep (for boolean ops) and
+    /// tessellate it into the shaded mesh pipeline under `handle`. The solid is
+    /// in the same offset-relative frame the mesh pipeline uses, so the mesh is
+    /// stored as-is (Model-tab geometry is authored at world_offset 0).
+    pub fn register_model_solid(&mut self, handle: Handle, solid: truck_modeling::Solid) {
+        let color = self
+            .document
+            .get_entity(handle)
+            .map(|e| self.render_style(e).0)
+            .unwrap_or([0.8, 0.8, 0.85, 1.0]);
+        if let Some(set) = crate::scene::model_solid::mesh_from_solid(&solid, color) {
+            self.meshes.insert(handle, set);
+        }
+        self.model_solids.insert(handle, solid);
+        self.bump_geometry();
+    }
+
     /// `BACKGROUND` change picks up the new `adapt_to_bg` result without
     /// re-tessellating ACIS geometry. Caller must bump `geometry_epoch`
     /// afterwards so the GPU re-uploads the now-updated colour data.
@@ -2711,6 +2735,7 @@ impl Scene {
         for h in &to_remove {
             self.hatches.remove(h);
             self.meshes.remove(h);
+            self.model_solids.remove(h);
             self.document.remove_entity(*h);
         }
 
@@ -4070,6 +4095,7 @@ impl Scene {
             self.selected.remove(&h);
             self.hatches.remove(&h);
             self.meshes.remove(&h);
+            self.model_solids.remove(&h);
         }
         // Remove erased handles from all groups; delete groups that become empty.
         let group_dict_handle = self.document.header.acad_group_dict_handle;

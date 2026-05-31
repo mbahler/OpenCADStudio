@@ -8,6 +8,7 @@ use crate::modules::CadModule;
 pub fn all_modules() -> Vec<Box<dyn CadModule>> {
 	vec![
 		Box::new(super::home::HomeModule),
+		Box::new(super::model::ModelModule),
 		Box::new(super::insert::InsertModule),
 		Box::new(super::annotate::AnnotateModule),
 		Box::new(super::view::ViewModule),
