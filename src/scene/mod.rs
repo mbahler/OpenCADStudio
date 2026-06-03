@@ -449,6 +449,9 @@ pub struct ViewportInstance {
 pub(crate) struct ModelTile {
     pub(crate) rect: iced::Rectangle,
     pub(crate) camera: Camera,
+    /// Visual style for this tile alone — each pane carries its own so
+    /// changing one tile's render mode never touches the others.
+    pub(crate) render_mode: acadrust::entities::ViewportRenderMode,
 }
 
 /// Tolerance for matching two normalized tile coordinates as "the same"
@@ -684,6 +687,7 @@ impl Scene {
                     height: 1.0,
                 },
                 camera: Camera::default(),
+                render_mode: acadrust::entities::ViewportRenderMode::Wireframe2D,
             }]),
             active_model_tile: std::cell::Cell::new(0),
             selection: Rc::new(RefCell::new(SelectionState::default())),
@@ -2809,6 +2813,30 @@ impl Scene {
         }
     }
 
+    /// Visual style of the active Model tile (for the render-mode picker).
+    pub fn active_model_tile_render_mode(
+        &self,
+    ) -> acadrust::entities::ViewportRenderMode {
+        let tiles = self.model_tiles.borrow();
+        let active = self.active_model_tile.get().min(tiles.len().saturating_sub(1));
+        tiles
+            .get(active)
+            .map(|t| t.render_mode)
+            .unwrap_or(acadrust::entities::ViewportRenderMode::Wireframe2D)
+    }
+
+    /// Set only the active Model tile's render mode. Other tiles keep theirs.
+    pub fn set_active_model_tile_render_mode(
+        &self,
+        mode: acadrust::entities::ViewportRenderMode,
+    ) {
+        let mut tiles = self.model_tiles.borrow_mut();
+        let active = self.active_model_tile.get().min(tiles.len().saturating_sub(1));
+        if let Some(t) = tiles.get_mut(active) {
+            t.render_mode = mode;
+        }
+    }
+
     /// View-rotation matrix for the active viewport (MSPACE), or the
     /// paper-space camera's matrix when not in MSPACE.
     /// Used by ViewCube hit-testing so clicks map to the correct camera.
@@ -4726,6 +4754,16 @@ impl Scene {
     /// Set the model-space camera from the VPORT table's *Active entry.
     /// Returns true if the entry was found and the camera was set.
     fn apply_active_vport_camera(&mut self) -> bool {
+        // Restore the single tile's visual style from the *Active entry,
+        // independent of where the camera itself comes from below.
+        if let Some(vp) = self.document.vports.iter().find(|v| v.name == "*Active") {
+            let mode = vp.render_mode;
+            let mut tiles = self.model_tiles.borrow_mut();
+            let active = self.active_model_tile.get().min(tiles.len().saturating_sub(1));
+            if let Some(t) = tiles.get_mut(active) {
+                t.render_mode = mode;
+            }
+        }
         // Prefer our named View entry — survives DWG save without being overridden.
         let saved_view = self
             .document
@@ -4874,6 +4912,7 @@ impl Scene {
                 self.camera_from_vport(vp).map(|cam| ModelTile {
                     rect: Self::vport_to_tile_rect(vp.lower_left, vp.upper_right),
                     camera: cam,
+                    render_mode: vp.render_mode,
                 })
             })
             .collect();
@@ -4935,6 +4974,7 @@ impl Scene {
         for tile in ordered_tiles {
             let (ll, ur) = Self::tile_rect_to_vport(tile.rect);
             let mut entry = self.vport_from_camera("*Active", &tile.camera, ll, ur);
+            entry.render_mode = tile.render_mode;
             entry.handle = self.document.allocate_handle();
             self.document.vports.add_allow_duplicate(entry);
         }
@@ -5614,15 +5654,18 @@ impl Scene {
                 },
             )
         };
+        let mode = tiles[active].render_mode;
         tiles[active] = ModelTile {
             rect: a,
             camera: cam_now.clone(),
+            render_mode: mode,
         };
         tiles.insert(
             active + 1,
             ModelTile {
                 rect: b,
                 camera: cam_now,
+                render_mode: mode,
             },
         );
     }
@@ -5669,11 +5712,21 @@ impl Scene {
     /// tile becomes active. Used by VPORTS presets and `reset_model_tiles`.
     pub fn set_model_tile_layout(&self, rects: Vec<iced::Rectangle>) {
         let cam_now = self.camera.borrow().clone();
+        // Every new pane inherits the active tile's current visual style.
+        let mode = {
+            let tiles = self.model_tiles.borrow();
+            let active = self.active_model_tile.get().min(tiles.len().saturating_sub(1));
+            tiles
+                .get(active)
+                .map(|t| t.render_mode)
+                .unwrap_or(acadrust::entities::ViewportRenderMode::Wireframe2D)
+        };
         let tiles: Vec<ModelTile> = rects
             .into_iter()
             .map(|rect| ModelTile {
                 rect,
                 camera: cam_now.clone(),
+                render_mode: mode,
             })
             .collect();
         *self.model_tiles.borrow_mut() = if tiles.is_empty() {
@@ -5685,6 +5738,7 @@ impl Scene {
                     height: 1.0,
                 },
                 camera: cam_now,
+                render_mode: mode,
             }]
         } else {
             tiles
@@ -5751,7 +5805,10 @@ impl Scene {
                             height: tile.rect.height * canvas_h,
                         },
                         camera,
-                        render_mode: model_mode,
+                        // The active tile shows the live mode the picker
+                        // drives; every other tile keeps its own stored
+                        // style so editing one never disturbs the rest.
+                        render_mode: if i == active { model_mode } else { tile.render_mode },
                         active: i == active,
                         paper_sheet: false,
                     }

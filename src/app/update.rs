@@ -230,6 +230,7 @@ impl OpenCADStudio {
                 // selected — see #21.
                 self.sync_ribbon_from_selection();
                 self.tabs[i].scene.restore_saved_camera();
+                self.sync_render_mode_to_active_tile(i);
                 self.tabs[i].last_synced_camera_gen = self.tabs[i].scene.camera_generation;
                 self.tabs[i].dirty = false;
                 self.tabs[i].history = super::document::HistoryState::default();
@@ -704,6 +705,10 @@ impl OpenCADStudio {
                     return Task::none();
                 }
                 self.tabs[i].render_mode = mode;
+                // Write the style onto the active Model tile alone so it
+                // sticks when that tile loses focus and the other tiles keep
+                // their own styles.
+                self.tabs[i].scene.set_active_model_tile_render_mode(mode);
                 // Keep the legacy `wireframe` bool synced — both wireframe
                 // modes set it, everything else clears it.
                 let wf = matches!(mode, M::Wireframe2D | M::Wireframe3D);
@@ -2024,6 +2029,7 @@ impl OpenCADStudio {
                         .set_active_model_tile_at(p.x / vp_size.0, p.y / vp_size.1)
                     {
                         self.tabs[i].scene.camera_generation += 1;
+                        self.sync_render_mode_to_active_tile(i);
                     }
                 }
 
@@ -2386,6 +2392,7 @@ impl OpenCADStudio {
                         .set_active_model_tile_at(p.x / vw, p.y / vh)
                     {
                         self.tabs[i].scene.camera_generation += 1;
+                        self.sync_render_mode_to_active_tile(i);
                         return Task::none();
                     }
                 }
@@ -6056,6 +6063,35 @@ impl OpenCADStudio {
     /// `grip_hover` while the cursor sits within `GRIP_THRESHOLD_PX` of
     /// a grip and opens `grip_popup` once the dwell exceeds the
     /// threshold. Cursor drift clears both.
+    /// After the active Model tile changes, mirror its stored visual style
+    /// into the tab so the picker shows it and the tile renders with it
+    /// (the active tile draws with the tab's live render mode).
+    fn sync_render_mode_to_active_tile(&mut self, i: usize) {
+        use acadrust::entities::ViewportRenderMode as M;
+        if self.tabs[i].scene.current_layout != "Model" {
+            return;
+        }
+        let mode = self.tabs[i].scene.active_model_tile_render_mode();
+        if self.tabs[i].render_mode == mode {
+            return;
+        }
+        let label = match mode {
+            M::Wireframe2D => "Wireframe 2D",
+            M::Wireframe3D => "Wireframe 3D",
+            M::HiddenLine => "Hidden Line",
+            M::FlatShaded => "Flat Shaded",
+            M::GouraudShaded => "Gouraud Shaded",
+            M::FlatShadedWithEdges => "Flat Shaded + Edges",
+            M::GouraudShadedWithEdges => "Gouraud Shaded + Edges",
+        };
+        self.tabs[i].render_mode = mode;
+        let wf = matches!(mode, M::Wireframe2D | M::Wireframe3D);
+        self.tabs[i].wireframe = wf;
+        self.ribbon.set_wireframe(wf);
+        self.tabs[i].visual_style = label.into();
+        self.tabs[i].scene.bump_geometry();
+    }
+
     fn update_grip_hover(&mut self, i: usize, p: iced::Point) {
         const HOVER_OPEN_MS: u128 = 600;
         const POPUP_DISMISS_PX: f32 = 80.0;
