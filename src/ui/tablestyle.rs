@@ -1,7 +1,7 @@
 //! Table Style Manager window — fills the entire OS window.
 
 use crate::app::Message;
-use iced::widget::{button, column, container, row, scrollable, text, Space};
+use iced::widget::{button, checkbox, column, container, row, scrollable, text, Space};
 use iced::{Background, Border, Color, Element, Fill, Theme};
 
 const TB: Color = Color {
@@ -222,6 +222,11 @@ pub fn view_window<'a>(
         scrollable(
             column![
                 info_row("Name:", s.name.clone()),
+                checkbox(s.annotative)
+                    .label("Annotative")
+                    .on_toggle(|_| Message::TableStyleToggleAnnotative)
+                    .size(14)
+                    .text_size(11),
                 info_row("H Margin:", format!("{:.4}", s.horizontal_margin)),
                 info_row("V Margin:", format!("{:.4}", s.vertical_margin)),
                 info_row("Title Suppressed:", s.title_suppressed.to_string()),

@@ -898,6 +898,8 @@ pub enum Message {
     TableStyleDialogSelect(String),
     TableStyleDialogNew,
     TableStyleDialogDelete,
+    /// Toggle the Annotative flag on the selected table style.
+    TableStyleToggleAnnotative,
     // ── MLineStyle Dialog ─────────────────────────────────────────────────
     MlStyleDialogOpen,
     #[allow(dead_code)]

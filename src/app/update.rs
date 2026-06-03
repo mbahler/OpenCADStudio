@@ -5744,6 +5744,22 @@ impl OpenCADStudio {
                 Task::none()
             }
 
+            Message::TableStyleToggleAnnotative => {
+                use acadrust::objects::ObjectType;
+                let i = self.active_tab;
+                let name = self.tablestyle_selected.clone();
+                self.push_undo_snapshot(i, "TABLESTYLE EDIT");
+                for obj in self.tabs[i].scene.document.objects.values_mut() {
+                    if let ObjectType::TableStyle(s) = obj {
+                        if s.name == name {
+                            s.annotative = !s.annotative;
+                        }
+                    }
+                }
+                self.tabs[i].dirty = true;
+                Task::none()
+            }
+
             Message::TableStyleDialogNew => {
                 use acadrust::objects::ObjectType;
                 let i = self.active_tab;
