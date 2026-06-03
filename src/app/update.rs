@@ -5071,7 +5071,7 @@ impl OpenCADStudio {
                         // Create a new PlotSettings object and insert it.
                         let mut ps = PlotSettings::new(layout_name.clone());
                         ps.handle =
-                            acadrust::Handle::new(self.tabs[i].scene.document.next_handle());
+                            self.tabs[i].scene.document.allocate_handle();
                         let h = ps.handle;
                         self.tabs[i]
                             .scene
@@ -6024,7 +6024,7 @@ impl OpenCADStudio {
                 self.push_undo_snapshot(i, "TABLESTYLE NEW");
                 let mut style = acadrust::objects::TableStyle::standard();
                 style.name = new_name.clone();
-                let nh = acadrust::Handle::new(self.tabs[i].scene.document.next_handle());
+                let nh = self.tabs[i].scene.document.allocate_handle();
                 style.handle = nh;
                 self.tabs[i]
                     .scene
@@ -6171,7 +6171,7 @@ impl OpenCADStudio {
                 self.push_undo_snapshot(i, "MLSTYLE NEW");
                 let mut style = acadrust::objects::MLineStyle::standard();
                 style.name = new_name.clone();
-                let nh = acadrust::Handle::new(self.tabs[i].scene.document.next_handle());
+                let nh = self.tabs[i].scene.document.allocate_handle();
                 style.handle = nh;
                 self.tabs[i]
                     .scene
@@ -6318,7 +6318,7 @@ impl OpenCADStudio {
                 };
                 self.push_undo_snapshot(i, "MLEADERSTYLE NEW");
                 let mut style = acadrust::objects::MultiLeaderStyle::new(&new_name);
-                let nh = acadrust::Handle::new(self.tabs[i].scene.document.next_handle());
+                let nh = self.tabs[i].scene.document.allocate_handle();
                 style.handle = nh;
                 self.tabs[i]
                     .scene
