@@ -215,6 +215,7 @@ impl OpenCADStudio {
                     dimtm: &self.ds_dimtm,
                     dimtdec: &self.ds_dimtdec,
                     dimtfac: &self.ds_dimtfac,
+                    annotative: self.ds_annotative,
                 },
             );
         }

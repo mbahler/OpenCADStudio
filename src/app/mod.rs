@@ -390,6 +390,7 @@ pub(super) struct OpenCADStudio {
     ds_dimtm: String,
     ds_dimtdec: String,
     ds_dimtfac: String,
+    ds_annotative: bool,
 }
 
 /// What triggered the "unsaved changes" dialog.
@@ -432,6 +433,7 @@ pub enum DsField {
     Dimtm,
     Dimtdec,
     Dimtfac,
+    Annotative,
 }
 
 #[derive(Debug, Clone)]
@@ -1100,6 +1102,7 @@ impl OpenCADStudio {
             ds_dimtm: "0".to_string(),
             ds_dimtdec: "2".to_string(),
             ds_dimtfac: "1".to_string(),
+            ds_annotative: false,
         };
         app.sync_ribbon_layers();
         app

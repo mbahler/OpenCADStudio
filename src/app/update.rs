@@ -6500,6 +6500,7 @@ impl OpenCADStudio {
         self.ds_dimtm = format!("{}", ds.dimtm);
         self.ds_dimtdec = format!("{}", ds.dimtdec);
         self.ds_dimtfac = format!("{}", ds.dimtfac);
+        self.ds_annotative = ds.annotative;
     }
 
     /// Write edit buffers back into the selected dim style document entry.
@@ -6551,6 +6552,7 @@ impl OpenCADStudio {
         ds.dimlim = self.ds_dimlim;
         ds.dimpost = self.ds_dimpost.clone();
         ds.dimtxsty = self.ds_dimtxsty.clone();
+        ds.annotative = self.ds_annotative;
         self.tabs[tab].dirty = true;
         self.command_line
             .push_output(&format!("DimStyle '{}' updated.", self.dimstyle_selected));
@@ -6597,6 +6599,7 @@ impl OpenCADStudio {
             Dimtoh => self.ds_dimtoh = !self.ds_dimtoh,
             Dimtol => self.ds_dimtol = !self.ds_dimtol,
             Dimlim => self.ds_dimlim = !self.ds_dimlim,
+            Annotative => self.ds_annotative = !self.ds_annotative,
             _ => {}
         }
     }

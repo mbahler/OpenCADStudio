@@ -89,6 +89,7 @@ pub struct DimStyleValues<'a> {
     pub dimtm: &'a str,
     pub dimtdec: &'a str,
     pub dimtfac: &'a str,
+    pub annotative: bool,
 }
 
 fn btn_s(accent: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
@@ -422,6 +423,7 @@ pub fn view_window<'a>(
         .into(),
         3 => column![
             text("Scale").size(11).color(ACCENT),
+            chk("Annotative", vals.annotative, DsField::Annotative),
             row![
                 lbl("Overall scale (DIMSCALE)"),
                 mk_field(DsField::Dimscale, vals.dimscale)
