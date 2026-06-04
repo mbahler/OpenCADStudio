@@ -41,14 +41,14 @@ impl CadCommand for AreaCommand {
         if self.points.len() < 3 {
             return CmdResult::Cancel;
         }
-        // Shoelace formula in the XZ plane (Y-up world)
+        // Shoelace formula in the world XY plane.
         let n = self.points.len();
         let mut area_sum = 0.0f32;
         let mut perimeter = 0.0f32;
         for idx in 0..n {
             let a = self.points[idx];
             let b = self.points[(idx + 1) % n];
-            area_sum += a.x * b.z - b.x * a.z;
+            area_sum += a.x * b.y - b.x * a.y;
             perimeter += (b - a).length();
         }
         let area = (area_sum * 0.5).abs();

@@ -167,9 +167,9 @@ impl AlignCommand {
             );
         }
 
-        // Angle from src_vec to dst_vec in XZ plane
-        let src_angle = src_vec.z.atan2(src_vec.x);
-        let dst_angle = dst_vec.z.atan2(dst_vec.x);
+        // Angle from src_vec to dst_vec in the world XY plane
+        let src_angle = src_vec.y.atan2(src_vec.x);
+        let dst_angle = dst_vec.y.atan2(dst_vec.x);
         let angle = dst_angle - src_angle;
 
         let scale_factor = if with_scale { dst_len / src_len } else { 1.0 };

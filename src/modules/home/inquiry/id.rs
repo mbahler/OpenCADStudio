@@ -22,10 +22,10 @@ impl CadCommand for IdCommand {
     }
 
     fn on_point(&mut self, pt: Vec3) -> CmdResult {
-        // Y-up world: X stays X, Z→drawing Y, Y→elevation Z
+        // Drawing plane is world XY (z = elevation).
         let x = pt.x;
-        let y = pt.z;
-        let z = pt.y;
+        let y = pt.y;
+        let z = pt.z;
         let msg = format!("X = {x:.4},  Y = {y:.4},  Z = {z:.4}");
         CmdResult::Measurement(msg)
     }

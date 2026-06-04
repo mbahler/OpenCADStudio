@@ -33,10 +33,10 @@ impl CadCommand for DistCommand {
             let delta = pt - p1;
             let dist = delta.length();
             let dx = delta.x;
-            let dy = delta.z; // Y-up world: Z is the "drawing Y"
-            let dz = delta.y; // Y-up world: Y is elevation
+            let dy = delta.y; // drawing plane is world XY
+            let dz = delta.z; // elevation
 
-            // Angle in XY plane (XZ in world coords) — degrees from +X
+            // Angle in XY plane — degrees from +X
             let angle_xy = dy.atan2(dx).to_degrees();
             // Angle from XY plane toward Z (elevation angle)
             let dist_xy = dx.hypot(dy);

@@ -1246,7 +1246,7 @@ impl CadCommand for FilletCommand {
         if handle.is_null() {
             return CmdResult::NeedPoint;
         }
-        let click = [pt.x as f64, pt.z as f64]; // Y-up: world Z = DXF Y
+        let click = [pt.x as f64, pt.y as f64]; // drawing plane is world XY
 
         match &self.step {
             FilletStep::WaitingForRadius => return CmdResult::NeedPoint,
@@ -1324,7 +1324,7 @@ impl CadCommand for FilletCommand {
         if handle.is_null() {
             return vec![];
         }
-        let click = [pt.x as f64, pt.z as f64];
+        let click = [pt.x as f64, pt.y as f64];
 
         match &self.step {
             FilletStep::WaitingForRadius => vec![],

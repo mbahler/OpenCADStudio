@@ -150,9 +150,9 @@ pub fn lengthen_entity(entity: &EntityType, pick_pt: Vec3, mode: &LenMode) -> Op
 }
 
 fn lengthen_line(line: &LineEnt, pick_pt: Vec3, mode: &LenMode) -> Option<EntityType> {
-    let s = Vec3::new(line.start.x as f32, line.start.z as f32, 0.0);
-    let e = Vec3::new(line.end.x as f32, line.end.z as f32, 0.0);
-    let p = Vec3::new(pick_pt.x, pick_pt.z, 0.0);
+    let s = Vec3::new(line.start.x as f32, line.start.y as f32, 0.0);
+    let e = Vec3::new(line.end.x as f32, line.end.y as f32, 0.0);
+    let p = Vec3::new(pick_pt.x, pick_pt.y, 0.0);
 
     let current_len = (e - s).length() as f64;
     if current_len < 1e-10 {
@@ -187,7 +187,7 @@ fn lengthen_line(line: &LineEnt, pick_pt: Vec3, mode: &LenMode) -> Option<Entity
 
 fn lengthen_arc(arc: &ArcEnt, pick_pt: Vec3, mode: &LenMode) -> Option<EntityType> {
     let cx = arc.center.x as f32;
-    let cy = arc.center.z as f32; // Y-up: DXF Y → world Z
+    let cy = arc.center.y as f32;
 
     // Current arc span
     let span = arc_span_rad(arc.start_angle, arc.end_angle);
@@ -290,7 +290,7 @@ fn lengthen_ellipse(ell: &EllipseEnt, pick_pt: Vec3, mode: &LenMode) -> Option<E
 
     // Determine which end is closer to pick_pt (use DXF XY plane).
     let p_x = pick_pt.x as f64;
-    let p_y = pick_pt.z as f64; // Y-up: world Z → DXF Y
+    let p_y = pick_pt.y as f64; // Y-up: world Z → DXF Y
     let pt_start_x = ell.center.x + a * t0.cos() * nx - b * t0.sin() * ny;
     let pt_start_y = ell.center.y + a * t0.cos() * ny + b * t0.sin() * nx;
     let pt_end_x = ell.center.x + a * t1.cos() * nx - b * t1.sin() * ny;
@@ -339,7 +339,7 @@ fn lengthen_lwpoly(poly: &LwPolyline, pick_pt: Vec3, mode: &LenMode) -> Option<E
 
     // Determine which end is closer to the pick point (DXF XY: pick_pt.x, pick_pt.z).
     let px = pick_pt.x as f64;
-    let py = pick_pt.z as f64; // Y-up: world Z = DXF Y
+    let py = pick_pt.y as f64; // Y-up: world Z = DXF Y
 
     let first = &poly.vertices[0];
     let last = &poly.vertices[n - 1];
@@ -428,8 +428,8 @@ fn lengthen_spline(spl: &SplineEnt, pick_pt: Vec3, mode: &LenMode) -> Option<Ent
     // Determine which end (start or end) is closer to pick_pt.
     let p_start = bs.subs(t0);
     let p_end = bs.subs(t1);
-    let dist_start = (p_start.x - pick_pt.x as f64).hypot(p_start.y - pick_pt.z as f64);
-    let dist_end = (p_end.x - pick_pt.x as f64).hypot(p_end.y - pick_pt.z as f64);
+    let dist_start = (p_start.x - pick_pt.x as f64).hypot(p_start.y - pick_pt.y as f64);
+    let dist_end = (p_end.x - pick_pt.x as f64).hypot(p_end.y - pick_pt.y as f64);
     let extend_end = dist_end <= dist_start;
 
     // Find the parameter `t_new` such that the arc length from the fixed end to t_new = new_len.
