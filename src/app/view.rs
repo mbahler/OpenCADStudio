@@ -1005,6 +1005,15 @@ impl OpenCADStudio {
             }
         }
 
+        // Quick Properties: compact floating property panel on selection,
+        // anchored at the canvas top-left so it doesn't track the cursor.
+        if self.quick_properties && !tab.is_start {
+            if let Some(panel) = tab.properties.quick_view() {
+                viewport_stack = viewport_stack
+                    .push(position_canvas_overlay(iced::Point::new(12.0, 12.0), panel));
+            }
+        }
+
         // Right-click context menu. Lives inside the viewport stack so
         // the cursor position (canvas-relative) anchors the menu under
         // the cursor instead of drifting into window-relative space.
@@ -1163,6 +1172,7 @@ impl OpenCADStudio {
                         self.units_popup_open,
                         tab.scene.is_isolation_active(),
                         tab.scene.transparency_display,
+                        self.quick_properties,
                         &self.statusbar_config,
                     )
                 })

@@ -3590,6 +3590,10 @@ impl OpenCADStudio {
                 }
                 Task::none()
             }
+            Message::ToggleQuickProperties => {
+                self.quick_properties ^= true;
+                Task::none()
+            }
             Message::ToggleUnitsPopup => {
                 self.units_popup_open ^= true;
                 Task::none()

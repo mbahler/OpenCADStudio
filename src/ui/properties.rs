@@ -241,6 +241,47 @@ impl PropertiesPanel {
             .into()
     }
 
+    /// Compact floating panel for Quick Properties: the title plus the same
+    /// editable section rows as the docked panel, sized to its content.
+    /// Returns `None` when nothing is selected.
+    pub fn quick_view(&self) -> Option<Element<'_, Message>> {
+        if self.sections.is_empty() {
+            return None;
+        }
+        let title = container(text(&self.title).size(FONT_SZ).color(SECTION_LABEL))
+            .style(|_: &Theme| container::Style {
+                background: Some(Background::Color(SECTION_BG)),
+                border: Border {
+                    color: BORDER,
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..Default::default()
+            })
+            .width(Length::Fill)
+            .padding([4, 10]);
+
+        let mut col = column![title].spacing(0);
+        for section in &self.sections {
+            col = col.push(self.render_section(section));
+        }
+
+        Some(
+            container(col)
+                .style(|_: &Theme| container::Style {
+                    background: Some(Background::Color(PANEL_BG)),
+                    border: Border {
+                        color: BORDER,
+                        width: 1.0,
+                        radius: 3.0.into(),
+                    },
+                    ..Default::default()
+                })
+                .width(230)
+                .into(),
+        )
+    }
+
     // ── Section renderer ──────────────────────────────────────────────────
 
     fn render_section<'a>(&'a self, section: &'a PropSection) -> Element<'a, Message> {

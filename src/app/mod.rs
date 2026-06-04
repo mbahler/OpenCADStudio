@@ -179,6 +179,8 @@ pub(super) struct OpenCADStudio {
     isolate_popup_open: bool,
     /// Clean-screen mode: hide ribbon and side panels for a full canvas.
     clean_screen: bool,
+    /// Quick Properties: show a compact floating property panel on selection.
+    quick_properties: bool,
     /// Which status-bar pills the user has chosen to show (persisted).
     statusbar_config: crate::ui::statusbar_config::StatusBarConfig,
     /// Whether Tangent snap was enabled before a tangent-pick command started.
@@ -752,6 +754,8 @@ pub enum Message {
     ToggleCleanScreen,
     /// Toggle whether entity transparency is shown on screen.
     ToggleTransparencyDisplay,
+    /// Toggle the Quick Properties floating panel.
+    ToggleQuickProperties,
     /// Toggle the drawing-units picker open/closed.
     ToggleUnitsPopup,
     /// Close the drawing-units picker.
@@ -1223,6 +1227,7 @@ impl OpenCADStudio {
             isolate_popup_open: false,
             statusbar_config: crate::ui::statusbar_config::StatusBarConfig::load(),
             clean_screen: false,
+            quick_properties: false,
             pre_cmd_tangent: None,
             ortho_mode: false,
             polar_mode: false,

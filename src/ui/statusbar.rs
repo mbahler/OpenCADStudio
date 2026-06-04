@@ -63,6 +63,8 @@ impl StatusBar {
         isolation_active: bool,
         // Whether entity transparency is shown (Transparency pill state).
         transparency_display: bool,
+        // Whether the Quick Properties floating panel is enabled.
+        quick_properties: bool,
         // Which pills the user has chosen to show on the bar.
         config: &'a StatusBarConfig,
     ) -> Element<'a, Message> {
@@ -191,6 +193,12 @@ impl StatusBar {
             right_status = right_status.push(tip(
                 toggle_pill("ISO", isolation_active, Message::ToggleIsolatePopup),
                 "Isolate Objects\nClick for Isolate / Hide / End",
+            ));
+        }
+        if vis(StatusPill::QuickProps) {
+            right_status = right_status.push(tip(
+                toggle_pill("QP", quick_properties, Message::ToggleQuickProperties),
+                "Quick Properties\nFloating panel on selection",
             ));
         }
         if vis(StatusPill::Vp) && !vp_label.is_empty() {

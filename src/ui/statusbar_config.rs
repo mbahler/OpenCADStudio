@@ -25,6 +25,7 @@ pub enum StatusPill {
     Units,
     Transparency,
     Isolate,
+    QuickProps,
     Vp,
     CleanScreen,
 }
@@ -47,6 +48,7 @@ impl StatusPill {
         StatusPill::Units,
         StatusPill::Transparency,
         StatusPill::Isolate,
+        StatusPill::QuickProps,
         StatusPill::Vp,
         StatusPill::CleanScreen,
     ];
@@ -68,6 +70,7 @@ impl StatusPill {
             StatusPill::Units => "units",
             StatusPill::Transparency => "transparency",
             StatusPill::Isolate => "isolate",
+            StatusPill::QuickProps => "quickprops",
             StatusPill::Vp => "vp",
             StatusPill::CleanScreen => "cleanscreen",
         }
@@ -90,6 +93,7 @@ impl StatusPill {
             StatusPill::Units => "Drawing Units",
             StatusPill::Transparency => "Show Transparency",
             StatusPill::Isolate => "Isolate Objects",
+            StatusPill::QuickProps => "Quick Properties",
             StatusPill::Vp => "Viewport Count",
             StatusPill::CleanScreen => "Clean Screen",
         }
