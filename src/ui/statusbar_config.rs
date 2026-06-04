@@ -23,6 +23,7 @@ pub enum StatusPill {
     Space,
     Scale,
     Units,
+    Isolate,
     Vp,
     CleanScreen,
 }
@@ -43,6 +44,7 @@ impl StatusPill {
         StatusPill::Space,
         StatusPill::Scale,
         StatusPill::Units,
+        StatusPill::Isolate,
         StatusPill::Vp,
         StatusPill::CleanScreen,
     ];
@@ -62,6 +64,7 @@ impl StatusPill {
             StatusPill::Space => "space",
             StatusPill::Scale => "scale",
             StatusPill::Units => "units",
+            StatusPill::Isolate => "isolate",
             StatusPill::Vp => "vp",
             StatusPill::CleanScreen => "cleanscreen",
         }
@@ -82,6 +85,7 @@ impl StatusPill {
             StatusPill::Space => "Model/Paper Space",
             StatusPill::Scale => "Annotation Scale",
             StatusPill::Units => "Drawing Units",
+            StatusPill::Isolate => "Isolate Objects",
             StatusPill::Vp => "Viewport Count",
             StatusPill::CleanScreen => "Clean Screen",
         }

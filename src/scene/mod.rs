@@ -549,6 +549,10 @@ pub struct Scene {
     pub document: CadDocument,
     /// Currently selected entity handles.
     pub selected: HashSet<Handle>,
+    /// Entity handles hidden by Isolate / Hide. Empty = nothing hidden.
+    /// `tessellate_block`'s visibility test skips these, so they neither
+    /// render nor hit-test until isolation ends.
+    pub hidden: HashSet<Handle>,
     /// In-progress preview wires while a command is active (rubber-band + object ghosts).
     pub preview_wires: Vec<WireModel>,
     /// Committed-segment wire drawn during multi-point commands (normal colour).
@@ -693,6 +697,7 @@ impl Scene {
             selection: Rc::new(RefCell::new(SelectionState::default())),
             document: CadDocument::new(),
             selected: HashSet::new(),
+            hidden: HashSet::new(),
             preview_wires: vec![],
             interim_wire: None,
             camera_generation: 0,
@@ -1316,6 +1321,48 @@ impl Scene {
             .count()
     }
 
+    /// True when any entities are hidden by Isolate / Hide.
+    pub fn is_isolation_active(&self) -> bool {
+        !self.hidden.is_empty()
+    }
+
+    /// Hide every drawable entity except the current selection (Isolate).
+    pub fn isolate_selected(&mut self) {
+        if self.selected.is_empty() {
+            return;
+        }
+        let keep = self.selected.clone();
+        self.hidden = self
+            .document
+            .entities()
+            .map(|e| e.common().handle)
+            .filter(|h| !h.is_null() && !keep.contains(h))
+            .collect();
+        self.selected.clear();
+        self.bump_geometry();
+    }
+
+    /// Hide the current selection (Hide Objects).
+    pub fn hide_selected(&mut self) {
+        if self.selected.is_empty() {
+            return;
+        }
+        for h in self.selected.iter().copied() {
+            self.hidden.insert(h);
+        }
+        self.selected.clear();
+        self.bump_geometry();
+    }
+
+    /// Clear isolation — bring every hidden entity back (End Isolation).
+    pub fn end_isolation(&mut self) {
+        if self.hidden.is_empty() {
+            return;
+        }
+        self.hidden.clear();
+        self.bump_geometry();
+    }
+
     /// True if any currently selected entity is a Viewport.
     /// Used to enable the scale picker when a viewport is selected in paper space.
     pub fn has_selected_viewport(&self) -> bool {
@@ -1867,6 +1914,10 @@ impl Scene {
         let visibility_ok = |e: &EntityType| -> bool {
             let c = e.common();
             if c.invisible {
+                return false;
+            }
+            // Isolate / Hide: skip entities the user has hidden.
+            if !self.hidden.is_empty() && self.hidden.contains(&c.handle) {
                 return false;
             }
             // Block/BlockEnd are block-defn sentinels, not drawable geometry.

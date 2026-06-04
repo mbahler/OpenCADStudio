@@ -59,6 +59,8 @@ impl StatusBar {
         insertion_units: i16,
         // True while the drawing-units picker is open.
         units_popup_open: bool,
+        // True when objects are hidden by Isolate / Hide.
+        isolation_active: bool,
         // Which pills the user has chosen to show on the bar.
         config: &'a StatusBarConfig,
     ) -> Element<'a, Message> {
@@ -171,6 +173,16 @@ impl StatusBar {
                     units_popup_open,
                 ),
                 "Drawing Units (INSUNITS)\nClick to change",
+            ));
+        }
+        if vis(StatusPill::Isolate) {
+            right_status = right_status.push(tip(
+                toggle_pill(
+                    "ISO",
+                    isolation_active,
+                    Message::Command("UNISOLATEOBJECTS".into()),
+                ),
+                "Isolate Objects\nISOLATEOBJECTS / HIDEOBJECTS to hide; click to restore",
             ));
         }
         if vis(StatusPill::Vp) && !vp_label.is_empty() {

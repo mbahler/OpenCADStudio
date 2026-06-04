@@ -1159,6 +1159,7 @@ impl OpenCADStudio {
                         self.clean_screen,
                         tab.scene.document.header.insertion_units,
                         self.units_popup_open,
+                        tab.scene.is_isolation_active(),
                         &self.statusbar_config,
                     )
                 })

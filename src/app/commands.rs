@@ -332,6 +332,44 @@ impl OpenCADStudio {
                 }
             }
 
+            // ISOLATEOBJECTS — hide every object except the current selection
+            "ISOLATEOBJECTS" => {
+                if self.tabs[i].scene.selected.is_empty() {
+                    self.command_line
+                        .push_error("ISOLATEOBJECTS: select the objects to isolate first.");
+                } else {
+                    let n = self.tabs[i].scene.selected.len();
+                    self.tabs[i].scene.isolate_selected();
+                    self.command_line.push_info(&format!(
+                        "Isolated {n} object(s). UNISOLATEOBJECTS to restore."
+                    ));
+                }
+            }
+
+            // HIDEOBJECTS — hide the current selection
+            "HIDEOBJECTS" => {
+                if self.tabs[i].scene.selected.is_empty() {
+                    self.command_line
+                        .push_error("HIDEOBJECTS: select the objects to hide first.");
+                } else {
+                    let n = self.tabs[i].scene.selected.len();
+                    self.tabs[i].scene.hide_selected();
+                    self.command_line
+                        .push_info(&format!("Hid {n} object(s). UNISOLATEOBJECTS to restore."));
+                }
+            }
+
+            // UNISOLATEOBJECTS — bring back everything hidden by Isolate / Hide
+            "UNISOLATEOBJECTS" => {
+                if self.tabs[i].scene.is_isolation_active() {
+                    self.tabs[i].scene.end_isolation();
+                    self.command_line
+                        .push_info("Isolation ended — all objects shown.");
+                } else {
+                    self.command_line.push_info("No hidden objects.");
+                }
+            }
+
             // LAYUNISO — restore all layers that were turned off by LAYISO (turn all on)
             "LAYUNISO" => {
                 self.push_undo_snapshot(i, "LAYUNISO");
