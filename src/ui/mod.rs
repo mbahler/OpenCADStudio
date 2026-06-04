@@ -25,6 +25,7 @@ pub mod statusbar_config;
 pub mod statusbar_menu;
 pub mod tablestyle;
 pub mod textstyle;
+pub mod units_popup;
 
 pub use app_menu::AppMenu;
 pub use command_line::CommandLine;

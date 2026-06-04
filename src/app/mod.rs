@@ -173,6 +173,8 @@ pub(super) struct OpenCADStudio {
     scale_popup_open: bool,
     /// True while the status-bar customization menu is open.
     statusbar_menu_open: bool,
+    /// True while the drawing-units picker is open.
+    units_popup_open: bool,
     /// Clean-screen mode: hide ribbon and side panels for a full canvas.
     clean_screen: bool,
     /// Which status-bar pills the user has chosen to show (persisted).
@@ -746,6 +748,12 @@ pub enum Message {
     ToggleStatusPill(crate::ui::statusbar_config::StatusPill),
     /// Toggle clean-screen mode (hide ribbon + side panels).
     ToggleCleanScreen,
+    /// Toggle the drawing-units picker open/closed.
+    ToggleUnitsPopup,
+    /// Close the drawing-units picker.
+    CloseUnitsPopup,
+    /// Set the drawing units (INSUNITS) for the active drawing.
+    SetDrawingUnits(i16),
     /// Toggle dynamic input overlay (F12).
     ToggleDynInput,
     /// Toggle object snap tracking (F11).
@@ -1203,6 +1211,7 @@ impl OpenCADStudio {
             snap_popup_open: false,
             scale_popup_open: false,
             statusbar_menu_open: false,
+            units_popup_open: false,
             statusbar_config: crate::ui::statusbar_config::StatusBarConfig::load(),
             clean_screen: false,
             pre_cmd_tangent: None,

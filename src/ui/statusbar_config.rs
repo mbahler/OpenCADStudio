@@ -22,6 +22,7 @@ pub enum StatusPill {
     Osnap,
     Space,
     Scale,
+    Units,
     Vp,
     CleanScreen,
 }
@@ -41,6 +42,7 @@ impl StatusPill {
         StatusPill::Osnap,
         StatusPill::Space,
         StatusPill::Scale,
+        StatusPill::Units,
         StatusPill::Vp,
         StatusPill::CleanScreen,
     ];
@@ -59,6 +61,7 @@ impl StatusPill {
             StatusPill::Osnap => "osnap",
             StatusPill::Space => "space",
             StatusPill::Scale => "scale",
+            StatusPill::Units => "units",
             StatusPill::Vp => "vp",
             StatusPill::CleanScreen => "cleanscreen",
         }
@@ -78,6 +81,7 @@ impl StatusPill {
             StatusPill::Osnap => "Object Snap",
             StatusPill::Space => "Model/Paper Space",
             StatusPill::Scale => "Annotation Scale",
+            StatusPill::Units => "Drawing Units",
             StatusPill::Vp => "Viewport Count",
             StatusPill::CleanScreen => "Clean Screen",
         }

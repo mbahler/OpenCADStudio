@@ -3580,6 +3580,21 @@ impl OpenCADStudio {
                 self.clean_screen ^= true;
                 Task::none()
             }
+            Message::ToggleUnitsPopup => {
+                self.units_popup_open ^= true;
+                Task::none()
+            }
+            Message::CloseUnitsPopup => {
+                self.units_popup_open = false;
+                Task::none()
+            }
+            Message::SetDrawingUnits(code) => {
+                self.units_popup_open = false;
+                let i = self.active_tab;
+                self.tabs[i].scene.document.header.insertion_units = code;
+                self.tabs[i].dirty = true;
+                Task::none()
+            }
             Message::ToggleSnap(t) => {
                 self.snapper.toggle(t);
                 Task::none()

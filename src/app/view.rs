@@ -1157,6 +1157,8 @@ impl OpenCADStudio {
                         tab.scene.document.header.lineweight_display,
                         cursor_coord,
                         self.clean_screen,
+                        tab.scene.document.header.insertion_units,
+                        self.units_popup_open,
                         &self.statusbar_config,
                     )
                 })
@@ -1199,6 +1201,14 @@ impl OpenCADStudio {
             iced::widget::Space::new().width(0).height(0).into()
         };
 
+        let units_layer: Element<'_, Message> = if self.units_popup_open {
+            crate::ui::units_popup::units_popup_overlay(
+                tab.scene.document.header.insertion_units,
+            )
+        } else {
+            iced::widget::Space::new().width(0).height(0).into()
+        };
+
         let dropdown_layer: Element<'_, Message> = self
             .ribbon
             .dropdown_overlay(
@@ -1235,6 +1245,7 @@ impl OpenCADStudio {
             snap_layer,
             scale_layer,
             statusbar_menu_layer,
+            units_layer,
             dropdown_layer,
             layout_ctx_layer,
             qselect_layer,

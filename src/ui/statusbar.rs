@@ -55,6 +55,10 @@ impl StatusBar {
         cursor_world: glam::Vec3,
         // True while clean-screen mode hides the ribbon and side panels.
         clean_screen: bool,
+        // Drawing units (INSUNITS) for the units pill.
+        insertion_units: i16,
+        // True while the drawing-units picker is open.
+        units_popup_open: bool,
         // Which pills the user has chosen to show on the bar.
         config: &'a StatusBarConfig,
     ) -> Element<'a, Message> {
@@ -159,6 +163,15 @@ impl StatusBar {
         }
         if vis(StatusPill::Scale) {
             right_status = right_status.push(scale_element);
+        }
+        if vis(StatusPill::Units) {
+            right_status = right_status.push(tip(
+                units_btn(
+                    crate::ui::units_popup::unit_short(insertion_units),
+                    units_popup_open,
+                ),
+                "Drawing Units (INSUNITS)\nClick to change",
+            ));
         }
         if vis(StatusPill::Vp) && !vp_label.is_empty() {
             right_status = right_status.push(tip(
@@ -748,6 +761,34 @@ const SNAP_OFF_HOVER: Color = Color {
 };
 
 // ── Scale popup button ────────────────────────────────────────────────────
+
+fn units_btn(label: &str, open: bool) -> Element<'static, Message> {
+    let label = label.to_string();
+    button(
+        text(label)
+            .size(10)
+            .color(if open { SNAP_BORDER_ON } else { OSNAP_OFF_TEXT }),
+    )
+    .on_press(Message::ToggleUnitsPopup)
+    .style(move |_: &Theme, status| button::Style {
+        background: Some(Background::Color(match (open, status) {
+            (true, button::Status::Hovered) => SNAP_ON_HOVER,
+            (true, _) => SNAP_ON_BG,
+            (false, button::Status::Hovered) => SNAP_OFF_HOVER,
+            (false, _) => SNAP_OFF_BG,
+        })),
+        border: Border {
+            color: if open { SNAP_BORDER_ON } else { BORDER_COLOR },
+            width: 1.0,
+            radius: 2.0.into(),
+        },
+        text_color: if open { SNAP_BORDER_ON } else { OSNAP_OFF_TEXT },
+        shadow: iced::Shadow::default(),
+        snap: false,
+    })
+    .padding([2, 6])
+    .into()
+}
 
 fn scale_popup_btn(label: &str, open: bool) -> Element<'static, Message> {
     let label = label.to_string();
