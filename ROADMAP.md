@@ -162,6 +162,14 @@ geometry is camera-invariant.
   changed),
 - `frame_visible[handle] → bool` (recomputed per `camera_generation`).
 
+**Partial (landed):** `set_hover_highlight` no longer bumps the geometry
+epoch (a full re-tessellation) when the hovered entity is already selected —
+the effective highlight set `selected ∪ {hover}` is then unchanged, so the
+tessellation output is identical. Hovering over / between selected entities
+is now free. The full camera/selection-from-tessellation split is still open
+and needs running-app verification (highlight colour is baked into
+`WireModel.color` across several tessellation sites).
+
 ### 3.2 Persistent GPU buffer pool — diff upload
 
 Today every wire GPU buffer is re-uploaded when

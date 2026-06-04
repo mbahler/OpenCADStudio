@@ -1367,8 +1367,20 @@ impl Scene {
     /// Set (or clear) the previewed entity that renders with the selection
     /// highlight without joining the real selection. Re-tessellates on change.
     pub fn set_hover_highlight(&mut self, handle: Option<Handle>) {
-        if self.hover_highlight != handle {
-            self.hover_highlight = handle;
+        if self.hover_highlight == handle {
+            return;
+        }
+        // The hover entity is folded into the tessellation highlight set
+        // (selected ∪ {hover}); see `wires_for_block_culled`. A hover handle
+        // that's already selected contributes nothing, so the effective set —
+        // and thus every WireModel — is identical. Only re-tessellate when the
+        // effective highlight contribution actually changes; hovering over (or
+        // between) already-selected entities then costs nothing. The field is
+        // still updated so hit-test / UI state stays current.
+        let contribution = |h: Option<Handle>| h.filter(|h| !self.selected.contains(h));
+        let changed = contribution(self.hover_highlight) != contribution(handle);
+        self.hover_highlight = handle;
+        if changed {
             self.bump_geometry();
         }
     }
