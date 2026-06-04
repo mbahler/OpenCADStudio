@@ -146,7 +146,7 @@ impl CadCommand for MlineCommand {
 fn build_mline(pts: &[Vec3], scale: f64, closed: bool, style_name: &str) -> EntityType {
     let verts: Vec<Vector3> = pts
         .iter()
-        .map(|p| Vector3::new(p.x as f64, p.z as f64, p.y as f64))
+        .map(|p| Vector3::new(p.x as f64, p.y as f64, p.z as f64))
         .collect();
     let mut mline = if closed {
         MLine::closed_from_points(&verts)

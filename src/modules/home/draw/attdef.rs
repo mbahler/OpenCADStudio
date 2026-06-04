@@ -117,7 +117,7 @@ impl CadCommand for AttdefCommand {
                 tag: tag.clone(),
                 prompt: prompt.clone(),
                 default_value: default.clone(),
-                insertion_point: Vector3::new(pt.x as f64, pt.z as f64, pt.y as f64),
+                insertion_point: Vector3::new(pt.x as f64, pt.y as f64, pt.z as f64),
                 height: self.height,
                 ..Default::default()
             };

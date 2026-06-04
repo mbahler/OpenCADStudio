@@ -86,7 +86,7 @@ impl CadCommand for DonutCommand {
     fn on_point(&mut self, pt: Vec3) -> CmdResult {
         match &self.state {
             DonutState::PlaceCenter => {
-                let entity = make_donut(pt.x as f64, pt.z as f64, self.inner_r, self.outer_r);
+                let entity = make_donut(pt.x as f64, pt.y as f64, self.inner_r, self.outer_r);
                 // Keep command active so user can place more donuts.
                 CmdResult::CommitEntity(entity)
             }

@@ -168,18 +168,18 @@ impl CadCommand for WipeoutCommand {
 }
 
 fn make_rect_wipeout(p1: Vec3, p2: Vec3) -> EntityType {
-    // Y-up world: X→DXF X, Z→DXF Y, Y→DXF Z
-    let c1 = Vector3::new(p1.x.min(p2.x) as f64, p1.z.min(p2.z) as f64, p1.y as f64);
-    let c2 = Vector3::new(p1.x.max(p2.x) as f64, p1.z.max(p2.z) as f64, p1.y as f64);
+    // Drawing plane is world XY (z = elevation).
+    let c1 = Vector3::new(p1.x.min(p2.x) as f64, p1.y.min(p2.y) as f64, p1.z as f64);
+    let c2 = Vector3::new(p1.x.max(p2.x) as f64, p1.y.max(p2.y) as f64, p1.z as f64);
     EntityType::Wipeout(Wipeout::from_corners(c1, c2))
 }
 
 fn make_poly_wipeout(pts: &[Vec3]) -> EntityType {
     use acadrust::types::Vector2;
-    let z = pts[0].y as f64;
+    let z = pts[0].z as f64;
     let verts: Vec<Vector2> = pts
         .iter()
-        .map(|p| Vector2::new(p.x as f64, p.z as f64))
+        .map(|p| Vector2::new(p.x as f64, p.y as f64))
         .collect();
     EntityType::Wipeout(Wipeout::polygonal(&verts, z))
 }

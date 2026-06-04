@@ -109,7 +109,7 @@ fn make_revcloud(pts: &[Vec3], arc_len: f64) -> EntityType {
     for i in 0..n {
         let p0 = pts[i];
         let p1 = pts[(i + 1) % n];
-        let seg_len = ((p1.x - p0.x).powi(2) + (p1.z - p0.z).powi(2)).sqrt() as f64;
+        let seg_len = ((p1.x - p0.x).powi(2) + (p1.y - p0.y).powi(2)).sqrt() as f64;
         if seg_len < 1e-6 {
             continue;
         }
@@ -117,11 +117,11 @@ fn make_revcloud(pts: &[Vec3], arc_len: f64) -> EntityType {
         // How many full arcs fit?
         let num_arcs = ((seg_len / arc_len).round() as usize).max(1);
         let step_x = (p1.x - p0.x) as f64 / num_arcs as f64;
-        let step_z = (p1.z - p0.z) as f64 / num_arcs as f64;
+        let step_y = (p1.y - p0.y) as f64 / num_arcs as f64;
 
         for j in 0..num_arcs {
             let x = p0.x as f64 + step_x * j as f64;
-            let y = p0.z as f64 + step_z * j as f64; // DXF Y
+            let y = p0.y as f64 + step_y * j as f64; // DXF Y
             let mut v = LwVertex::new(Vector2::new(x, y));
             v.bulge = bump_bulge;
             vertices.push(v);

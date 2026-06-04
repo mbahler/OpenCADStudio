@@ -43,7 +43,7 @@ impl ImageCommand {
         let world_width = ((width_pt.x - origin.x) as f64).abs().max(0.001);
         let world_height = world_width / self.aspect();
 
-        let ins = Vector3::new(origin.x as f64, origin.z as f64, origin.y as f64);
+        let ins = Vector3::new(origin.x as f64, origin.y as f64, origin.z as f64);
 
         let mut img = RasterImage::with_size(
             &self.file_path,
