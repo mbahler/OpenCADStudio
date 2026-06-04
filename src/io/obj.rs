@@ -27,14 +27,15 @@ pub fn parse_obj(src: &str, color: [f32; 4]) -> Option<MeshModel> {
             "v" => {
                 let vals: Vec<f32> = parts.filter_map(|s| s.parse().ok()).collect();
                 if vals.len() >= 3 {
-                    // OBJ: Y-up right-handed.  OpenCADStudio viewport is also Y-up → keep as-is.
-                    positions.push([vals[0], vals[1], vals[2]]);
+                    // OBJ is Y-up right-handed; OpenCADStudio's world is Z-up.
+                    // Rotate +90° about X so OBJ Y→world Z (up): (x, y, z) → (x, -z, y).
+                    positions.push([vals[0], -vals[2], vals[1]]);
                 }
             }
             "vn" => {
                 let vals: Vec<f32> = parts.filter_map(|s| s.parse().ok()).collect();
                 if vals.len() >= 3 {
-                    normals_raw.push([vals[0], vals[1], vals[2]]);
+                    normals_raw.push([vals[0], -vals[2], vals[1]]);
                 }
             }
             "f" => {

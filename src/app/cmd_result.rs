@@ -1230,11 +1230,11 @@ impl OpenCADStudio {
                         let wire = wire?;
                         let origin = Point3::new(
                             axis_start.x as f64,
-                            axis_start.z as f64,
                             axis_start.y as f64,
+                            axis_start.z as f64,
                         );
                         let dir = (axis_end - axis_start).normalize();
-                        let axis = TruckVec3::new(dir.x as f64, dir.z as f64, dir.y as f64);
+                        let axis = TruckVec3::new(dir.x as f64, dir.y as f64, dir.z as f64);
                         let shell = builder::rsweep(
                             &wire,
                             origin,
