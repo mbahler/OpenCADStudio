@@ -1325,6 +1325,8 @@ impl OpenCADStudio {
                         }
                         self.tabs[i].scene.hidden.remove(&h);
                         self.tabs[i].scene.clear_preview_wire();
+                        // Geometry restored to the backup — re-tessellate just it.
+                        self.tabs[i].scene.mark_entity_dirty(h);
                         self.tabs[i].scene.bump_geometry_no_blocks();
                         self.refresh_selected_grips();
                     }
@@ -2652,6 +2654,8 @@ impl OpenCADStudio {
                         self.grip_original = None;
                         self.tabs[i].scene.hidden.remove(&h);
                         self.tabs[i].scene.clear_preview_wire();
+                        // Only the dragged entity changed — re-tessellate just it.
+                        self.tabs[i].scene.mark_entity_dirty(h);
                         self.tabs[i].scene.bump_geometry_no_blocks();
                     }
                     // Placement confirmed — keep the just-added leader.

@@ -119,7 +119,23 @@ read-only over the finished `defns` map and re-walks shared nested defns
 (no memo), so the per-name resolves fan out across rayon (read phase), then a
 serial phase stores each AABB back.
 
-### 2.2 Incremental wire cache (delta tessellation)
+### 2.2 Incremental wire cache (delta tessellation) ✅ DONE (render path)
+
+A per-entity tessellation memo (`tess_memo`, `Handle → Arc<Vec<WireModel>>`)
+sits inside `wires_for_block_culled` on the culled Model render path. It's
+keyed by a guard hash of the tessellation parameters (tol / view / anno /
+offset / bg / entered viewport); a mismatch (zoom, layout) clears it.
+`bump_geometry` clears it (structural change); incremental edits drop just the
+changed handle via `mark_entity_dirty` and bump with `bump_geometry_no_blocks`.
+So a single-entity edit (line commit, grip commit/cancel) re-tessellates only
+that entity and reuses every other — the per-entity geometry math is skipped
+for the unchanged set. The hit-test (`view_aabb == None`), paper and
+per-viewport paths bypass the memo so their cull params don't thrash it.
+
+Remaining: the assembly still concatenates into one `Vec` and rebuilds the
+batched GPU buffer (O(N) clone + upload), and the uncalled hit-test
+(`entity_wires_arc`) still rebuilds on edit — driving those to true O(1)
+needs per-handle GPU slots, which trade against the single-draw batch (3.3).
 
 `bump_geometry()` invalidates the whole wire cache today
 ([`scene/mod.rs:650`](src/scene/mod.rs#L650)). Edits usually touch 1-2

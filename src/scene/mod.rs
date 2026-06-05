@@ -775,6 +775,17 @@ pub struct Scene {
     /// `selection_generation`. Rebuilt only when the selection changes so
     /// `build_primitive` doesn't clone the set every frame.
     highlight_set_cache: RefCell<Option<(u64, Arc<HashSet<Handle>>)>>,
+    /// Per-entity tessellation memo for the culled Model render path (Phase
+    /// 2.2). Maps a top-level handle to its already-tessellated wires so a
+    /// single-entity edit re-tessellates only the changed entity and reuses the
+    /// rest, instead of re-running the whole model. Keyed implicitly by
+    /// `tess_memo_guard` (tol / view / anno / offset / bg); a guard mismatch
+    /// (zoom, layout, …) clears it. `bump_geometry` clears it (structural
+    /// change); `mark_entity_dirty` drops one handle (incremental edit).
+    tess_memo: RefCell<HashMap<Handle, Arc<Vec<WireModel>>>>,
+    /// Hash of the tessellation parameters `tess_memo` was built under. When
+    /// the current call's parameters differ, the memo is stale and cleared.
+    tess_memo_guard: std::cell::Cell<u64>,
 }
 
 impl Scene {
@@ -840,6 +851,8 @@ impl Scene {
             wire_force_nonce: std::cell::Cell::new(0),
             split_cache: RefCell::new(None),
             highlight_set_cache: RefCell::new(None),
+            tess_memo: RefCell::new(HashMap::default()),
+            tess_memo_guard: std::cell::Cell::new(0),
         }
     }
 
@@ -954,6 +967,15 @@ impl Scene {
         // Default: also invalidate block definitions. Safe for every caller;
         // operations that know blocks are untouched use `bump_geometry_no_blocks`.
         self.block_epoch = GEOMETRY_EPOCH.fetch_add(1, Ordering::Relaxed);
+        // Structural change — drop the whole per-entity tessellation memo.
+        self.tess_memo.borrow_mut().clear();
+    }
+
+    /// Drop a single entity from the tessellation memo so the next render
+    /// re-tessellates just that entity while reusing every other. Pair with
+    /// [`bump_geometry_no_blocks`] for an incremental single-entity edit.
+    pub fn mark_entity_dirty(&mut self, handle: Handle) {
+        self.tess_memo.borrow_mut().remove(&handle);
     }
 
     /// Invalidate the visible-wire tessellation but KEEP the cached block
@@ -2243,23 +2265,88 @@ impl Scene {
             crate::scene::truck_tess::set_curve_tol_override(Some((w * 0.5) as f64));
             CurveTolGuard
         });
-        let mut wires: Vec<WireModel> = visible
-            .into_par_iter()
-            .flat_map(|e| {
-                tessellate_entity(
-                    doc,
-                    sel,
-                    avp,
-                    woff,
-                    bg,
-                    anno,
-                    e,
-                    Some(blk_ref),
-                    view_aabb,
-                    wpp,
-                )
-            })
-            .collect();
+        // Per-entity tessellation memo (Phase 2.2) — only on the culled Model
+        // render path. A single-entity edit re-tessellates just the changed
+        // entity (dropped from the memo via `mark_entity_dirty`) and reuses the
+        // rest, instead of re-running every visible entity. The hit-test path
+        // (`view_aabb == None`) and paper / per-viewport paths bypass it so
+        // their different cull parameters don't thrash the memo.
+        let memo_active = view_aabb.is_some()
+            && is_model_block
+            && frozen_layers.is_none()
+            && anno_scale_override.is_none();
+        let mut wires: Vec<WireModel> = if memo_active {
+            // Guard hash of everything tessellate_entity output depends on
+            // besides the entity itself. A mismatch (zoom/tol, view, anno,
+            // offset, bg, entered viewport) means the memo is stale.
+            let guard = {
+                let mut g: u64 = 0xcbf2_9ce4_8422_2325;
+                let mut mix = |x: u64| g = g.rotate_left(13) ^ x;
+                mix(wpp.map(|w| w.to_bits() as u64).unwrap_or(u64::MAX));
+                if let Some(v) = view_aabb {
+                    for c in v {
+                        mix(c.to_bits() as u64);
+                    }
+                }
+                mix(anno.to_bits() as u64);
+                for c in woff {
+                    mix(c.to_bits());
+                }
+                for c in bg {
+                    mix(c.to_bits() as u64);
+                }
+                mix(avp.map(|h| h.value()).unwrap_or(0));
+                g
+            };
+            if self.tess_memo_guard.get() != guard {
+                self.tess_memo.borrow_mut().clear();
+                self.tess_memo_guard.set(guard);
+            }
+            // Classify (serial, cheap): reuse memoized Arcs, collect misses.
+            let mut hit_arcs: Vec<Arc<Vec<WireModel>>> = Vec::new();
+            let mut misses: Vec<&EntityType> = Vec::new();
+            {
+                let memo = self.tess_memo.borrow();
+                for e in &visible {
+                    let h = e.common().handle;
+                    match memo.get(&h) {
+                        Some(a) => hit_arcs.push(Arc::clone(a)),
+                        None => misses.push(*e),
+                    }
+                }
+            }
+            // Materialize hits + tessellate misses, both in parallel.
+            let hit_wires: Vec<WireModel> =
+                hit_arcs.par_iter().flat_map_iter(|a| a.iter().cloned()).collect();
+            let miss_pairs: Vec<(Handle, Arc<Vec<WireModel>>)> = misses
+                .par_iter()
+                .map(|e| {
+                    let e: &EntityType = e;
+                    let w = tessellate_entity(
+                        doc, sel, avp, woff, bg, anno, e, Some(blk_ref), view_aabb, wpp,
+                    );
+                    (e.common().handle, Arc::new(w))
+                })
+                .collect();
+            let mut out = hit_wires;
+            {
+                let mut memo = self.tess_memo.borrow_mut();
+                for (h, a) in &miss_pairs {
+                    out.extend(a.iter().cloned());
+                    memo.insert(*h, Arc::clone(a));
+                }
+            }
+            out
+        } else {
+            visible
+                .into_par_iter()
+                .flat_map(|e| {
+                    tessellate_entity(
+                        doc, sel, avp, woff, bg, anno, e, Some(blk_ref), view_aabb, wpp,
+                    )
+                })
+                .collect()
+        };
 
         // Apply draw order via the cached index (O(1) block lookup).
         {
