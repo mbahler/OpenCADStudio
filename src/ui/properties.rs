@@ -181,7 +181,7 @@ impl PropertiesPanel {
 
         // ── Title bar (entity type / "No Selection") ─────────────────────
         let title_content: Element<'_, Message> = if self.selection_groups.is_empty() {
-            text(&self.title).size(FONT_SZ).color(SECTION_LABEL).into()
+            text(crate::ui::text_util::elide(&self.title, 34)).size(FONT_SZ).color(SECTION_LABEL).into()
         } else {
             combo_box(
                 &self.selection_group_combo,
@@ -248,7 +248,7 @@ impl PropertiesPanel {
         if self.sections.is_empty() {
             return None;
         }
-        let title = container(text(&self.title).size(FONT_SZ).color(SECTION_LABEL))
+        let title = container(text(crate::ui::text_util::elide(&self.title, 34)).size(FONT_SZ).color(SECTION_LABEL))
             .style(|_: &Theme| container::Style {
                 background: Some(Background::Color(SECTION_BG)),
                 border: Border {
@@ -847,7 +847,8 @@ fn render_bool_row<'a>(label: &'a str, field: &'static str, value: bool) -> Elem
 }
 
 fn render_ro_row<'a>(label: &'a str, value: &'a str) -> Element<'a, Message> {
-    let label_col = container(text(label).size(FONT_SZ).color(LABEL_COLOR))
+    let value = crate::ui::text_util::elide(value, 22);
+    let label_col = container(text(crate::ui::text_util::elide(label, 18)).size(FONT_SZ).color(LABEL_COLOR))
         .style(|_: &Theme| container::Style {
             background: Some(Background::Color(LABEL_BG)),
             ..Default::default()
@@ -890,7 +891,7 @@ fn render_ro_row<'a>(label: &'a str, value: &'a str) -> Element<'a, Message> {
 
 /// Build a label | widget property row.
 fn prop_row_widget<'a>(label: &'a str, widget: Element<'a, Message>) -> Element<'a, Message> {
-    let label_col = container(text(label).size(FONT_SZ).color(LABEL_COLOR))
+    let label_col = container(text(crate::ui::text_util::elide(label, 18)).size(FONT_SZ).color(LABEL_COLOR))
         .style(|_: &Theme| container::Style {
             background: Some(Background::Color(LABEL_BG)),
             ..Default::default()

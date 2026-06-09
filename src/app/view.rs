@@ -1626,7 +1626,7 @@ pub(super) fn doc_tab_bar<'a>(tabs: &'a [DocumentTab], active_tab: usize) -> Ele
 
     for (idx, tab) in tabs.iter().enumerate() {
         let is_active = idx == active_tab;
-        let name = tab.tab_display_name();
+        let name = crate::ui::text_util::elide(&tab.tab_display_name(), 24);
         let label = if tab.dirty {
             format!("● {}", name)
         } else {
@@ -2977,7 +2977,7 @@ fn save_as_dialog_window<'a>(
                         row![
                             text(icon).size(13),
                             Space::new().width(6),
-                            text(name.as_str()).size(13).color(color),
+                            text(crate::ui::text_util::elide(name.as_str(), 48)).size(13).color(color),
                         ]
                         .align_y(iced::Alignment::Center),
                     )
@@ -3395,8 +3395,8 @@ pub(super) fn recent_files_panel<'a>(recents: &'a [std::path::PathBuf]) -> Eleme
             let path_for_open = path.clone();
             let open_btn = button(
                 column![
-                    text(name).size(12).color(TEXT),
-                    text(dir).size(10).color(MUTED),
+                    text(crate::ui::text_util::elide(&name, 32)).size(12).color(TEXT),
+                    text(crate::ui::text_util::elide(&dir, 42)).size(10).color(MUTED),
                 ]
                 .spacing(2),
             )

@@ -27,6 +27,7 @@ pub mod statusbar;
 pub mod statusbar_config;
 pub mod statusbar_menu;
 pub mod tablestyle;
+pub mod text_util;
 pub mod textstyle;
 pub mod units_popup;
 

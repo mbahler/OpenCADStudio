@@ -9,7 +9,7 @@ use acadrust::types::aci_table::aci_to_rgb;
 use acadrust::types::{Color as AcadColor, LineWeight};
 use acadrust::Handle;
 use iced::widget::{
-    button, column, combo_box, container, mouse_area, row, scrollable, text, text_input,
+    button, column, combo_box, container, mouse_area, row, scrollable, text, text_input, tooltip,
 };
 use iced::Padding;
 use iced::{Background, Border, Color, Element, Fill, Length, Theme};
@@ -373,6 +373,27 @@ fn toolbar_btn_cond(label: &str, msg: Message, enabled: bool) -> Element<'_, Mes
 // ── Layer row ─────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
+/// Hover popup showing a layer's full name when the cell truncates it.
+fn name_tip<'a>(name: &'a str) -> Element<'a, Message> {
+    container(text(name).size(FONT_SZ).color(ROW_TEXT))
+        .padding(Padding {
+            top: 3.0,
+            bottom: 3.0,
+            left: 7.0,
+            right: 7.0,
+        })
+        .style(|_: &Theme| container::Style {
+            background: Some(Background::Color(PANEL_BG)),
+            border: Border {
+                color: BORDER_COLOR,
+                width: 1.0,
+                radius: 3.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
 fn layer_row<'a>(
     index: usize,
     layer: &'a Layer,
@@ -499,29 +520,40 @@ fn layer_row<'a>(
             .width(Length::Fixed(COL_NAME))
             .into()
     } else {
-        button(text(&layer.name).size(FONT_SZ).color(ROW_TEXT))
-            .on_press(Message::LayerRenameStart(index))
-            .style(|_: &Theme, status| button::Style {
-                background: Some(Background::Color(match status {
-                    button::Status::Hovered => Color {
-                        r: 0.30,
-                        g: 0.30,
-                        b: 0.30,
-                        a: 1.0,
-                    },
-                    _ => Color::TRANSPARENT,
-                })),
-                ..Default::default()
-            })
-            .padding(Padding {
-                top: COMBO_PAD_V,
-                bottom: COMBO_PAD_V,
-                left: 4.0,
-                right: 4.0,
-            })
-            .height(Length::Fixed(ROW_H))
-            .width(Length::Fixed(COL_NAME))
-            .into()
+        const NAME_BUDGET: usize = 17;
+        let name_btn = button(
+            text(crate::ui::text_util::elide(&layer.name, NAME_BUDGET))
+                .size(FONT_SZ)
+                .color(ROW_TEXT),
+        )
+        .on_press(Message::LayerRenameStart(index))
+        .style(|_: &Theme, status| button::Style {
+            background: Some(Background::Color(match status {
+                button::Status::Hovered => Color {
+                    r: 0.30,
+                    g: 0.30,
+                    b: 0.30,
+                    a: 1.0,
+                },
+                _ => Color::TRANSPARENT,
+            })),
+            ..Default::default()
+        })
+        .padding(Padding {
+            top: COMBO_PAD_V,
+            bottom: COMBO_PAD_V,
+            left: 4.0,
+            right: 4.0,
+        })
+        .height(Length::Fixed(ROW_H))
+        .width(Length::Fixed(COL_NAME));
+        // When the name is truncated, reveal the full text on hover so the
+        // user can still read it without widening the column.
+        if layer.name.chars().count() > NAME_BUDGET {
+            tooltip(name_btn, name_tip(&layer.name), tooltip::Position::FollowCursor).into()
+        } else {
+            name_btn.into()
+        }
     };
 
     // Color cell — looks like a combo_box input; click opens swatch dropdown below row.
