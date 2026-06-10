@@ -29,25 +29,6 @@ frame" for a 50 MB DWG.
 
 ### 1.1 Drop the second `purge_corrupt_entities` ✅ DONE
 
-Today `purge_corrupt_entities` runs once on the
-[background thread](src/io/mod.rs#L62-L74) and again in the
-[`FileOpened` handler after xref resolve](src/app/update.rs#L138-L145).
-XREF content already comes from a separate document — fold the purge
-**inline** into xref resolve and delete the outer one. On large files
-walking `doc.entities()` again is a measurable cost.
-
-**Work:** make `resolve_xrefs` call purge as it merges each xref; remove
-[`update.rs:138`](src/app/update.rs#L138).
-
-### 1.2 Move XREF resolution to the background thread
-
-[`resolve_xrefs`](src/app/update.rs#L132-L166) runs on the UI thread today —
-large external references freeze the UI. Move it into the
-`open_path_with_phase` worker; have `DerivedCaches` carry the resolved-xref
-list back. The UI thread only emits log lines.
-
-**New phase tag:** `PHASE_XREFS` (we already have 3 phases; this is the 4th).
-
 ### 1.3 Single-pass entity walk (parse + purge + cache planning)
 
 `load_file` → `purge` → `build_derived_caches` does three separate
@@ -55,10 +36,9 @@ list back. The UI thread only emits log lines.
 
 - corrupt-entity detection,
 - hatch / image / mesh handle lists,
-- AABB accumulation for `world_offset` (currently a separate pass inside
-  `compute_world_offset`).  ✅ the world_offset AABB scan is now folded into
-  the cache-handle walk (see 2.4); corrupt-detect + hatch/image/mesh planning
-  remain a follow-up.
+- AABB accumulation for `world_offset` (the world_offset AABB scan is now
+  folded into the cache-handle walk — see 2.4; corrupt-detect + hatch/image/
+  mesh planning remain a follow-up).
 
 Target: three `O(N)` passes → one.
 
@@ -109,79 +89,7 @@ After `FileOpened`, `bump_geometry()` fires; the first frame tessellates
 
 ### 2.1 Parallelize block-definition build ✅ DONE
 
-[`block_cache::build`](src/scene/block_cache.rs#L127) was single-threaded.
-No topological stratification was needed after all: `build_defn` stores
-nested INSERTs as by-name references (`LocalSub::Nested`) and never expands
-them at build time, so each defn depends only on the read-only `doc` — the
-builds are embarrassingly parallel. Now a plain rayon `par_iter().collect()`.
-`compute_block_aabbs` is also parallelized: its `defn_aabb_recursive` walk is
-read-only over the finished `defns` map and re-walks shared nested defns
-(no memo), so the per-name resolves fan out across rayon (read phase), then a
-serial phase stores each AABB back.
-
 ### 2.2 Incremental wire cache (delta tessellation) ✅ DONE (render path)
-
-A per-entity tessellation memo (`tess_memo`, `Handle → Arc<Vec<WireModel>>`)
-sits inside `wires_for_block_culled` on the culled Model render path. It's
-keyed by a guard hash of the tessellation parameters (tol / view / anno /
-offset / bg / entered viewport); a mismatch (zoom, layout) clears it.
-`bump_geometry` clears it (structural change); incremental edits drop just the
-changed handle via `mark_entity_dirty` and bump with `bump_geometry_no_blocks`.
-So a single-entity edit (line commit, grip commit/cancel, MOVE / ROTATE /
-SCALE / MIRROR, COPY, ERASE) re-tessellates only the touched entities and
-reuses every other — the per-entity geometry math is skipped for the
-unchanged set. `transform_entities` marks the moved handles dirty,
-`erase_entities` drops the deleted ones, and `copy_entities`' new handles are
-natural memo misses; all use `bump_geometry_no_blocks` so the block cache is
-kept too. The hit-test (`view_aabb == None`), paper and
-per-viewport paths bypass the memo so their cull params don't thrash it.
-
-Remaining: the assembly still concatenates into one `Vec` and rebuilds the
-batched GPU buffer (O(N) clone + upload), and the uncalled hit-test
-(`entity_wires_arc`) still rebuilds on edit — driving those to true O(1)
-needs per-handle GPU slots, which trade against the single-draw batch (3.3).
-
-`bump_geometry()` invalidates the whole wire cache today
-([`scene/mod.rs:650`](src/scene/mod.rs#L650)). Edits usually touch 1-2
-entities — re-tessellating the whole doc is waste.
-
-**Fix:** wire cache becomes `HashMap<Handle, (entity_version,
-Vec<WireModel>)>`. The editing command bumps the version of the affected
-handles; the render path re-tessellates only those, reusing the rest.
-
-Also useful on open: any partial cache (e.g. from block defns) can be
-re-used.
-
-**Partial (landed): block cache survives non-block edits.** The
-block-definition tessellation cache (`BlockCache::build`, every block defn)
-was keyed on `geometry_epoch`, so *any* edit rebuilt all block defns — a
-~30 ms baseline wire re-tess turned into a ~400 ms spike on block-heavy
-drawings at line-commit / grip-start / grip-release. The cache now keys on a
-separate `block_epoch`. `bump_geometry` bumps both (safe default); the
-operations that provably can't change a block defn — adding a top-level
-entity (`add_entity` for non-Insert/Block) and grip-moving an entity/insert —
-call `bump_geometry_no_blocks`, which re-tessellates only the visible wires
-(block cache reused). Block-content edits (REFCLOSE, block create, xref,
-explode) still go through full `bump_geometry`.
-
-**Partial (landed): grip drag.** Dragging an entity's grip called
-`scene.apply_grip` every move, which `bump_geometry`'d → a full model
-re-tessellation per move (plus an O(N) clone of all wires for snapping). Now
-the first move hides the edited entity from the base (one re-tess) and shows
-it as a one-entity overlay preview; subsequent moves only re-tessellate that
-one entity (cheap) — the base stays a cache hit. Snapping runs against the
-set directly (the edited entity is already hidden, so no clone and no
-self-snap). The drag commits on release / Esc: un-hide + one final re-tess.
-
-**Partial (landed): preview / interim overlays.** `set_preview_wires`,
-`clear_preview_wire` and `set_interim_wire` used to `bump_geometry`, so every
-rubber-band frame of a drawing command re-tessellated the whole model (the
-same 30 ms → 400 ms spike, but while drawing). Preview / interim wires are an
-overlay appended to the cached base wire set in `build_primitive`, not part of
-the tessellation cache — so they no longer bump geometry. The base stays a
-cache hit (no re-tess), and the overlay forces only a GPU wire re-upload via
-the `has_overlay` content-id path. Snap/hit-test (`entity_wires_arc`) also
-stops re-tessellating per preview frame.
 
 ### 2.3 Progressive first render
 
@@ -190,10 +98,6 @@ tol); refine to full tol on the second frame. The user sees *something*
 within 16 ms; detail snaps in smoothly afterwards.
 
 ### 2.4 Merge the world-offset scan into the single-pass walk ✅ DONE
-
-[`compute_world_offset`](src/scene/mod.rs#L128) walks the whole MSPACE
-AABB when the header is unreliable. That scan should join the single-pass
-walk from 1.3 (we are already iterating `entities()`).
 
 ---
 
@@ -216,95 +120,15 @@ geometry is camera-invariant.
   changed),
 - `frame_visible[handle] → bool` (recomputed per `camera_generation`).
 
-**Partial (landed): pan reuse.** The Model-tile wire cache no longer keys on
-the exact camera hash. It now keys on `(geometry_epoch, pan_invariant_hash,
-tessellated_region)` where `pan_invariant_hash` covers rotation + tol (`wpp`)
-but NOT the pan target. A pure pan keeps the epoch + signature and only shifts
-the view, so as long as the new visible rect still fits inside the
-1.25×-margin region the wires were culled to, the tessellation is reused
-outright — no re-tessellation, `tess ms` drops to ~0 on the PERF HUD. Zoom
-(changes `wpp`), orbit (changes rotation) and edits (change epoch) rebuild
-exactly as before; the cull margin is unchanged, so miss cost is identical
-(no zoom regression).
-
-**Partial (landed): selection decoupled.** Picking an entity used to call
-`bump_geometry`, invalidating the wire cache and re-tessellating the WHOLE
-model just to repaint one entity (30 ms → 400 ms on a large drawing). The
-highlight is no longer baked into tessellation: wires are always base-coloured
-(`sel` is empty in `wires_for_block_culled`), and the selection highlight is
-applied in the GPU xray overlay from the live `selected ∪ hover` set,
-recoloured to `WireModel::SELECTED`. Selection / hover now bump a cheap
-`selection_generation` instead of `geometry_epoch`, so the overlay refreshes
-without any re-tessellation or main-buffer re-upload. `tess ms` stays flat
-when selecting.
-
-**Partial (landed): per-frame split.** `build_primitive` ran
-`split_face3d_wires` every frame — an O(N) per-wire handle lookup + clone to
-separate Face3D wires — even on a pan that reused the tessellation. It's now
-memoized by the tile's wire content id, and the non-overlay frame reuses the
-`other` Arc with no clone at all. So a pan reuses tessellation, the split, and
-the GPU upload; only the uniform + scissors update per frame.
-
-**Partial (landed): hover.** `set_hover_highlight` no longer bumps the geometry
-epoch (a full re-tessellation) when the hovered entity is already selected —
-the effective highlight set `selected ∪ {hover}` is then unchanged, so the
-tessellation output is identical. Hovering over / between selected entities
-is now free. The full camera/selection-from-tessellation split is still open
-and needs running-app verification (highlight colour is baked into
-`WireModel.color` across several tessellation sites).
+Partials already landed: pan reuse, selection/hover decoupled from
+tessellation, per-frame `split_face3d_wires` memoized. **Still open:** the
+full camera/selection-from-tessellation split — highlight colour is still
+baked into `WireModel.color` across several tessellation sites, so finishing
+this needs running-app verification.
 
 ### 3.2 Persistent GPU buffer pool — diff upload ✅ DONE (wire pan path)
 
-Wire vertex buffers are world-space, so a camera move alone never changes
-them — only the `view_proj` uniform (already uploaded per frame). The wire
-upload was gated on `(geometry_epoch, camera_generation)`, re-sending every
-pan. Now each Model-tile tessellation is stamped with a monotonic content id
-(`WIRE_CONTENT_GEN`), reused when a pan reuses the tessellation; the pipeline
-holds the resident buffer's id and `upload_wires` is skipped when it matches.
-Gate is independent of the camera tick so a preview/interim change still
-uploads. Non-tile paths and overlay frames force a fresh id (unchanged
-behaviour). Monotonic id avoids the ABA hazard of a raw `Arc` pointer.
-
-Still open: a true `HashMap<Handle, GpuSlot>` per-entity pool for partial
-edits (re-upload only the changed slots); this covers the whole-buffer
-pan/idle case, the dominant one.
-
-Today every wire GPU buffer is re-uploaded when
-[`cached_epoch`](src/scene/pipeline/mod.rs#L101) changes. A persistent
-pool — `HashMap<Handle, GpuSlot>` — uploads only the slots that actually
-changed. Big win in CAD-edit scenarios.
-
 ### 3.3 Single-draw batched wire pipeline (Phase 4-B-style) ✅ DONE
-
-`upload_wires` made one GPU buffer + one draw call per `WireModel` (tens of
-thousands on a large drawing). Now it merges maximal runs of *consecutive*
-wires sharing scissor + mesh-edge state into one concatenated instance buffer
-each (`WireGpu::from_run`), so the existing draw loop issues one draw per run
-— a 2D model collapses to a single buffer + single draw. Runs stay
-*consecutive* (not globally regrouped) so the sorted draw order is preserved
-bit-for-bit; depth bias and alpha blending are unchanged. The `WireInstance`
-layout, shader, scissor logic and draw loop are untouched — only the buffer
-packing changed. (No iced widget-pipeline limits were hit: the change lives
-entirely inside the existing custom wgpu pipeline.)
-
-Every `WireModel` today costs one draw call plus a bind-group swap. Port
-the batched hatch pipeline (`hatch_batched_gpu.rs`) to wires:
-
-- pack all wire vertices into one storage buffer,
-- per-instance `(color, pattern_id, lw_px, visibility)` in a side buffer,
-- vertex shader pulls instance data via `instance_index`,
-- a single `pass.draw(0..V, 0..N)` covers everything.
-
-At 100 k wires that collapses thousands of draw calls into one. If iced
-0.14's widget-pipeline limits allow, immediate win.
-
-**Follow-up (landed): separate overlay buffer.** Command-preview / interim /
-grip-drag wires were appended into the main wire buffer, so every drag frame
-re-uploaded the entire (batched) base set. They now ride in their own small
-per-frame `gpu_preview_wires` buffer drawn on top in the wire pass, so the
-resident base buffer stays untouched during a drag — only the tiny overlay
-re-uploads. Combined with the no-re-tess work, a grip/command drag now costs
-one small overlay upload per move, nothing else.
 
 ### 3.4 Hardware instancing for repeated block inserts
 
@@ -318,22 +142,13 @@ set. Hardware instancing:
 
 Typical architectural DWGs: 10-100× faster.
 
-### 3.5 Glyph-stroke batching
-
-`tessellate.rs` produces one `WireModel` per glyph stroke today — one text
-entity = dozens of models. Cache stroke geometry per font once
-(`HashMap<(font, glyph), Vec<Point2>>`), then per-text only a transform
-matters.
+### 3.5 Glyph-stroke batching ✅ DONE
 
 ---
 
 ## Phase 4 — Allocation & Memory
 
 ### 4.1 Swap `HashMap` for `rustc-hash::FxHashMap` ✅ DONE
-
-`Handle` is an integer wrapper; the default `SipHash` is overkill.
-`FxHashMap` gives 20-40 % in hash-heavy sites (block_cache, hatches /
-images / meshes, viewport_wire_cache).
 
 ### 4.2 Arena (`bumpalo`) for transient wire vertices
 
@@ -369,43 +184,23 @@ Gate behind `debug_assertions` or a `--features profile` flag.
 
 ### 5.2 Open-time breakdown log ✅ DONE
 
-When open completes, push to the command line:
-
-```
-Opened "x.dwg" — 84321 entities — parse 1.2s, purge 80ms, caches 340ms, xref 60ms, first frame 210ms
-```
-
-Regressions are visible immediately.
-
 ### 5.3 Frame-budget HUD ✅ DONE (CPU tess slice)
-
-A CLI `PERF` toggle overlays the cost of the most recent wire
-re-tessellation (ms + wire count + geometry epoch) on the active viewport,
-anchored top-left. Reads ~0 ms while the wire cache is warm (idle
-pan/zoom), so it isolates exactly the work a cache miss costs — the slice
-every render-path change (2.2 / 3.1 / 3.3) moves. Timed at the miss paths
-in `model_tile_wires_arc` / `paper_sheet_wires_arc` and stored on `Scene`.
-
-Still open: GPU-side `upload` / `draw` / `GPU-wait` spans need wgpu
-timestamp queries; the CPU tessellation slice covers the current hot path.
 
 ---
 
 ## Priority Order
 
-**Phase 5 first** (profiling) — avoids speculation.
+**Phase 5.1 first** (the remaining profiling span work) — avoids speculation.
 
-Then, measurement-guided:
+Then, measurement-guided, the remaining items:
 
-1. **Phase 1.1 + 1.2** (cheap, low-risk, certain win).
-2. **Phase 1.3 + 1.6** (single-pass + lazy image).
-3. **Phase 2.2** (incremental wire cache — wins on both edit and open).
-4. **Phase 3.1** (camera-only invalidation — users pan/zoom constantly).
-5. **Phase 3.3** (batched wire pipeline) and **Phase 3.4** (instancing) —
-   biggest render win, highest complexity.
-6. **Phase 1.7** (warm cache) — dramatic UX, but invalidation must be
+1. **Phase 1.3 + 1.6** (single-pass walk + lazy image decode).
+2. **Phase 3.1** (camera-only invalidation — users pan/zoom constantly; the
+   hard part of the tess/selection split is what's left).
+3. **Phase 3.4** (block instancing) — biggest render win, highest complexity.
+4. **Phase 1.7** (warm cache) — dramatic UX, but invalidation must be
    correct or it creates nasty bugs.
-7. **Phase 1.5** (acadrust parallel parse) — hardest, longest-term; only
+5. **Phase 1.5** (acadrust parallel parse) — hardest, longest-term; only
    worth it if profiling confirms it is the dominant slice.
 
 ## Deliberate non-goals (for now)
