@@ -134,6 +134,11 @@ pub struct Pipeline {
     /// a pick bumps only `selection_generation`, refreshing the overlay without
     /// touching the main wire buffers.
     pub cached_selection: (u64, u64),
+    /// Handle → indices into the resident wire set, built once per wire upload
+    /// (when `cached_wire_id` changes). Lets the selection/hover xray overlay
+    /// gather just the highlighted entity's wires (`O(highlighted)`) instead of
+    /// scanning and string-parsing every wire on each hover change.
+    wire_handle_index: rustc_hash::FxHashMap<u64, Vec<u32>>,
 }
 
 impl Pipeline {
@@ -905,6 +910,7 @@ impl Pipeline {
             cached_epoch: (u64::MAX, u64::MAX, u64::MAX),
             cached_wire_id: u64::MAX,
             cached_selection: (u64::MAX, u64::MAX),
+            wire_handle_index: rustc_hash::FxHashMap::default(),
         }
     }
 
@@ -939,6 +945,17 @@ impl Pipeline {
             i = j;
         }
         self.gpu_wires = batches;
+
+        // Index handle → wire slots once, here, so the per-hover selection
+        // overlay can gather just the highlighted wires instead of scanning +
+        // string-parsing the whole set every time the hovered entity changes.
+        self.wire_handle_index.clear();
+        self.wire_handle_index.reserve(wires.len());
+        for (idx, w) in wires.iter().enumerate() {
+            if let Ok(h) = w.name.parse::<u64>() {
+                self.wire_handle_index.entry(h).or_default().push(idx as u32);
+            }
+        }
     }
 
     /// Build the selection xray overlay: full-brightness copies of the wires
@@ -960,19 +977,23 @@ impl Pipeline {
             self.gpu_selected_wires = vec![];
             return;
         }
+        // Gather only the highlighted entities' wires via the prebuilt index —
+        // O(highlighted), no per-wire string parse / full-set scan. Indices are
+        // collected then sorted so the xray run keeps the original draw order.
+        let mut slots: Vec<u32> = Vec::new();
+        for h in highlight {
+            if let Some(idxs) = self.wire_handle_index.get(&h.value()) {
+                slots.extend_from_slice(idxs);
+            }
+        }
+        slots.sort_unstable();
         // Recolor to the selection highlight: the xray pass uses the normal
         // wire shader (no forced colour), so the highlight now lives here
         // instead of being baked into the tessellation. Drawn on top with
         // depth-compare Always, so it overrides the base-coloured main pass.
-        let selected: Vec<WireModel> = wires
+        let selected: Vec<WireModel> = slots
             .iter()
-            .filter(|w| {
-                w.name
-                    .parse::<u64>()
-                    .ok()
-                    .map(acadrust::Handle::new)
-                    .is_some_and(|h| highlight.contains(&h))
-            })
+            .filter_map(|&i| wires.get(i as usize))
             .map(|w| {
                 let mut c = w.clone();
                 c.color = WireModel::SELECTED;

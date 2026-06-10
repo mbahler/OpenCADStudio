@@ -32,8 +32,40 @@ pub fn click_hit<'a>(
     let mut best_dist = CLICK_THRESHOLD_PX;
     let mut best: Option<&str> = None;
 
+    // World z only shifts the *screen* x/y when the view is tilted (orbit /
+    // perspective). In the flat top-down ortho view — the case where hover lag
+    // on large drawings actually bites — a wire's screen position depends only
+    // on its world x/y, so its world-space AABB projects exactly and we can
+    // reject wires nowhere near the cursor without projecting any of their
+    // points (the dominant per-move cost on 100 k-wire drawings).
+    let z_flat = view_proj.z_axis.x.abs() < 1e-9 && view_proj.z_axis.y.abs() < 1e-9;
+
     // Q: lazy projection — no Vec allocation per wire; NaN resets the segment chain.
     for wire in wires {
+        // Cheap AABB pre-reject (flat view only; never for the unbounded
+        // sentinel used by previews / greeked text).
+        if z_flat && wire.aabb != WireModel::UNBOUNDED_AABB {
+            let [minx, miny, maxx, maxy] = wire.aabb;
+            // Project all four corners — a plan view can be rotated about Z, so
+            // the screen footprint isn't axis-aligned and the two diagonal
+            // corners alone wouldn't bound it.
+            let mut sx0 = f32::MAX;
+            let mut sy0 = f32::MAX;
+            let mut sx1 = f32::MIN;
+            let mut sy1 = f32::MIN;
+            for (cx, cy) in [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)] {
+                let s = world_to_screen(Vec3::new(cx, cy, 0.0), view_proj, bounds);
+                sx0 = sx0.min(s.x);
+                sx1 = sx1.max(s.x);
+                sy0 = sy0.min(s.y);
+                sy1 = sy1.max(s.y);
+            }
+            let t = CLICK_THRESHOLD_PX;
+            if cursor.x < sx0 - t || cursor.x > sx1 + t || cursor.y < sy0 - t || cursor.y > sy1 + t
+            {
+                continue;
+            }
+        }
         let mut prev: Option<Point> = None;
         for &[px, py, pz] in &wire.points {
             if px.is_nan() {
@@ -589,4 +621,33 @@ fn dist_point_to_segment(p: Point, a: Point, b: Point) -> f32 {
     let dx = p.x - cx;
     let dy = p.y - cy;
     (dx * dx + dy * dy).sqrt()
+}
+
+#[cfg(test)]
+mod aabb_reject_tests {
+    use super::*;
+
+    fn wire(name: &str, pts: Vec<[f32; 3]>, aabb: [f32; 4]) -> WireModel {
+        let mut w = WireModel::solid(name.to_string(), pts, [1.0; 4], false);
+        w.aabb = aabb;
+        w
+    }
+
+    // Identity ortho view: world (x,y) → screen ((x+1)*100, (1-y)*100) for a
+    // 200×200 viewport. The view is flat (z_axis.xy == 0) so the AABB pre-reject
+    // is active — these tests guard it against false negatives.
+    #[test]
+    fn aabb_reject_keeps_near_wire_drops_far() {
+        let vp = Mat4::IDENTITY;
+        let bounds = Rectangle { x: 0.0, y: 0.0, width: 200.0, height: 200.0 };
+        let cursor = Point::new(100.0, 100.0); // world origin
+
+        let near = wire("5", vec![[-0.02, 0.0, 0.0], [0.02, 0.0, 0.0]], [-0.02, 0.0, 0.02, 0.0]);
+        let far = wire("9", vec![[0.9, 0.9, 0.0], [0.95, 0.9, 0.0]], [0.9, 0.9, 0.95, 0.9]);
+
+        assert_eq!(click_hit(cursor, std::slice::from_ref(&near), vp, bounds), Some("5"));
+        assert_eq!(click_hit(cursor, std::slice::from_ref(&far), vp, bounds), None);
+        // The far wire must be rejected without hiding the near one.
+        assert_eq!(click_hit(cursor, &[far, near], vp, bounds), Some("5"));
+    }
 }
