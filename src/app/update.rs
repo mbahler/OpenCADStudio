@@ -300,6 +300,19 @@ impl OpenCADStudio {
                 self.tabs[i].scene.current_layout = "Model".to_string();
                 crate::linetypes::populate_document(&mut self.tabs[i].scene.document);
                 self.tabs[i].properties = PropertiesPanel::empty();
+                // Seed the current table / multileader style from the file's
+                // header so the ✓ marks the right one (text/dim/mline come from
+                // the document header directly). DXF provides these via
+                // $CTABLESTYLE / $CMLEADERSTYLE; DWG leaves them at "Standard".
+                self.ribbon.active_table_style =
+                    self.tabs[i].scene.document.header.current_table_style_name.clone();
+                self.tabs[i].active_mleader_style = self
+                    .tabs[i]
+                    .scene
+                    .document
+                    .header
+                    .current_mleader_style_name
+                    .clone();
                 let doc_layers = self.tabs[i].scene.document.layers.clone();
                 let vp_info = self.tabs[i].scene.viewport_list();
                 self.tabs[i]
@@ -6556,11 +6569,15 @@ impl OpenCADStudio {
                 Task::none()
             }
             Message::TableStyleDialogSetCurrent => {
+                // Staged: persists on Apply. The header field is the round-trip
+                // source of truth ($CTABLESTYLE); the ribbon mirrors it.
+                let i = self.active_tab;
                 let name = self.tablestyle_selected.clone();
                 if self
                     .style_names(crate::app::StyleKind::Table)
                     .contains(&name)
                 {
+                    self.tabs[i].scene.document.header.current_table_style_name = name.clone();
                     self.ribbon.active_table_style = name.clone();
                     self.command_line
                         .push_output(&format!("Current table style: {name}"));
@@ -6727,6 +6744,9 @@ impl OpenCADStudio {
                     .values()
                     .any(|o| matches!(o, ObjectType::MultiLeaderStyle(s) if s.name == name));
                 if exists {
+                    // Staged: header field is the round-trip source of truth
+                    // ($CMLEADERSTYLE); the ribbon/tab mirror it.
+                    self.tabs[i].scene.document.header.current_mleader_style_name = name.clone();
                     self.tabs[i].active_mleader_style = name.clone();
                     self.ribbon.active_mleader_style = name.clone();
                     self.command_line

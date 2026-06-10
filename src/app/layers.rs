@@ -119,10 +119,15 @@ impl OpenCADStudio {
                 }
             })
             .collect();
-        let active_table = table_names
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "Standard".to_string());
+        let active_table = self.ribbon.active_table_style.clone();
+        let active_table = if table_names.contains(&active_table) {
+            active_table
+        } else {
+            table_names
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Standard".to_string())
+        };
 
         let active_mleader2 = active_mleader.clone();
         let active_table2 = active_table.clone();

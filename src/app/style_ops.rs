@@ -473,6 +473,8 @@ impl OpenCADStudio {
             current_text: doc.header.current_text_style_name.clone(),
             current_dim: doc.header.current_dimstyle_name.clone(),
             multiline_style: doc.header.multiline_style.clone(),
+            current_table: doc.header.current_table_style_name.clone(),
+            current_mleader: doc.header.current_mleader_style_name.clone(),
             active_table: self.ribbon.active_table_style.clone(),
             active_mleader: self.ribbon.active_mleader_style.clone(),
             tab_active_mleader: self.tabs[i].active_mleader_style.clone(),
@@ -500,6 +502,8 @@ impl OpenCADStudio {
         doc.header.current_text_style_name = snap.current_text.clone();
         doc.header.current_dimstyle_name = snap.current_dim.clone();
         doc.header.multiline_style = snap.multiline_style.clone();
+        doc.header.current_table_style_name = snap.current_table.clone();
+        doc.header.current_mleader_style_name = snap.current_mleader.clone();
         self.ribbon.active_table_style = snap.active_table.clone();
         self.ribbon.active_mleader_style = snap.active_mleader.clone();
         self.tabs[i].active_mleader_style = snap.tab_active_mleader.clone();
@@ -563,6 +567,8 @@ pub(super) struct StyleStateSnapshot {
     current_text: String,
     current_dim: String,
     multiline_style: String,
+    current_table: String,
+    current_mleader: String,
     active_table: String,
     active_mleader: String,
     tab_active_mleader: String,
