@@ -92,6 +92,10 @@ pub struct ViewportData {
     /// Bumped on selection / hover change. Paired with `wire_content_id` to
     /// decide when the xray overlay batch needs rebuilding.
     pub(super) selection_generation: u64,
+    /// Signature of the *selected set* only (not hover). Gates the static-buffer
+    /// re-upload (hatch tint, issue #71) so a hover doesn't re-upload every
+    /// hatch / face3d buffer on hatch-heavy drawings.
+    pub(super) selected_sig: u64,
     /// Screen rectangle this viewport fills, **normalized** to the widget
     /// bounds (each component in 0..1). A single full-widget view is
     /// `(0, 0, 1, 1)`; tiled / floating viewports are sub-rectangles.
@@ -221,7 +225,10 @@ impl shader::Primitive for Primitive {
             let (uo_y, us_y) = uv_crop_axis(sr.y, sr.height);
             inner.upload_blit_uv(queue, [uo_x, uo_y], [us_x, us_y]);
             inner.upload_uniforms(queue, &vp.uniforms);
-            let cur_key = (vp.geometry_epoch, vp.camera_generation, vp.selection_generation);
+            // Third component is the *selected-set* signature (not
+            // selection_generation, which also bumps on hover) so a rollover
+            // doesn't re-upload the static hatch / face3d buffers.
+            let cur_key = (vp.geometry_epoch, vp.camera_generation, vp.selected_sig);
             let fill_mode = vp.fill_mode;
             // 3D face fill requires *both* the doc-level FILLMODE *and* the
             // per-view Solid toggle. Hatches / wipeouts deliberately ignore
@@ -233,7 +240,7 @@ impl shader::Primitive for Primitive {
                 // a selection change (issue #71); images / meshes only need a
                 // geometry change.
                 let geo_changed = vp.geometry_epoch != inner.cached_epoch.0;
-                let sel_changed = vp.selection_generation != inner.cached_epoch.2;
+                let sel_changed = vp.selected_sig != inner.cached_epoch.2;
                 if geo_changed || sel_changed {
                     if fill_mode {
                         inner.upload_hatches(device, &vp.hatches[..]);
@@ -788,6 +795,7 @@ impl Scene {
             wire_content_id,
             highlight_handles: self.highlight_handles(),
             selection_generation: self.selection_generation,
+            selected_sig: self.selected_set_sig(),
             screen_rect,
         })
     }

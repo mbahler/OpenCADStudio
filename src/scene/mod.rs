@@ -633,6 +633,13 @@ pub struct Scene {
     /// invalidates the cull-dependent wire list as well as a geometry change.
     /// Uses `Arc` so `build_primitive()` avoids a full Vec clone during navigation.
     wire_cache: RefCell<Option<((u64, u64), Arc<Vec<WireModel>>)>>,
+    /// Camera-invariant full wire set for **picking** (Model layout), keyed on
+    /// `geometry_epoch` alone. The wires are world-space, so a pan/zoom must not
+    /// re-tessellate the whole un-culled model just to hit-test the next mouse
+    /// move (seconds on a 100k-entity drawing). Built once per geometry change
+    /// and reused across every camera move; a slightly stale curve tol is
+    /// harmless for an 8 px pick threshold.
+    hit_wire_cache: RefCell<Option<(u64, Arc<Vec<WireModel>>)>>,
     /// Per-Model-tile cached tessellation. Each tile has its own camera
     /// (live for the active tile, stored snapshot for the others), so
     /// LOD / frustum culling has to run independently — the shared
@@ -820,6 +827,7 @@ impl Scene {
             block_epoch: GEOMETRY_EPOCH.fetch_add(1, Ordering::Relaxed),
             selection_generation: 0,
             wire_cache: RefCell::new(None),
+            hit_wire_cache: RefCell::new(None),
             model_tile_wire_cache: RefCell::new(HashMap::default()),
             sort_cache: RefCell::new(None),
             draw_depth_cache: RefCell::new(None),
@@ -1875,20 +1883,35 @@ impl Scene {
     }
 
     pub(super) fn hatch_models_arc(&self) -> Arc<Vec<HatchModel>> {
+        // Hatch models bake the selection tint (issue #71), so they depend on
+        // the *selected set* — but NOT on hover. Keying on `selection_generation`
+        // (which also bumps on every hover) made each hover-over a new entity
+        // rebuild every hatch model: an O(N-hatch) stutter on hatch-heavy
+        // drawings. Key on a signature of `selected` instead, so hover (which
+        // never changes `selected`) keeps the cache warm.
+        let sel_sig = self.selected_set_sig();
         {
             let cache = self.hatch_cache.borrow();
             if let Some((cached_epoch, cached_sel, ref arc)) = *cache {
-                if cached_epoch == self.geometry_epoch
-                    && cached_sel == self.selection_generation
-                {
+                if cached_epoch == self.geometry_epoch && cached_sel == sel_sig {
                     return Arc::clone(arc);
                 }
             }
         }
         let arc = Arc::new(self.synced_hatch_models());
-        *self.hatch_cache.borrow_mut() =
-            Some((self.geometry_epoch, self.selection_generation, Arc::clone(&arc)));
+        *self.hatch_cache.borrow_mut() = Some((self.geometry_epoch, sel_sig, Arc::clone(&arc)));
         arc
+    }
+
+    /// Order-independent signature of the selected set. Cheap (the set is
+    /// normally a handful of entities) and unchanged by hover, so caches that
+    /// only depend on what's *selected* don't thrash on rollover.
+    fn selected_set_sig(&self) -> u64 {
+        let mut sig: u64 = self.selected.len() as u64;
+        for h in self.selected.iter() {
+            sig ^= h.value().wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+        sig
     }
 
     pub(super) fn wipeout_models_arc(&self) -> Arc<Vec<HatchModel>> {
@@ -2068,7 +2091,23 @@ impl Scene {
     ///   only — paper-space entities are NOT interactive.
     pub fn hit_test_wires(&self) -> Arc<Vec<WireModel>> {
         if self.current_layout == "Model" {
-            return self.entity_wires_arc();
+            // Camera-invariant pick cache: reuse the full wire set across pan /
+            // zoom (world-space wires don't change), rebuilding only when the
+            // geometry changes. `entity_wires_arc` itself keys on the camera,
+            // so calling it on every mouse move after a navigate would
+            // re-tessellate the whole un-culled model — the large-file hover
+            // stutter. Gate on `geometry_epoch` here instead.
+            {
+                let c = self.hit_wire_cache.borrow();
+                if let Some((g, ref arc)) = *c {
+                    if g == self.geometry_epoch {
+                        return Arc::clone(arc);
+                    }
+                }
+            }
+            let arc = self.entity_wires_arc();
+            *self.hit_wire_cache.borrow_mut() = Some((self.geometry_epoch, Arc::clone(&arc)));
+            return arc;
         }
         let layout_block = self.current_layout_block_handle();
         match self.active_viewport {
