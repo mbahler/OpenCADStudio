@@ -75,6 +75,7 @@ impl OpenCADStudio {
             return crate::ui::textstyle::view_window(crate::ui::textstyle::TextStyleView {
                 styles,
                 selected: &self.textstyle_selected,
+                current: &tab.scene.document.header.current_text_style_name,
                 font_buf: &self.textstyle_font,
                 width_buf: &self.textstyle_width,
                 oblique_buf: &self.textstyle_oblique,
@@ -118,6 +119,7 @@ impl OpenCADStudio {
             return crate::ui::tablestyle::view_window(
                 styles,
                 &self.tablestyle_selected,
+                &self.ribbon.active_table_style,
                 selected_style,
                 &self.ts_hmargin,
                 &self.ts_vmargin,
@@ -369,6 +371,11 @@ impl OpenCADStudio {
             return crate::ui::dimstyle::view_window(
                 styles,
                 &self.dimstyle_selected,
+                &self.tabs[self.active_tab]
+                    .scene
+                    .document
+                    .header
+                    .current_dimstyle_name,
                 self.dimstyle_tab,
                 crate::ui::dimstyle::DimStyleValues {
                     dimdle: &self.ds_dimdle,

@@ -184,6 +184,7 @@ fn hdivider<'a>() -> Element<'a, Message> {
 pub fn view_window<'a>(
     styles: Vec<String>,
     selected: &'a str,
+    current: &'a str,
     tab: u8,
     vals: DimStyleValues<'a>,
     rename_active: Option<&'a str>,
@@ -724,7 +725,7 @@ pub fn view_window<'a>(
         kind: crate::app::StyleKind::Dim,
         styles: &styles,
         selected,
-        current: None,
+        current: Some(current),
         rename_active,
         rename_buf,
         on_new: Message::DimStyleDialogNew,

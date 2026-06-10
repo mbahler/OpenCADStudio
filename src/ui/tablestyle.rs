@@ -67,6 +67,7 @@ fn btn_s(accent: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
 pub fn view_window<'a>(
     styles: Vec<String>,
     selected: &'a str,
+    current: &'a str,
     selected_style: Option<&'a acadrust::objects::TableStyle>,
     hmargin_buf: &'a str,
     vmargin_buf: &'a str,
@@ -356,7 +357,7 @@ pub fn view_window<'a>(
         kind: crate::app::StyleKind::Table,
         styles: &styles,
         selected,
-        current: None,
+        current: Some(current),
         rename_active,
         rename_buf,
         on_new: Message::TableStyleDialogNew,

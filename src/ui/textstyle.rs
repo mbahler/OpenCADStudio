@@ -9,6 +9,8 @@ use iced::{Background, Border, Color, Element, Fill, Theme};
 pub struct TextStyleView<'a> {
     pub styles: Vec<String>,
     pub selected: &'a str,
+    /// Name of the current text style (marked with ✓ in the list).
+    pub current: &'a str,
     pub font_buf: &'a str,
     pub width_buf: &'a str,
     pub oblique_buf: &'a str,
@@ -120,6 +122,7 @@ pub fn view_window<'a>(v: TextStyleView<'a>) -> Element<'a, Message> {
     let TextStyleView {
         styles,
         selected,
+        current,
         font_buf,
         width_buf,
         oblique_buf,
@@ -258,7 +261,7 @@ pub fn view_window<'a>(v: TextStyleView<'a>) -> Element<'a, Message> {
         kind: StyleKind::Text,
         styles: &styles,
         selected,
-        current: None,
+        current: Some(current),
         rename_active,
         rename_buf,
         on_new: Message::TextStyleDialogNew,

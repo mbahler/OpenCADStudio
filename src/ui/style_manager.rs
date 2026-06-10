@@ -114,10 +114,12 @@ pub fn view<'a, 'b>(s: Scaffold<'a, 'b>) -> Element<'a, Message> {
         .iter()
         .map(|name| {
             let is_sel = name.as_str() == s.selected;
+            // Mark the current style with a leading ✓; pad the rest so names
+            // line up.
             let label = if s.current == Some(name.as_str()) {
-                format!("{name} ◀")
+                format!("✓ {name}")
             } else {
-                name.clone()
+                format!("    {name}")
             };
             crate::ui::style_list::item(
                 name,
