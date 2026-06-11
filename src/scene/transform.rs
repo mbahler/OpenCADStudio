@@ -43,6 +43,26 @@ where
     }
 }
 
+/// Reflection across the world-XY line through `p1`→`p2` as an acadrust
+/// `Transform`, for delegating MIRROR to acadrust's entity-aware
+/// `apply_transform` paths (which handle direction flags, stored-angle
+/// conventions and bulges themselves). Degenerate line → identity.
+pub fn reflection_about_xy_line(p1: Vec3, p2: Vec3) -> acadrust::types::Transform {
+    use acadrust::types::{Matrix4, Transform};
+    let dx = (p2.x - p1.x) as f64;
+    let dy = (p2.y - p1.y) as f64;
+    if dx * dx + dy * dy < 1e-12 {
+        return Transform::identity();
+    }
+    let ang = dy.atan2(dx);
+    let m = Matrix4::translation(p1.x as f64, p1.y as f64, 0.0)
+        * Matrix4::rotation_z(ang)
+        * Matrix4::scaling(1.0, -1.0, 1.0)
+        * Matrix4::rotation_z(-ang)
+        * Matrix4::translation(-(p1.x as f64), -(p1.y as f64), 0.0);
+    Transform::from_matrix(m)
+}
+
 pub fn reflect_xy_point(x: &mut f64, y: &mut f64, p1: Vec3, p2: Vec3) {
     let ax = (p2.x - p1.x) as f64;
     let ay = (p2.y - p1.y) as f64;
@@ -107,4 +127,76 @@ pub fn ocs_point_to_wcs(ocs: (f64, f64, f64), normal: (f64, f64, f64)) -> (f64, 
         ox * ax.1 + oy * ay.1 + oz * ny,
         ox * ax.2 + oy * ay.2 + oz * nz,
     )
+}
+
+#[cfg(test)]
+mod mirror_delegation_tests {
+    use super::*;
+    use crate::command::EntityTransform;
+    use crate::entities::traits::Transformable;
+    use acadrust::entities::hatch::{BoundaryEdge, BoundaryPath, CircularArcEdge, LineEdge};
+    use acadrust::entities::Hatch;
+    use acadrust::types::Vector2;
+
+    // MIRROR on a hatch goes through reflection_about_xy_line + acadrust's
+    // transform_hatch. Mirror a Line→Arc→Line path across a vertical line and
+    // assert the arc stays endpoint-continuous, flips its direction flag, and
+    // keeps its sweep magnitude (the stored-angle conventions the old
+    // hand-rolled closure violated).
+    #[test]
+    fn hatch_mirror_keeps_arc_continuous_and_sweep() {
+        let mut path = BoundaryPath::new();
+        path.edges.push(BoundaryEdge::Line(LineEdge {
+            start: Vector2::new(0.0, -1.0),
+            end: Vector2::new(2.0, 0.0),
+        }));
+        path.edges.push(BoundaryEdge::CircularArc(CircularArcEdge {
+            center: Vector2::new(1.0, 0.0),
+            radius: 1.0,
+            start_angle: 0.0,
+            end_angle: std::f64::consts::PI,
+            counter_clockwise: true,
+        }));
+        path.edges.push(BoundaryEdge::Line(LineEdge {
+            start: Vector2::new(0.0, 0.0),
+            end: Vector2::new(0.0, -1.0),
+        }));
+        let mut h = Hatch::new();
+        h.paths.push(path);
+
+        // Mirror across the vertical line x = 5.
+        h.apply_transform(&EntityTransform::Mirror {
+            p1: Vec3::new(5.0, 0.0, 0.0),
+            p2: Vec3::new(5.0, 1.0, 0.0),
+        });
+
+        let edges = &h.paths[0].edges;
+        let (l1, arc) = match (&edges[0], &edges[1]) {
+            (BoundaryEdge::Line(a), BoundaryEdge::CircularArc(b)) => (a, b),
+            _ => panic!("edge kinds changed"),
+        };
+        assert!(!arc.counter_clockwise, "mirror must flip the flag");
+        let sweep = arc.end_angle - arc.start_angle;
+        assert!(
+            (sweep - std::f64::consts::PI).abs() < 1e-9,
+            "stored sweep must stay π, got {sweep}"
+        );
+        // Stored-angle convention: true point of a CW edge is at -θ.
+        let pt = |theta: f64| {
+            let a = if arc.counter_clockwise { theta } else { -theta };
+            (
+                arc.center.x + arc.radius * a.cos(),
+                arc.center.y + arc.radius * a.sin(),
+            )
+        };
+        let (sx, sy) = pt(arc.start_angle);
+        assert!(
+            (sx - l1.end.x).abs() < 1e-9 && (sy - l1.end.y).abs() < 1e-9,
+            "arc start {:?} must meet previous line end {:?}",
+            (sx, sy),
+            (l1.end.x, l1.end.y)
+        );
+        // Mirror of (2,0) across x=5 is (8,0).
+        assert!((sx - 8.0).abs() < 1e-9 && sy.abs() < 1e-9);
+    }
 }

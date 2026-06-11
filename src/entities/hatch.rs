@@ -89,57 +89,16 @@ fn apply_geom_prop(h: &mut Hatch, field: &str, value: &str) {
 }
 
 fn apply_transform(h: &mut Hatch, t: &EntityTransform) {
-    use crate::scene::transform::reflect_xy_point as reflect;
     crate::scene::transform::apply_standard_entity_transform(h, t, |entity, p1, p2| {
-        let dx = (p2.x - p1.x) as f64;
-        let dy = (p2.y - p1.y) as f64;
-        let len2 = dx * dx + dy * dy;
-        if len2 < 1e-12 {
-            return;
-        }
-        let line_angle = dy.atan2(dx);
-        for path in &mut entity.paths {
-            for edge in &mut path.edges {
-                match edge {
-                    BoundaryEdge::Line(l) => {
-                        reflect(&mut l.start.x, &mut l.start.y, p1, p2);
-                        reflect(&mut l.end.x, &mut l.end.y, p1, p2);
-                    }
-                    BoundaryEdge::CircularArc(a) => {
-                        reflect(&mut a.center.x, &mut a.center.y, p1, p2);
-                        let tmp = a.start_angle;
-                        a.start_angle = 2.0 * line_angle - a.end_angle;
-                        a.end_angle = 2.0 * line_angle - tmp;
-                    }
-                    BoundaryEdge::EllipticArc(e) => {
-                        reflect(&mut e.center.x, &mut e.center.y, p1, p2);
-                        let ax = dx;
-                        let ay = dy;
-                        let rx = e.major_axis_endpoint.x;
-                        let ry = e.major_axis_endpoint.y;
-                        let dot = rx * ax + ry * ay;
-                        e.major_axis_endpoint.x = 2.0 * dot * ax / len2 - rx;
-                        e.major_axis_endpoint.y = 2.0 * dot * ay / len2 - ry;
-                        let tmp = e.start_angle;
-                        e.start_angle = 2.0 * line_angle - e.end_angle;
-                        e.end_angle = 2.0 * line_angle - tmp;
-                    }
-                    BoundaryEdge::Spline(s) => {
-                        for cp in &mut s.control_points {
-                            reflect(&mut cp.x, &mut cp.y, p1, p2);
-                        }
-                        for fp in &mut s.fit_points {
-                            reflect(&mut fp.x, &mut fp.y, p1, p2);
-                        }
-                    }
-                    BoundaryEdge::Polyline(p) => {
-                        for v in &mut p.vertices {
-                            reflect(&mut v.x, &mut v.y, p1, p2);
-                        }
-                    }
-                }
-            }
-        }
+        // Delegate the mirror to acadrust's transform_hatch (via the Entity
+        // trait): it flips the boundary-arc direction flags, re-mirrors the
+        // stored angles and preserves the stored sweep — including the
+        // wrap-encoded end angles above 2π that AutoCAD writes. The old
+        // hand-rolled angle-swap here was only valid for ccw boundary arcs on
+        // an axis-aligned mirror line and went stale the moment those
+        // conventions were fixed upstream.
+        let t = crate::scene::transform::reflection_about_xy_line(p1, p2);
+        acadrust::entities::Entity::apply_transform(entity, &t);
     });
 }
 

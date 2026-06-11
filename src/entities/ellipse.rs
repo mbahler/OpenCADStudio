@@ -12,22 +12,19 @@ use crate::scene::wire_model::SnapHint;
 const TAU: f64 = std::f64::consts::TAU;
 
 fn to_truck(ell: &Ellipse) -> TruckEntity {
-    let cx = ell.center.x;
-    let cy = ell.center.y;
-    let cz = ell.center.z;
     let normal = (ell.normal.x, ell.normal.y, ell.normal.z);
     let (nx, ny, nz) = normal;
 
-    // Center in WCS.
-    let (cwx, cwy, cwz) = crate::scene::transform::ocs_point_to_wcs((cx, cy, cz), normal);
-
-    // Major axis vector rotated into WCS: maj_ocs.x*Ax + maj_ocs.y*Ay + maj_ocs.z*N
-    let (ax_basis, ay_basis) = crate::scene::transform::ocs_axes(normal);
-    let (mx, my, mz) = (ell.major_axis.x, ell.major_axis.y, ell.major_axis.z);
+    // ELLIPSE is one of the few WCS entities in DXF: `center` (code 10) and
+    // `major_axis` (code 11) are world coordinates already — unlike ARC /
+    // CIRCLE, whose centers are OCS. (This used to run both through the
+    // arbitrary-axis OCS, which misplaced any ellipse whose normal isn't
+    // Z-up — e.g. the (0,0,-1) result of a mirrored-block explode.)
+    let (cwx, cwy, cwz) = (ell.center.x, ell.center.y, ell.center.z);
     let wcs_maj = glam::Vec3::new(
-        (mx * ax_basis.0 + my * ay_basis.0 + mz * nx) as f32,
-        (mx * ax_basis.1 + my * ay_basis.1 + mz * ny) as f32,
-        (mx * ax_basis.2 + my * ay_basis.2 + mz * nz) as f32,
+        ell.major_axis.x as f32,
+        ell.major_axis.y as f32,
+        ell.major_axis.z as f32,
     );
     let r_major = wcs_maj.length() as f64;
     let r_minor = r_major * ell.minor_axis_ratio;
