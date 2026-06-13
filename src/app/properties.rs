@@ -558,6 +558,56 @@ impl OpenCADStudio {
             }
         }
 
+        // MultiLeader / Table inherit the document's current style (#92). These
+        // styles live in the objects dictionary, so resolve the current style
+        // name to its object handle. Left untouched when the command already
+        // assigned a style or no matching style object exists.
+        match &mut entity {
+            acadrust::EntityType::MultiLeader(ml) if ml.style_handle.is_none() => {
+                let name = self.tabs[i]
+                    .scene
+                    .document
+                    .header
+                    .current_mleader_style_name
+                    .clone();
+                if !name.is_empty() {
+                    ml.style_handle =
+                        self.tabs[i].scene.document.objects.iter().find_map(|(h, o)| {
+                            match o {
+                                acadrust::objects::ObjectType::MultiLeaderStyle(s)
+                                    if s.name.eq_ignore_ascii_case(&name) =>
+                                {
+                                    Some(*h)
+                                }
+                                _ => None,
+                            }
+                        });
+                }
+            }
+            acadrust::EntityType::Table(t) if t.table_style_handle.is_none() => {
+                let name = self.tabs[i]
+                    .scene
+                    .document
+                    .header
+                    .current_table_style_name
+                    .clone();
+                if !name.is_empty() {
+                    t.table_style_handle =
+                        self.tabs[i].scene.document.objects.iter().find_map(|(h, o)| {
+                            match o {
+                                acadrust::objects::ObjectType::TableStyle(s)
+                                    if s.name.eq_ignore_ascii_case(&name) =>
+                                {
+                                    Some(*h)
+                                }
+                                _ => None,
+                            }
+                        });
+                }
+            }
+            _ => {}
+        }
+
         // Commands pick points in local space (camera coordinates with world_offset
         // already subtracted). Re-add world_offset so the entity lands at the correct
         // DXF coordinate. Skip for paper-space entities (they use sheet mm coords).
