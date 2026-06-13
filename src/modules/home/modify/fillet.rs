@@ -1196,6 +1196,10 @@ pub struct FilletCommand {
     radius: f64,
     step: FilletStep,
     all_entities: Vec<EntityType>,
+    /// First-object pick to restore after a radius entry made mid-selection
+    /// (i.e. "R" pressed after the first object was already picked), so the
+    /// command resumes at the second pick instead of restarting selection.
+    resume_second: Option<(Handle, FilletEntity, [f64; 2])>,
 }
 
 impl FilletCommand {
@@ -1204,7 +1208,28 @@ impl FilletCommand {
             radius: radius as f64,
             step: FilletStep::First,
             all_entities,
+            resume_second: None,
         }
+    }
+
+    /// Switch to the radius sub-step, remembering the first pick (if any) so
+    /// it can be restored afterwards.
+    fn enter_radius_substep(&mut self) {
+        self.resume_second = if let FilletStep::Second { h1, e1, click1 } = &self.step {
+            Some((*h1, e1.clone(), *click1))
+        } else {
+            None
+        };
+        self.step = FilletStep::WaitingForRadius;
+    }
+
+    /// Leave the radius sub-step, resuming the second pick when a first object
+    /// was already chosen, otherwise restarting at the first pick.
+    fn resume_after_radius(&mut self) {
+        self.step = match self.resume_second.take() {
+            Some((h1, e1, click1)) => FilletStep::Second { h1, e1, click1 },
+            None => FilletStep::First,
+        };
     }
 }
 
@@ -1248,8 +1273,8 @@ impl CadCommand for FilletCommand {
             FilletStep::WaitingForRadius => {
                 let t = text.trim();
                 if t.is_empty() {
-                    // Keep current radius, return to First
-                    self.step = FilletStep::First;
+                    // Keep current radius, resume where the radius was requested.
+                    self.resume_after_radius();
                     return Some(CmdResult::NeedPoint);
                 }
                 if let Ok(v) = t.replace(',', ".").parse::<f64>() {
@@ -1257,7 +1282,7 @@ impl CadCommand for FilletCommand {
                         self.radius = v;
                         defaults::set_fillet_radius(v as f32);
                     }
-                    self.step = FilletStep::First;
+                    self.resume_after_radius();
                     return Some(CmdResult::NeedPoint);
                 }
                 // Invalid — stay and re-prompt
@@ -1268,7 +1293,7 @@ impl CadCommand for FilletCommand {
                 let upper = t.to_uppercase();
                 // "R" alone → enter sub-step to collect radius
                 if upper == "R" {
-                    self.step = FilletStep::WaitingForRadius;
+                    self.enter_radius_substep();
                     return Some(CmdResult::NeedPoint);
                 }
                 // "R 5.0" inline shorthand
@@ -1279,10 +1304,11 @@ impl CadCommand for FilletCommand {
                             self.radius = v;
                             defaults::set_fillet_radius(v as f32);
                         }
+                        // Stay in the current step (keeps any first pick).
                         return Some(CmdResult::NeedPoint);
                     }
                     // "R" + invalid body → enter sub-step
-                    self.step = FilletStep::WaitingForRadius;
+                    self.enter_radius_substep();
                     return Some(CmdResult::NeedPoint);
                 }
                 None
@@ -1533,6 +1559,10 @@ pub struct ChamferCommand {
     dist2: f64,
     step: ChamferStep,
     all_entities: Vec<EntityType>,
+    /// First-object pick (line or polyline segment) to restore after a
+    /// distance entry made mid-selection, so the command resumes at the
+    /// second pick instead of restarting selection.
+    resume_pick: Option<ChamferStep>,
 }
 
 impl ChamferCommand {
@@ -1542,7 +1572,32 @@ impl ChamferCommand {
             dist2: defaults::get_chamfer_dist2() as f64,
             step: ChamferStep::First,
             all_entities,
+            resume_pick: None,
         }
+    }
+
+    /// Switch to the distance sub-step, remembering the first pick (if any).
+    fn enter_dist_substep(&mut self) {
+        self.resume_pick = match &self.step {
+            ChamferStep::Second { h1, l1, click1 } => Some(ChamferStep::Second {
+                h1: *h1,
+                l1: l1.clone(),
+                click1: *click1,
+            }),
+            ChamferStep::SecondPoly { h1, poly, click1 } => Some(ChamferStep::SecondPoly {
+                h1: *h1,
+                poly: poly.clone(),
+                click1: *click1,
+            }),
+            _ => None,
+        };
+        self.step = ChamferStep::WaitingForDist1;
+    }
+
+    /// Leave the distance sub-step, resuming the second pick when a first
+    /// object was already chosen, otherwise restarting at the first pick.
+    fn resume_after_dist(&mut self) {
+        self.step = self.resume_pick.take().unwrap_or(ChamferStep::First);
     }
 }
 
@@ -1614,14 +1669,14 @@ impl CadCommand for ChamferCommand {
             ChamferStep::WaitingForDist2 => {
                 let t = text.trim();
                 if t.is_empty() {
-                    // Keep current dist2, return to First
-                    self.step = ChamferStep::First;
+                    // Keep current dist2, resume where the distance was requested.
+                    self.resume_after_dist();
                     return Some(CmdResult::NeedPoint);
                 }
                 if let Ok(v) = t.replace(',', ".").parse::<f64>() {
                     self.dist2 = v.max(0.0);
                     defaults::set_chamfer_dist2(self.dist2 as f32);
-                    self.step = ChamferStep::First;
+                    self.resume_after_dist();
                     return Some(CmdResult::NeedPoint);
                 }
                 // Invalid — stay and re-prompt
@@ -1634,7 +1689,7 @@ impl CadCommand for ChamferCommand {
                 let upper = t.to_uppercase();
                 // "D" alone → enter sub-step to collect distances
                 if upper == "D" {
-                    self.step = ChamferStep::WaitingForDist1;
+                    self.enter_dist_substep();
                     return Some(CmdResult::NeedPoint);
                 }
                 // "D 5.0" or "D 5.0 3.0" inline shorthand
@@ -1659,7 +1714,7 @@ impl CadCommand for ChamferCommand {
                         return Some(CmdResult::NeedPoint);
                     }
                     // "D" + invalid body → enter sub-step
-                    self.step = ChamferStep::WaitingForDist1;
+                    self.enter_dist_substep();
                     return Some(CmdResult::NeedPoint);
                 }
                 None

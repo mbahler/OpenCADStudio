@@ -691,8 +691,18 @@ impl OpenCADStudio {
         // between boxes; typing locks a box to a fixed value while the
         // rest keep tracking the cursor. The field set is maintained in
         // `tab.dyn_fields` by `sync_dyn_fields`.
+        // A pick step (object selection) has no input box, but still shows
+        // its prompt ("Select first object …") near the cursor as a hint.
+        let dyn_picks_object = tab
+            .active_cmd
+            .as_ref()
+            .map(|c| c.needs_entity_pick() || c.needs_structure_point_pick())
+            .unwrap_or(false);
         let dyn_input_overlay: Option<Element<'_, Message>> =
-            if self.dyn_input && tab.active_cmd.is_some() && !tab.dyn_fields.is_empty() {
+            if self.dyn_input
+                && tab.active_cmd.is_some()
+                && (!tab.dyn_fields.is_empty() || dyn_picks_object)
+            {
                 let w = tab.last_cursor_world;
                 let base = self.last_point;
                 // A command may drive a typed scalar by mouse (e.g. a

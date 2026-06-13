@@ -1382,6 +1382,15 @@ impl OpenCADStudio {
                     let idx = self.grip_popup.as_ref().map(|p| p.selected).unwrap_or(0);
                     return Task::done(Message::GripMenuPick(idx));
                 }
+                // Pending typed command-line text (e.g. an option keyword like
+                // "R") must be submitted rather than finalising the command.
+                // The focused-input Enter routes through CommandSubmit, but a
+                // command started from the ribbon never focuses the field, so
+                // its Enter arrives here — forward to the same submit path.
+                let i = self.active_tab;
+                if self.tabs[i].active_cmd.is_some() && !self.command_line.input.trim().is_empty() {
+                    return self.update(Message::CommandSubmit);
+                }
                 // A typed dynamic-input value commits as a point pick
                 // before the plain-Enter (on_enter) path runs.
                 if let Some(task) = self.try_dyn_commit() {
@@ -7327,7 +7336,7 @@ impl OpenCADStudio {
     /// command-state changes. The field set only changes shape when the
     /// command's `dyn_field()` or the presence of a base point changes;
     /// existing typed buffers survive an unchanged shape.
-    fn sync_dyn_fields(&mut self) {
+    pub(super) fn sync_dyn_fields(&mut self) {
         use super::document::{DynComponent, DynFieldEntry};
         let i = self.active_tab;
         if !self.dyn_input || self.tabs[i].active_cmd.is_none() {
@@ -7351,6 +7360,15 @@ impl OpenCADStudio {
             .as_ref()
             .map(|c| c.wants_text_input())
             .unwrap_or(false);
+        // A step that hit-tests for an object (entity / structure pick) has no
+        // coordinate to enter — clicks select, they don't place a point. Show
+        // no coordinate box so the cursor stays clean and typed option keywords
+        // (e.g. FILLET's "R") reach the command line instead of an X/Y field.
+        let picks_object = self.tabs[i]
+            .active_cmd
+            .as_ref()
+            .map(|c| c.needs_entity_pick() || c.needs_structure_point_pick())
+            .unwrap_or(false);
         let has_base = self.last_point.is_some();
         // While aligned to an OTRACK ray, the point step reads a single
         // distance along the ray (issue #69) — show one Distance box.
@@ -7366,7 +7384,7 @@ impl OpenCADStudio {
             // a name / a keyword (which may itself contain digits) from the
             // command line — show no scalar box, so digits reach the command
             // line instead of being captured into a dyn buffer.
-            crate::command::DynField::Point if wants_text => vec![],
+            crate::command::DynField::Point if wants_text || picks_object => vec![],
             crate::command::DynField::Point if has_base => {
                 vec![DynComponent::Distance, DynComponent::Angle]
             }
@@ -7388,7 +7406,7 @@ impl OpenCADStudio {
         // the command's default so e.g. clicking the first point of LINE
         // flips a stale `[X, Y]` (from before there was a base) over to
         // the polar `[Distance, Angle]` the prompt actually wants.
-        let current_is_acceptable = if self.dyn_user_reshaped && !wants_text {
+        let current_is_acceptable = if self.dyn_user_reshaped && !wants_text && !picks_object {
             match field {
                 crate::command::DynField::Distance => {
                     matches!(current.as_slice(), [DynComponent::Distance])

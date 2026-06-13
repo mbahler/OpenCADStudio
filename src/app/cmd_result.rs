@@ -42,6 +42,12 @@ impl OpenCADStudio {
                 if let Some(p) = prompt {
                     self.command_line.push_info(&p);
                 }
+                // The command may have advanced to a step with a different
+                // dynamic-input shape (e.g. FILLET object-pick → radius entry).
+                // Rebuild the fields now so the matching box appears immediately
+                // and typed digits land in it rather than the command line,
+                // instead of waiting for the next cursor move to resync.
+                self.sync_dyn_fields();
             }
             CmdResult::Preview(wire) => {
                 self.tabs[i].scene.set_preview_wires(vec![wire]);

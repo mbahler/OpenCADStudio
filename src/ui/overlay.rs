@@ -1251,9 +1251,6 @@ impl canvas::Program<Message> for DynInputCanvas {
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        if self.boxes.is_empty() {
-            return vec![frame.into_geometry()];
-        }
 
         // Offset the row 14 px right and 20 px below the cursor.
         const OFFSET_X: f32 = 14.0;
@@ -1263,6 +1260,44 @@ impl canvas::Program<Message> for DynInputCanvas {
         const FONT_SIZE: f32 = 11.0;
         const CHAR_W: f32 = FONT_SIZE * 0.62; // monospace-ish width estimate
         const BOX_H: f32 = FONT_SIZE + PAD * 2.0;
+
+        // No input box (a pick step) — draw just the prompt pill at the cursor,
+        // so object-selection steps still get their hint without a field.
+        if self.boxes.is_empty() {
+            if !self.prompt.is_empty() {
+                let pw = (self.prompt.len() as f32 * CHAR_W) + PAD * 2.0;
+                let mut px = self.cursor_screen.x + OFFSET_X;
+                let mut py = self.cursor_screen.y + OFFSET_Y;
+                if px + pw > bounds.width {
+                    px = (self.cursor_screen.x - pw - 4.0).max(0.0);
+                }
+                if py + BOX_H > bounds.height {
+                    py = (self.cursor_screen.y - BOX_H - 4.0).max(0.0);
+                }
+                let prect = canvas::Path::rectangle(
+                    Point { x: px, y: py },
+                    Size {
+                        width: pw,
+                        height: BOX_H,
+                    },
+                );
+                frame.fill(&prect, Color { r: 0.10, g: 0.10, b: 0.12, a: 1.0 });
+                frame.stroke(
+                    &prect,
+                    canvas::Stroke::default()
+                        .with_color(Color { r: 0.35, g: 0.55, b: 0.90, a: 0.9 })
+                        .with_width(1.0),
+                );
+                frame.fill_text(canvas::Text {
+                    content: self.prompt.clone(),
+                    position: Point { x: px + PAD, y: py + PAD },
+                    color: Color { r: 0.70, g: 0.85, b: 0.70, a: 1.0 },
+                    size: iced::Pixels(FONT_SIZE),
+                    ..Default::default()
+                });
+            }
+            return vec![frame.into_geometry()];
+        }
 
         // Each box is "<label>:<value>"; width tracks the text length.
         let texts: Vec<String> = self
