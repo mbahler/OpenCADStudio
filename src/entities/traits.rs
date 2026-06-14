@@ -129,6 +129,7 @@ pub fn entity_type_name(et: &EntityType) -> &'static str {
         EntityType::Solid3D(_) => "Solid3D",
         EntityType::Region(_) => "Region",
         EntityType::Body(_) => "Body",
+        EntityType::Surface(_) => "Surface",
         EntityType::Table(_) => "Table",
         EntityType::Tolerance(_) => "Tolerance",
         EntityType::PolyfaceMesh(_) => "PolyfaceMesh",

@@ -39,6 +39,7 @@ pub fn ui_name(e: &EntityType) -> &'static str {
         EntityType::Solid3D(_) => "3D Solid",
         EntityType::Region(_) => "Region",
         EntityType::Body(_) => "Body",
+        EntityType::Surface(_) => "Surface",
         EntityType::Mesh(_) => "Mesh",
         EntityType::Ray(_) => "Ray",
         EntityType::XLine(_) => "XLine",

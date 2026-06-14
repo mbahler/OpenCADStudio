@@ -282,6 +282,7 @@ pub fn fallback_wires(e: &EntityType) -> Option<&[acadrust::entities::Wire]> {
         EntityType::Solid3D(s) => Some(&s.wires),
         EntityType::Region(r) => Some(&r.wires),
         EntityType::Body(b) => Some(&b.wires),
+        EntityType::Surface(s) => Some(&s.wires),
         _ => None,
     }
 }
@@ -293,6 +294,7 @@ pub fn tessellate_volume(e: &EntityType, color: [f32; 4], facet_res: f64) -> Opt
         EntityType::Solid3D(s) => solid3d_tess::tessellate_solid3d(s, color, facet_res),
         EntityType::Region(r) => solid3d_tess::tessellate_region(r, color, facet_res),
         EntityType::Body(b) => solid3d_tess::tessellate_body(b, color, facet_res),
+        EntityType::Surface(s) => solid3d_tess::tessellate_surface(s, color, facet_res),
         _ => None,
     }
 }

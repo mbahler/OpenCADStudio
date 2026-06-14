@@ -245,6 +245,7 @@ pub(super) fn entity_type_key(entity: &acadrust::EntityType) -> String {
         Solid3D(_) => "solid3d",
         Region(_) => "region",
         Body(_) => "body",
+        Surface(_) => "surface",
         Mesh(_) => "mesh",
         Ray(_) => "ray",
         XLine(_) => "xline",

@@ -617,7 +617,10 @@ fn fallback_geometry(entity: &EntityType, world_offset: [f64; 3]) -> Geometry {
         // plus an insertion snap — never the placeholder segment below, which
         // would otherwise draw a stray 1-unit line at the origin next to the
         // solid.
-        EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) => {
+        EntityType::Solid3D(_)
+        | EntityType::Region(_)
+        | EntityType::Body(_)
+        | EntityType::Surface(_) => {
             let pts = solid_wire_fallback(entity, world_offset);
             let mut snap = vec![];
             if let Some(p) = crate::entities::solid3d::point_of_reference(entity) {

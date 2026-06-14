@@ -106,6 +106,16 @@ fn tessellate_sat(
                     tess_torus_face(&torus, lod, &mut verts, &mut normals, &mut indices);
                 }
             }
+            "spline-surface" => {
+                crate::scene::spline_tess::tess_spline_face(
+                    sat,
+                    &face,
+                    lod,
+                    &mut verts,
+                    &mut normals,
+                    &mut indices,
+                );
+            }
             _ => {}
         }
     }
@@ -252,6 +262,24 @@ pub fn tessellate_body(body: &Body, color: [f32; 4], facet_res: f64) -> Option<M
         &body.acis_data.sab_data,
     )?;
     let name = body.common.handle.value().to_string();
+    tessellate_sat_lods(&sat, name, color, facet_res)
+}
+
+/// Tessellate a `Surface` entity (ACAD_SURFACE family) at all three LOD
+/// levels. Surfaces are ACIS-backed just like bodies, so the same SAT/SAB
+/// path applies — including the B-spline `spline-surface` faces that loft /
+/// sweep / revolve produce.
+pub fn tessellate_surface(
+    surface: &acadrust::entities::Surface,
+    color: [f32; 4],
+    facet_res: f64,
+) -> Option<MeshLodSet> {
+    let sat = parse_acis(
+        || surface.parse_sat(),
+        surface.acis_data.is_binary,
+        &surface.acis_data.sab_data,
+    )?;
+    let name = surface.common.handle.value().to_string();
     tessellate_sat_lods(&sat, name, color, facet_res)
 }
 

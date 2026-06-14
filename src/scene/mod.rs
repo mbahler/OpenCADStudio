@@ -26,6 +26,7 @@ pub(super) struct EntityIndex {
 pub(crate) mod render;
 mod selection;
 pub mod solid3d_tess;
+pub mod spline_tess;
 pub mod tess_util;
 pub mod tessellate;
 pub mod transform;
@@ -185,7 +186,7 @@ pub fn build_derived_caches(doc: &CadDocument) -> DerivedCaches {
         match e {
             EntityType::Hatch(_) | EntityType::Solid(_) => hatch_handles.push(h),
             EntityType::RasterImage(_) => image_handles.push(h),
-            EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) => {
+            EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) | EntityType::Surface(_) => {
                 mesh_handles.push(h)
             }
             _ => {}
@@ -1839,7 +1840,7 @@ impl Scene {
             // draw-order biasing so 3D occlusion is never flattened.
             if matches!(
                 e,
-                EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_)
+                EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) | EntityType::Surface(_)
             ) {
                 continue;
             }
@@ -3448,7 +3449,7 @@ impl Scene {
         let facet_res = self.document.header.facet_resolution;
         let mesh_seed = if matches!(
             &entity,
-            EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_)
+            EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) | EntityType::Surface(_)
         ) {
             let color = self.render_style(&entity).0;
             let woff = self.world_offset;
@@ -4320,7 +4321,7 @@ impl Scene {
             .document
             .entities()
             .filter_map(|e| match e {
-                EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) => {
+                EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) | EntityType::Surface(_) => {
                     let color = self.render_style(e).0;
                     Some((e.common().handle, e.clone(), color))
                 }
@@ -7002,6 +7003,7 @@ fn tessellate_entity(
                                 | EntityType::PolygonMesh(_)
                                 | EntityType::Body(_)
                                 | EntityType::Region(_)
+                                | EntityType::Surface(_)
                         );
                         if !is_text && w_px.max(h_px) / wpp < 5.0 {
                             // Sub-pixel entity: emit a stub instead of
