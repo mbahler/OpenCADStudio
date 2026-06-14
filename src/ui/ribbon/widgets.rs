@@ -858,8 +858,12 @@ pub(super) fn render_large<'a>(
                 .width(Length::Fixed(PROP_W))
             };
 
-            let (color_swatch, color_label) = acad_color_display(active_color);
-            let color_row = prop_row(color_label.to_string(), PROP_COLOR_ID, Some(color_swatch));
+            let (color_swatch, _) = acad_color_display(active_color);
+            let color_row = prop_row(
+                crate::ui::color_select::color_display_name(active_color),
+                PROP_COLOR_ID,
+                Some(color_swatch),
+            );
             let lt_row = prop_row(active_linetype.to_string(), PROP_LINETYPE_ID, None);
             let lw_row = prop_row(LwItem(active_lineweight).to_string(), PROP_LW_ID, None);
 

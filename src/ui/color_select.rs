@@ -60,6 +60,26 @@ pub fn aci_string_to_color(s: &str) -> AcadColor {
     }
 }
 
+/// Display name for a colour: the standard name for ACI 1-9 / ByLayer /
+/// ByBlock, otherwise the "R,G,B" values (0-255) so unnamed palette colours
+/// read meaningfully.
+pub fn color_display_name(c: AcadColor) -> String {
+    let (_, label) = acad_color_display(c);
+    if label == "Index" || label == "Custom" {
+        match c {
+            AcadColor::Index(i) => {
+                let (r, g, b) =
+                    acadrust::types::aci_table::aci_to_rgb(i).unwrap_or((128, 128, 128));
+                format!("{r},{g},{b}")
+            }
+            AcadColor::Rgb { r, g, b } => format!("{r},{g},{b}"),
+            _ => label.to_string(),
+        }
+    } else {
+        label.to_string()
+    }
+}
+
 /// A small colour square.
 fn swatch<'a>(bg: Color) -> Element<'a, Message> {
     container(text("").width(13).height(13))
@@ -97,7 +117,8 @@ pub fn color_selector<'a>(
     on_toggle: Message,
     on_more: Message,
 ) -> Element<'a, Message> {
-    let (cur_bg, cur_name) = acad_color_display(current);
+    let (cur_bg, _) = acad_color_display(current);
+    let cur_name = color_display_name(current);
 
     // Closed button: current swatch + name + caret.
     let head = button(
