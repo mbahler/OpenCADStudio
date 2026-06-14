@@ -1203,12 +1203,15 @@ fn tessellate_dimension_inner(
         fill_tris: geom.arrow_fill,
     });
 
-    // DIMTFILL: 0=none, 1=drawing background (transparent → skip), 2=DIMTFILLCLR.
+    // DIMTFILL: 0=none, 1=drawing background (mask), 2=DIMTFILLCLR.
     if let Some(s) = style {
-        if s.dimtfill == 2 {
+        if s.dimtfill == 1 || s.dimtfill == 2 {
             if let Some(rect) = text_fill_rect(dim, style, dim_txt, world_offset) {
                 let fill_color = if selected {
                     WireModel::SELECTED
+                } else if s.dimtfill == 1 {
+                    // Drawing-background fill: mask out geometry behind the text.
+                    bg_color
                 } else {
                     let c = AcadColor::from_index(s.dimtfillclr);
                     aci_to_rgba(&c)
@@ -2507,12 +2510,17 @@ fn text_on_dim_line(
     text_w: f64,
     arrow: f64,
     dimtix: bool,
+    below: bool,
 ) -> Vector3 {
     let px = -ay;
     let py = ax;
-    // Side of the measured points the dimension line sits on.
+    // Side of the measured points the dimension line sits on (the "above"
+    // side). DIMTAD=4 (below) flips the text to the other side.
     let off = (defpt.x - first.x) * px + (defpt.y - first.y) * py;
-    let perp_sign = if off >= 0.0 { 1.0 } else { -1.0 };
+    let mut perp_sign = if off >= 0.0 { 1.0 } else { -1.0 };
+    if below {
+        perp_sign = -perp_sign;
+    }
     // Along-axis positions of the extension points relative to the dim line.
     let t1 = (first.x - defpt.x) * ax + (first.y - defpt.y) * ay;
     let t2 = (second.x - defpt.x) * ax + (second.y - defpt.y) * ay;
@@ -2558,6 +2566,7 @@ fn dimension_text_pos_f64(dim: &Dimension, style: Option<&DimStyle>, text_height
     } else {
         text_height * 0.5 + dimgap
     };
+    let tad_below = dimtad == 4;
     // Rough text width + arrow allowance, used to decide text-outside fit.
     let text_w = dimension_text_value(dim, style)
         .map(|t| t.chars().count() as f64 * text_height * 0.6 + 2.0 * dimgap)
@@ -2589,6 +2598,7 @@ fn dimension_text_pos_f64(dim: &Dimension, style: Option<&DimStyle>, text_height
                 text_w,
                 arrow,
                 dimtix,
+                tad_below,
             )
         }
         Dimension::Aligned(d) => {
@@ -2606,6 +2616,7 @@ fn dimension_text_pos_f64(dim: &Dimension, style: Option<&DimStyle>, text_height
                 text_w,
                 arrow,
                 dimtix,
+                tad_below,
             )
         }
         _ => {
