@@ -2779,6 +2779,11 @@ impl OpenCADStudio {
                 // (e.g. the annotation style combo), which has no backdrop of
                 // its own to catch outside clicks.
                 self.ribbon.close_dropdown();
+                // Likewise dismiss the Properties color dropdowns — a viewport
+                // press starts a box selection, so without this they'd only
+                // close on the second click (issue #104).
+                self.tabs[i].properties.color_picker_open = false;
+                self.tabs[i].properties.color_palette_open = false;
                 // Click anywhere outside the popup dismisses it. The
                 // menu's own buttons live above this mouse_area, so a
                 // press that reaches here means the cursor is not on

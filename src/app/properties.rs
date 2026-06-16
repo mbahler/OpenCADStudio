@@ -10,7 +10,9 @@ impl OpenCADStudio {
     /// Preserves UI state (open pickers, edit buffer) across refreshes.
     pub(super) fn refresh_properties(&mut self) {
         let i = self.active_tab;
-        let color_picker_open = self.tabs[i].properties.color_picker_open;
+        // Note: the color-picker dropdown is intentionally NOT carried over — a
+        // rebuild means the selection (or a property) changed, so the dropdown
+        // closes, matching the deselect / reselect / click-away expectation.
         let color_palette_open = self.tabs[i].properties.color_palette_open;
         let edit_buf = std::mem::take(&mut self.tabs[i].properties.edit_buf);
         let selected_group = self.tabs[i].properties.selected_group.clone();
@@ -307,7 +309,6 @@ impl OpenCADStudio {
                     }
                 }
             };
-            panel.color_picker_open = color_picker_open;
             panel.color_palette_open = color_palette_open;
             panel.edit_buf = edit_buf;
             panel
