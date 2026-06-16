@@ -39,6 +39,7 @@ dependencies = [
  "truck-shapeops",
  "ttf-parser",
  "ureq",
+ "web-sys",
  "windows-sys 0.61.2",
  "winresource",
 ]

@@ -82,6 +82,8 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = "0.1"
+# Opening external URLs (Donate / feedback / release notes) via window.open.
+web-sys = { version = "0.3", features = ["Window"] }
 # Browsers without WebGPU (e.g. Firefox by default) need wgpu's WebGL2 backend;
 # `webgl` enables it. `fira-sans` embeds the default UI font — the web has no
 # system fonts, so without it all iced text (ribbon labels, command line) is

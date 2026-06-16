@@ -1,17 +1,20 @@
 // Small platform shims for things the desktop build does natively but the web
 // (wasm) build must handle differently or skip.
 
-/// Open a URL in the user's browser. On the desktop this launches the default
-/// handler; on the web the app already *is* in a browser, so for now this is a
-/// no-op (a real implementation would call `window.open`).
+/// Open a URL in the user's browser. The desktop launches the default handler;
+/// the web opens a new tab (the button click is a user gesture, so it isn't
+/// caught by the pop-up blocker). Focus of the opened page is left to the
+/// OS / browser.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn open_url(url: &str) {
     let _ = open::that(url);
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn open_url(_url: &str) {
-    // TODO(web): web_sys::window().open_with_url(_url)
+pub fn open_url(url: &str) {
+    if let Some(window) = web_sys::window() {
+        let _ = window.open_with_url_and_target(url, "_blank");
+    }
 }
 
 /// Turn an `rfd` file handle into a `PathBuf` the rest of the app keys on.

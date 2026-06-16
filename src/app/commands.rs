@@ -36,7 +36,7 @@ impl OpenCADStudio {
             && !matches!(
                 cmd,
                 "NEW" | "OPEN" | "EXIT" | "QUIT" | "REPORT" | "CHANGELOG" | "ABOUT"
-                    | "PLUGINS" | "PLUGINMANAGER"
+                    | "PLUGINS" | "PLUGINMANAGER" | "DONATE"
             )
         {
             self.command_line
