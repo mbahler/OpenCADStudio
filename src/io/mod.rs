@@ -86,6 +86,37 @@ pub async fn open_path_with_phase(
     Ok((name, path, doc, caches))
 }
 
+/// Parse a CAD document from in-memory bytes, choosing the format from
+/// `name`'s extension. Used by the web build, where files arrive as bytes from
+/// a browser file picker (no filesystem path). Shares the post-load fixups with
+/// [`load_file`]; raster-image path resolution is skipped (there is no sibling
+/// directory to search on the web).
+pub fn load_bytes(name: &str, bytes: Vec<u8>) -> Result<CadDocument, String> {
+    use std::io::Cursor;
+    let ext = name.rsplit('.').next().unwrap_or_default().to_lowercase();
+    match ext.as_str() {
+        "dwg" => {
+            let mut doc = DwgReader::from_stream(Cursor::new(bytes))
+                .read()
+                .map_err(|e| e.to_string())?;
+            fix_viewport_status_flags(&mut doc);
+            fix_current_style_names(&mut doc);
+            Ok(doc)
+        }
+        "dxf" => {
+            let mut doc = DxfReader::from_reader(Cursor::new(bytes))
+                .map_err(|e| e.to_string())?
+                .read()
+                .map_err(|e| e.to_string())?;
+            fix_dxf_dimension_rotations(&mut doc);
+            fix_viewport_status_flags(&mut doc);
+            fix_current_style_names(&mut doc);
+            Ok(doc)
+        }
+        _ => Err(format!("Unsupported file format: .{ext}")),
+    }
+}
+
 /// Load a DWG or DXF file directly from a path (auto-detect by extension).
 pub fn load_file(path: &Path) -> Result<CadDocument, String> {
     let ext = path
