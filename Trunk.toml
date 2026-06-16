@@ -1,0 +1,16 @@
+# Trunk config for the web (wasm) build of Open CAD Studio (issue #45).
+#
+# Build:   trunk build --release
+# Dev:     trunk serve
+#
+# Requires: rustup target add wasm32-unknown-unknown
+#           cargo install trunk wasm-bindgen-cli
+
+[build]
+target = "index.html"
+
+[serve]
+# Cross-origin isolation headers enable SharedArrayBuffer, which wasm threads
+# (rayon) need. GitHub Pages cannot set these; a self-hosted server (e.g. the
+# Open-AEC host) can. Without them the app still runs single-threaded.
+headers = { "Cross-Origin-Opener-Policy" = "same-origin", "Cross-Origin-Embedder-Policy" = "require-corp" }

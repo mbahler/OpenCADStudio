@@ -79,3 +79,6 @@ acadrust = { git = "https://github.com/HakanSeven12/acadrust", branch = "main" }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 open = "5"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"

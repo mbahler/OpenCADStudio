@@ -1670,10 +1670,21 @@ impl OpenCADStudio {
             Task::batch([open_main, check_update, focus_cmd, cli_open, assoc_prompt]),
         )
     }
+
+    /// Single-window boot for the web build: no OS-window creation (the browser
+    /// canvas is the only window), no file-association registration or CLI file
+    /// open. Secondary manager windows are unavailable on the web for now.
+    #[cfg(target_arch = "wasm32")]
+    fn boot_web() -> (Self, Task<Message>) {
+        let mut s = Self::new();
+        let focus = s.focus_cmd_input();
+        (s, focus)
+    }
 }
 
 use std::path::PathBuf;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run() -> iced::Result {
     iced::daemon(
         OpenCADStudio::boot,
@@ -1742,5 +1753,22 @@ pub fn run() -> iced::Result {
         }
     })
     .theme(|state: &OpenCADStudio, _| state.active_theme.clone())
+    .run()
+}
+
+/// Single-window entry for the web (wasm) build. Uses `iced::application`
+/// instead of `iced::daemon`: the browser canvas is the only window, so the
+/// main-window view is rendered directly and the manager/dialog windows are
+/// unavailable for now (see issue #45). Native keeps the multi-window `run`.
+#[cfg(target_arch = "wasm32")]
+pub fn run_web() -> iced::Result {
+    iced::application(
+        OpenCADStudio::boot_web,
+        OpenCADStudio::update,
+        OpenCADStudio::view_main,
+    )
+    .subscription(OpenCADStudio::subscription)
+    .title(|_state: &OpenCADStudio| "Open CAD Studio".to_string())
+    .theme(|state: &OpenCADStudio| state.active_theme.clone())
     .run()
 }

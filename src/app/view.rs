@@ -511,6 +511,13 @@ impl OpenCADStudio {
             );
         }
 
+        self.view_main()
+    }
+
+    /// The primary window: viewport, ribbon, tab bar, status bar. Split out of
+    /// `view` so the single-window web build can render it directly, bypassing
+    /// the multi-window id dispatch above (the web build has no extra windows).
+    pub fn view_main(&self) -> Element<'_, Message> {
         let i = self.active_tab;
         let tab = &self.tabs[i];
         let is_paper = tab.scene.current_layout != "Model";

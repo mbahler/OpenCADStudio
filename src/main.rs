@@ -28,5 +28,16 @@ fn main() -> iced::Result {
     if std::env::var_os("WGPU_BACKEND").is_none() {
         std::env::set_var("WGPU_BACKEND", "dx12,vulkan");
     }
-    app::run()
+
+    // Web (wasm) uses the single-window entry; native uses the multi-window
+    // daemon. Trunk calls `main` from its generated JS bootstrap.
+    #[cfg(target_arch = "wasm32")]
+    {
+        console_error_panic_hook::set_once();
+        app::run_web()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        app::run()
+    }
 }
