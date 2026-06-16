@@ -49,6 +49,39 @@ fn format_size(bytes: u64) -> String {
 }
 
 impl OpenCADStudio {
+    /// Web save: serialize the active document to bytes and offer a browser
+    /// download. Used for both Save and Save As on wasm (there is no persistent
+    /// path or in-app save dialog). Format follows the tab name's extension,
+    /// defaulting to DWG.
+    #[cfg(target_arch = "wasm32")]
+    fn web_save(&mut self) -> Task<Message> {
+        let i = self.active_tab;
+        self.tabs[i].scene.document.header.user_real1 =
+            self.tabs[i].scene.annotation_scale as f64;
+        let base = self.tabs[i].tab_display_name();
+        let lower = base.to_lowercase();
+        let name = if lower.ends_with(".dwg") || lower.ends_with(".dxf") {
+            base
+        } else {
+            format!("{base}.dwg")
+        };
+        let ext = if name.to_lowercase().ends_with(".dxf") {
+            "dxf"
+        } else {
+            "dwg"
+        };
+        match crate::io::save_to_bytes(&self.tabs[i].scene.document, ext) {
+            Ok(bytes) => {
+                self.tabs[i].dirty = false;
+                Task::perform(crate::io::download_web(name, bytes), Message::WebSaveResult)
+            }
+            Err(e) => {
+                self.command_line.push_error(&format!("Save failed: {e}"));
+                Task::none()
+            }
+        }
+    }
+
     pub fn update(&mut self, msg: Message) -> Task<Message> {
         let task = self.update_inner(msg);
         // After every message, mirror the active command step's prompt so
@@ -709,30 +742,56 @@ impl OpenCADStudio {
             Message::ObjImportPath(None) => Task::none(),
 
             Message::SaveFile => {
-                let i = self.active_tab;
-                if let Some(path) = &self.tabs[i].current_path {
-                    let path = path.clone();
-                    self.tabs[i].scene.document.header.user_real1 =
-                        self.tabs[i].scene.annotation_scale as f64;
-                    match crate::io::save(&self.tabs[i].scene.document, &path) {
-                        Ok(()) => {
-                            self.command_line
-                                .push_output(&format!("Saved: {}", path.display()));
-                            self.tabs[i].dirty = false;
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.web_save()
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let i = self.active_tab;
+                    if let Some(path) = &self.tabs[i].current_path {
+                        let path = path.clone();
+                        self.tabs[i].scene.document.header.user_real1 =
+                            self.tabs[i].scene.annotation_scale as f64;
+                        match crate::io::save(&self.tabs[i].scene.document, &path) {
+                            Ok(()) => {
+                                self.command_line
+                                    .push_output(&format!("Saved: {}", path.display()));
+                                self.tabs[i].dirty = false;
+                            }
+                            Err(e) => self.command_line.push_error(&format!("Save failed: {e}")),
                         }
-                        Err(e) => self.command_line.push_error(&format!("Save failed: {e}")),
+                        Task::none()
+                    } else {
+                        self.save_dialog_for_unsaved = false;
+                        self.open_save_dialog_window(i)
                     }
-                    Task::none()
-                } else {
+                }
+            }
+
+            Message::SaveAs => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.web_save()
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let i = self.active_tab;
                     self.save_dialog_for_unsaved = false;
                     self.open_save_dialog_window(i)
                 }
             }
 
-            Message::SaveAs => {
-                let i = self.active_tab;
-                self.save_dialog_for_unsaved = false;
-                self.open_save_dialog_window(i)
+            #[cfg(target_arch = "wasm32")]
+            Message::WebSaveResult(result) => {
+                match result {
+                    Ok(name) => self.command_line.push_output(&format!("Saved: {name}")),
+                    Err(e) if e != "Cancelled" => {
+                        self.command_line.push_error(&format!("Save failed: {e}"))
+                    }
+                    _ => {}
+                }
+                Task::none()
             }
 
             Message::SaveDialogFormatChanged(fmt) => {

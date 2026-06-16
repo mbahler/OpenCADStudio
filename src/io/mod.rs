@@ -356,6 +356,35 @@ pub fn save(doc: &CadDocument, path: &Path) -> Result<(), String> {
     save_as_version(doc, path, doc.version)
 }
 
+/// Serialize a document to an in-memory byte buffer, format chosen by `ext`
+/// (`dxf` → DXF, anything else → DWG). Used by the web build, which hands the
+/// bytes to a browser download instead of writing a path.
+pub fn save_to_bytes(doc: &CadDocument, ext: &str) -> Result<Vec<u8>, String> {
+    let mut doc = doc.clone();
+    sync_current_styles_on_save(&mut doc);
+    match ext.to_lowercase().as_str() {
+        "dxf" => DxfWriter::new(&doc).write_to_vec().map_err(|e| e.to_string()),
+        _ => {
+            let mut buf = std::io::Cursor::new(Vec::new());
+            DwgWriter::write_to_writer(&mut buf, &doc).map_err(|e| e.to_string())?;
+            Ok(buf.into_inner())
+        }
+    }
+}
+
+/// Web "save as": offer a download of `bytes` under `name` via the browser's
+/// save dialog. Returns the file name on success.
+#[cfg(target_arch = "wasm32")]
+pub async fn download_web(name: String, bytes: Vec<u8>) -> Result<String, String> {
+    let handle = rfd::AsyncFileDialog::new()
+        .set_file_name(&name)
+        .save_file()
+        .await
+        .ok_or_else(|| "Cancelled".to_string())?;
+    handle.write(&bytes).await.map_err(|e| e.to_string())?;
+    Ok(name)
+}
+
 // ── Post-load fixups ──────────────────────────────────────────────────────
 
 // Resolve the current text / dimension / multiline style from the handle the
