@@ -297,6 +297,9 @@ pub(super) struct OpenCADStudio {
     /// keep their manifest listed but drop their ribbon tab and command
     /// dispatch. Persisted via [`settings::UserSettings::disabled_plugins`].
     disabled_plugins: rustc_hash::FxHashSet<String>,
+    /// External add-on packages found in the plugins folder, refreshed when the
+    /// Plugin Manager opens. Discovery only — not yet loaded (phase 2).
+    external_plugins: Vec<crate::plugin::external::ExternalPlugin>,
     /// PDSIZE text buffer for the Point Style (DDPTYPE) dialog.
     point_size_buf: String,
     /// Point Style size mode: `true` = relative to screen, `false` = absolute.
@@ -1461,6 +1464,7 @@ impl OpenCADStudio {
             modal_drag_last: None,
             modal_dragging: false,
             disabled_plugins: rustc_hash::FxHashSet::default(),
+            external_plugins: Vec::new(),
             point_size_buf: String::new(),
             point_size_relative: true,
             default_assoc_prompted: false,

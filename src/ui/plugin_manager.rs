@@ -5,6 +5,7 @@
 //! `docs/plugin-architecture.md`.
 
 use crate::app::Message;
+use crate::plugin::external::ExternalPlugin;
 use crate::plugin::manifest::PluginManifest;
 use iced::widget::{button, column, container, row, scrollable, text, Space};
 use iced::{Background, Border, Color, Element, Fill, Theme};
@@ -140,9 +141,66 @@ fn plugin_card<'a>(m: &PluginManifest, disabled: bool) -> Element<'a, Message> {
         .into()
 }
 
+/// Coloured status pill for a discovered external package.
+fn status_badge<'a>(label: &str, color: Color) -> Element<'a, Message> {
+    container(text(label.to_string()).size(11).color(WHITE))
+        .padding([2, 8])
+        .style(move |_: &Theme| container::Style {
+            background: Some(Background::Color(color)),
+            border: Border {
+                radius: 4.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+fn external_card<'a>(p: &ExternalPlugin) -> Element<'a, Message> {
+    let (status, color) = if !p.api_compatible() {
+        ("API incompatible", Color { r: 0.55, g: 0.28, b: 0.28, a: 1.0 })
+    } else if !p.lib_present {
+        ("No library", Color { r: 0.5, g: 0.42, b: 0.2, a: 1.0 })
+    } else {
+        ("Ready to load", Color { r: 0.2, g: 0.45, b: 0.28, a: 1.0 })
+    };
+    let header = row![
+        text(p.name.clone()).size(15).color(WHITE),
+        Space::new().width(8),
+        badge(format!("v{}", p.version)),
+        Space::new().width(8),
+        badge(format!("API {}", p.api_version)),
+        Space::new().width(Fill),
+        status_badge(status, color),
+    ]
+    .align_y(iced::Center);
+
+    let id_line = text(p.id.clone()).size(11).color(ACCENT);
+    let mut body = column![header, id_line].spacing(5);
+    if !p.description.is_empty() {
+        body = body.push(text(p.description.clone()).size(12).color(DIM));
+    }
+    if !p.command_prefixes.is_empty() {
+        body = body.push(
+            text(format!("Commands: {}", p.command_prefixes.join(", ")))
+                .size(11)
+                .color(DIM),
+        );
+    }
+    container(body.padding([12, 14]))
+        .width(Fill)
+        .style(|_: &Theme| container::Style {
+            background: Some(Background::Color(CARD)),
+            border: Border { color: BORDER, width: 1.0, radius: 6.0.into() },
+            ..Default::default()
+        })
+        .into()
+}
+
 pub fn view_window<'a>(
     plugins: &[&'static PluginManifest],
     disabled: &FxHashSet<String>,
+    externals: &[ExternalPlugin],
 ) -> Element<'a, Message> {
     let title = text("Installed Plugins").size(20).color(WHITE);
     let subtitle = text(format!(
@@ -153,17 +211,28 @@ pub fn view_window<'a>(
     .size(12)
     .color(DIM);
 
-    let body: Element<'_, Message> = if plugins.is_empty() {
-        container(text("No plugins installed.").size(13).color(DIM))
-            .padding(20)
-            .into()
+    let mut list = column![].spacing(10);
+    if plugins.is_empty() {
+        list = list.push(text("No built-in plugins.").size(13).color(DIM));
     } else {
-        let mut list = column![].spacing(10);
         for m in plugins {
             list = list.push(plugin_card(m, disabled.contains(m.id)));
         }
-        scrollable(list.width(Fill)).height(Fill).into()
-    };
+    }
+    // External (plugins-folder) packages — discovered, not yet loaded.
+    if !externals.is_empty() {
+        list = list.push(Space::new().height(10));
+        list = list.push(text("External (plugins folder)").size(13).color(ACCENT));
+        list = list.push(
+            text("Detected on disk. Dynamic loading is not active yet.")
+                .size(11)
+                .color(DIM),
+        );
+        for p in externals {
+            list = list.push(external_card(p));
+        }
+    }
+    let body: Element<'_, Message> = scrollable(list.width(Fill)).height(Fill).into();
 
     container(
         column![title, subtitle, Space::new().height(12), body]

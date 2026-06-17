@@ -4,6 +4,7 @@
 // Domain plugins (e.g. storm_sewer) live under `src/modules/<name>/` and
 // register here via `inventory::submit!(PluginRegistration { … })`.
 
+pub mod external;
 pub mod host;
 pub mod manifest;
 pub mod registry;

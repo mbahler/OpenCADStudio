@@ -1124,6 +1124,7 @@ impl OpenCADStudio {
                 crate::ui::plugin_manager::view_window(
                     &crate::plugin::installed_manifests(),
                     &self.disabled_plugins,
+                    &self.external_plugins,
                 ),
                 520,
                 460,

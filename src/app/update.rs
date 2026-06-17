@@ -5526,6 +5526,9 @@ impl OpenCADStudio {
 
             // ── Plugin Manager window ─────────────────────────────────────
             Message::PluginManagerOpen => {
+                // Refresh the on-disk external-plugin list each time the manager
+                // opens so newly dropped-in packages show up.
+                self.external_plugins = crate::plugin::external::discover();
                 self.active_modal = Some(super::ModalKind::PluginManager);
                 Task::none()
             }
