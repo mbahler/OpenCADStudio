@@ -6446,6 +6446,35 @@ impl Scene {
     /// `(vw, vh)`. Full canvas outside the Model layout or for a single
     /// tile. Used to map cursor coordinates into the active tile so pick /
     /// pan / ViewCube work per-pane in a tiled layout.
+    /// Canvas bounds + camera for every Model tile whose grid display is on.
+    /// Each pane renders its own grid independently of which tile is active or
+    /// hovered, so the grid never flickers as the cursor crosses panes. The
+    /// active tile uses the live camera (mid-orbit/pan); others use their
+    /// stored camera. (#121)
+    pub fn model_tile_grid_views(&self, vw: f32, vh: f32) -> Vec<(iced::Rectangle, Camera)> {
+        if self.current_layout != "Model" {
+            return Vec::new();
+        }
+        let tiles = self.model_tiles.borrow();
+        let active = self.active_model_tile.get().min(tiles.len().saturating_sub(1));
+        let live = self.camera.borrow().clone();
+        tiles
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.grid_on)
+            .map(|(idx, t)| {
+                let bounds = iced::Rectangle {
+                    x: t.rect.x * vw,
+                    y: t.rect.y * vh,
+                    width: (t.rect.width * vw).max(1.0),
+                    height: (t.rect.height * vh).max(1.0),
+                };
+                let cam = if idx == active { live.clone() } else { t.camera.clone() };
+                (bounds, cam)
+            })
+            .collect()
+    }
+
     pub fn active_model_tile_bounds(&self, vw: f32, vh: f32) -> iced::Rectangle {
         if self.current_layout != "Model" {
             return iced::Rectangle { x: 0.0, y: 0.0, width: vw, height: vh };

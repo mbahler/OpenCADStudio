@@ -32,7 +32,6 @@ impl StatusBar {
         ortho_mode: bool,
         polar_mode: bool,
         polar_increment_deg: f32,
-        show_grid: bool,
         dyn_input: bool,
         otrack: bool,
         layouts: Vec<String>,
@@ -94,7 +93,6 @@ impl StatusBar {
 
         // ── Right side ────────────────────────────────────────────────────
         let osnap_active = snapper.is_active();
-        let snap_grid_on = snapper.is_on(crate::snap::SnapType::Grid) && snapper.snap_enabled;
 
         let vp_label = if viewport_count > 0 {
             format!("{} VP", viewport_count)
@@ -124,18 +122,6 @@ impl StatusBar {
             right_status = right_status.push(tip(
                 status_pill(format_coords(cursor_world)).into(),
                 "Cursor coordinates (X, Y, Z)",
-            ));
-        }
-        if vis(StatusPill::Snap) {
-            right_status = right_status.push(tip(
-                toggle_pill("SNAP", snap_grid_on, Message::ToggleGridSnap),
-                "Snap to Grid\nF9",
-            ));
-        }
-        if vis(StatusPill::Grid) {
-            right_status = right_status.push(tip(
-                toggle_pill("GRID", show_grid, Message::ToggleGrid),
-                "Show Grid\nF7",
             ));
         }
         if vis(StatusPill::Ortho) {

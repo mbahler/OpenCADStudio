@@ -12,8 +12,6 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum StatusPill {
     Coords,
-    Snap,
-    Grid,
     Ortho,
     Lwt,
     Polar,
@@ -37,8 +35,6 @@ impl StatusPill {
     /// the customization menu.
     pub const ALL: &'static [StatusPill] = &[
         StatusPill::Coords,
-        StatusPill::Snap,
-        StatusPill::Grid,
         StatusPill::Ortho,
         StatusPill::Lwt,
         StatusPill::Polar,
@@ -61,8 +57,6 @@ impl StatusPill {
     pub fn id(self) -> &'static str {
         match self {
             StatusPill::Coords => "coords",
-            StatusPill::Snap => "snap",
-            StatusPill::Grid => "grid",
             StatusPill::Ortho => "ortho",
             StatusPill::Lwt => "lwt",
             StatusPill::Polar => "polar",
@@ -86,8 +80,6 @@ impl StatusPill {
     pub fn label(self) -> &'static str {
         match self {
             StatusPill::Coords => "Coordinates",
-            StatusPill::Snap => "Snap Mode",
-            StatusPill::Grid => "Grid",
             StatusPill::Ortho => "Ortho Mode",
             StatusPill::Lwt => "Show Lineweight",
             StatusPill::Polar => "Polar Tracking",

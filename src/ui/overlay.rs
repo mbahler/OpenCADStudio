@@ -107,7 +107,7 @@ pub fn selection_overlay<'a>(
     selection: SelectionState,
     snap: Option<(Point, SnapType)>,
     grips: Vec<GripMarker>,
-    grid: Option<GridParams>,
+    grid: Vec<GridParams>,
     ucs_icon: Option<UcsIconParams>,
     ost_points: Vec<OstTrackPoint>,
     cursor_screen: Point,
@@ -134,7 +134,7 @@ struct SelectionCanvas {
     selection: SelectionState,
     snap: Option<(Point, SnapType)>,
     grips: Vec<GripMarker>,
-    grid: Option<GridParams>,
+    grid: Vec<GridParams>,
     ucs_icon: Option<UcsIconParams>,
     ost_points: Vec<OstTrackPoint>,
     cursor_screen: Point,
@@ -284,13 +284,11 @@ impl canvas::Program<Message> for SelectionCanvas {
         }
 
         // ── Grid display ──────────────────────────────────────────────────
-        if let Some(ref g) = self.grid {
-            // Clip to the active tile's rectangle so grid lines don't spill
-            // into neighbouring panes in a tiled layout.
-            let plane = g.plane;
-            let view_proj = g.view_proj;
+        // One entry per pane with its grid on. Each is clipped to its own tile
+        // rectangle so lines never spill into neighbouring panes.
+        for g in &self.grid {
             let gb = g.bounds;
-            frame.with_clip(gb, |f| draw_grid(f, view_proj, plane, gb));
+            frame.with_clip(gb, |f| draw_grid(f, g.view_proj, g.plane, gb));
         }
 
         if let (Some(a), Some(b)) = (self.selection.box_anchor, self.selection.box_current) {

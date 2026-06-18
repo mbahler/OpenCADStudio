@@ -133,16 +133,32 @@ impl OpenCADStudio {
             // the correct place and scale.
             let vp_bounds = tab.scene.active_model_tile_bounds(vw, vh);
 
-            let grid = if self.show_grid {
+            // Model layout: one grid per tile that has grid display on, drawn
+            // in its own bounds + camera so panes are independent and never
+            // flicker on hover. Paper layout: a single grid gated by show_grid.
+            let grid: Vec<overlay::GridParams> = if !is_paper {
+                tab.scene
+                    .model_tile_grid_views(vw, vh)
+                    .into_iter()
+                    .map(|(bounds, cam)| {
+                        let plane = grid_plane_from_camera(cam.pitch, cam.yaw);
+                        overlay::GridParams {
+                            view_proj: cam.view_proj(bounds),
+                            bounds,
+                            plane,
+                        }
+                    })
+                    .collect()
+            } else if self.show_grid {
                 let cam = tab.scene.camera.borrow();
                 let plane = grid_plane_from_camera(cam.pitch, cam.yaw);
-                Some(overlay::GridParams {
+                vec![overlay::GridParams {
                     view_proj: cam.view_proj(vp_bounds),
                     bounds: vp_bounds,
                     plane,
-                })
+                }]
             } else {
-                None
+                Vec::new()
             };
 
             let ucs_icon = if self.show_ucs_icon && !is_paper {
@@ -194,12 +210,6 @@ impl OpenCADStudio {
                 tile_edges,
             )
         };
-
-        // Render-mode picker, top-left of the viewport. Drives whether
-        // 3D face / mesh fills and edges are rendered for the active
-        // tab. Hatch fills are deliberately *not* gated by this — the
-        // document's FILLMODE still owns 2D fill state.
-        let info = render_mode_picker(tab.render_mode);
 
         let viewport_mouse = mouse_area(container(
             iced::widget::Space::new().width(Fill).height(Fill),
@@ -365,61 +375,14 @@ impl OpenCADStudio {
         // viewport drawing / selection is unaffected. In a paper layout
         // the active viewport gets its own picker (below) instead.
         if !is_paper && !tab.is_start {
-            // Render-mode picker + viewport-split buttons (horizontal /
-            // vertical divider of the active Model tile).
-            let split_btn = |bytes: &'static [u8], horizontal: bool| {
-                button(crate::ui::icons::tinted(
-                    bytes,
-                    14.0,
-                    Color {
-                        r: 0.85,
-                        g: 0.85,
-                        b: 0.85,
-                        a: 1.0,
-                    },
-                ))
-                .on_press(Message::SplitModelViewport(horizontal))
-                .padding([4, 8])
-                .style(|_: &Theme, status| iced::widget::button::Style {
-                    background: Some(Background::Color(match status {
-                        iced::widget::button::Status::Hovered => Color {
-                            r: 0.20,
-                            g: 0.20,
-                            b: 0.20,
-                            a: 0.85,
-                        },
-                        _ => Color {
-                            r: 0.10,
-                            g: 0.10,
-                            b: 0.10,
-                            a: 0.75,
-                        },
-                    })),
-                    border: Border {
-                        color: Color {
-                            r: 0.35,
-                            g: 0.35,
-                            b: 0.35,
-                            a: 1.0,
-                        },
-                        width: 1.0,
-                        radius: 4.0.into(),
-                    },
-                    text_color: Color {
-                        r: 0.85,
-                        g: 0.85,
-                        b: 0.85,
-                        a: 1.0,
-                    },
-                    ..Default::default()
-                })
-            };
-            let bar = row![
-                info,
-                split_btn(crate::ui::icons::SPLIT_H, true),
-                split_btn(crate::ui::icons::SPLIT_V, false)
-            ]
-            .spacing(4);
+            // Unified control chip: split buttons + render-mode picker +
+            // grid / grid-snap toggles, for the active Model tile.
+            let bar = viewport_controls(
+                tab.render_mode,
+                self.show_grid,
+                self.snapper.is_on(crate::snap::SnapType::Grid),
+                true,
+            );
             // Position the bar at the active model tile's top-left corner so
             // it follows the active panel in a tiled layout (full canvas when
             // a single tile fills the window). Leading Spaces offset it.
@@ -490,7 +453,12 @@ impl OpenCADStudio {
                 Space::new().height(iced::Length::Fixed(y + 4.0)),
                 row![
                     Space::new().width(iced::Length::Fixed(x + 4.0)),
-                    iced::widget::opaque(render_mode_picker(vp_mode)),
+                    iced::widget::opaque(viewport_controls(
+                        vp_mode,
+                        self.show_grid,
+                        self.snapper.is_on(crate::snap::SnapType::Grid),
+                        false,
+                    )),
                 ],
             ]
             .width(Fill)
@@ -928,7 +896,6 @@ impl OpenCADStudio {
                         self.ortho_mode,
                         self.polar_mode,
                         self.polar_increment_deg,
-                        self.show_grid,
                         self.dyn_input,
                         self.snapper.otrack_enabled,
                         tab.scene.layout_names(),
@@ -4208,11 +4175,17 @@ pub(super) fn recent_files_panel<'a>(recents: &'a [std::path::PathBuf]) -> Eleme
 
 // ── Render-mode picker ──────────────────────────────────────────────────────
 
-/// The 7-way visual-style `pick_list`, styled as a dark overlay chip.
-/// Shared by the model-space viewport (top-left) and each active
-/// paper-space viewport. Emits `SetRenderMode`, which the update loop
-/// routes to the active viewport entity or the model-layout tab.
-fn render_mode_picker<'a>(current: acadrust::entities::ViewportRenderMode) -> Element<'a, Message> {
+/// Top-left viewport control bar: a single dark chip holding (optionally) the
+/// horizontal/vertical split buttons, the render-mode picker, and the grid /
+/// grid-snap toggles. `include_split` is off for paper-space viewports, which
+/// have no model-tile splitting. Grid / snap reflect the active viewport's
+/// state and emit `ToggleGrid` / `ToggleGridSnap`.
+fn viewport_controls<'a>(
+    render_mode: acadrust::entities::ViewportRenderMode,
+    show_grid: bool,
+    snap_on: bool,
+    include_split: bool,
+) -> Element<'a, Message> {
     use acadrust::entities::ViewportRenderMode as M;
     let render_modes: Vec<RenderModeChoice> = vec![
         RenderModeChoice(M::Wireframe2D),
@@ -4223,39 +4196,94 @@ fn render_mode_picker<'a>(current: acadrust::entities::ViewportRenderMode) -> El
         RenderModeChoice(M::FlatShadedWithEdges),
         RenderModeChoice(M::GouraudShadedWithEdges),
     ];
-    container(
-        iced::widget::pick_list(render_modes, Some(RenderModeChoice(current)), |c| {
-            Message::SetRenderMode(c.0)
-        })
-        .text_size(11),
+    let light = Color { r: 0.85, g: 0.85, b: 0.85, a: 1.0 };
+    let accent = Color { r: 0.45, g: 0.70, b: 1.0, a: 1.0 };
+
+    // Borderless icon button; an `active` toggle gets an accent tint + fill.
+    let icon_btn = move |bytes: &'static [u8], active: bool, msg: Message| {
+        let tint = if active { accent } else { light };
+        button(crate::ui::icons::tinted(bytes, 15.0, tint))
+            .on_press(msg)
+            .padding([4, 6])
+            .style(move |_: &Theme, status| iced::widget::button::Style {
+                background: Some(Background::Color(match (active, status) {
+                    (_, iced::widget::button::Status::Hovered) => Color {
+                        r: 0.25,
+                        g: 0.25,
+                        b: 0.25,
+                        a: 0.9,
+                    },
+                    (true, _) => Color {
+                        r: 0.16,
+                        g: 0.22,
+                        b: 0.32,
+                        a: 0.9,
+                    },
+                    (false, _) => Color::TRANSPARENT,
+                })),
+                border: Border {
+                    radius: 3.0.into(),
+                    ..Default::default()
+                },
+                text_color: tint,
+                ..Default::default()
+            })
+    };
+
+    // Render-mode picker, restyled borderless so the outer chip frames it.
+    let picker = iced::widget::pick_list(
+        render_modes,
+        Some(RenderModeChoice(render_mode)),
+        |c| Message::SetRenderMode(c.0),
     )
-    .style(|_: &Theme| iced::widget::container::Style {
-        background: Some(iced::Background::Color(Color {
-            r: 0.10,
-            g: 0.10,
-            b: 0.10,
-            a: 0.75,
-        })),
-        border: iced::Border {
-            color: Color {
-                r: 0.35,
-                g: 0.35,
-                b: 0.35,
-                a: 1.0,
-            },
-            width: 1.0,
-            radius: 4.0.into(),
+    .text_size(11)
+    .padding([4, 6])
+    .style(move |_: &Theme, _| iced::widget::pick_list::Style {
+        background: Background::Color(Color::TRANSPARENT),
+        border: Border {
+            radius: 3.0.into(),
+            ..Default::default()
         },
-        text_color: Some(Color {
-            r: 0.85,
-            g: 0.85,
-            b: 0.85,
-            a: 1.0,
-        }),
-        ..Default::default()
-    })
-    .padding([4, 8])
-    .into()
+        text_color: light,
+        placeholder_color: light,
+        handle_color: light,
+    });
+
+    let mut bar = row![]
+        .spacing(2)
+        .align_y(iced::alignment::Vertical::Center);
+    if include_split {
+        bar = bar
+            .push(icon_btn(crate::ui::icons::SPLIT_H, false, Message::SplitModelViewport(true)))
+            .push(icon_btn(crate::ui::icons::SPLIT_V, false, Message::SplitModelViewport(false)));
+    }
+    bar = bar
+        .push(picker)
+        .push(icon_btn(crate::ui::icons::GRID, show_grid, Message::ToggleGrid))
+        .push(icon_btn(crate::ui::icons::SNAP, snap_on, Message::ToggleGridSnap));
+
+    container(bar)
+        .padding(2)
+        .style(|_: &Theme| iced::widget::container::Style {
+            background: Some(Background::Color(Color {
+                r: 0.10,
+                g: 0.10,
+                b: 0.10,
+                a: 0.75,
+            })),
+            border: Border {
+                color: Color {
+                    r: 0.35,
+                    g: 0.35,
+                    b: 0.35,
+                    a: 1.0,
+                },
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
 }
 
 // ── Dynamic-input field formatting ─────────────────────────────────────────
