@@ -449,7 +449,7 @@ impl Pipeline {
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None, // two-sided: ACIS import winding is unreliable
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -538,7 +538,7 @@ impl Pipeline {
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None, // two-sided: ACIS import winding is unreliable
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {

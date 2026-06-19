@@ -336,24 +336,28 @@ pub fn tessellate_solid3d(solid: &Solid3D, color: [f32; 4], facet_res: f64) -> O
 /// Returns an empty `Vec` when the loop topology is broken or has fewer than
 /// three distinct points.
 pub(crate) fn collect_face_polygon(sat: &SatDocument, face: &SatFace, circ_segs: usize) -> Vec<[f64; 3]> {
-    let loop_ptr = face.first_loop();
-    let Some(loop_rec) = sat.resolve(loop_ptr) else {
+    let Some(loop_rec) = sat.resolve(face.first_loop()) else {
         return vec![];
     };
     let Some(sat_loop) = SatLoop::from_record(loop_rec) else {
         return vec![];
     };
+    collect_loop_polygon(sat, &sat_loop, circ_segs)
+}
 
+/// Boundary points of a single coedge loop, in order.
+pub(crate) fn collect_loop_polygon(
+    sat: &SatDocument,
+    sat_loop: &SatLoop,
+    circ_segs: usize,
+) -> Vec<[f64; 3]> {
     let first_ptr = sat_loop.first_coedge();
     let mut cur = first_ptr;
     let mut pts: Vec<[f64; 3]> = Vec::new();
     let mut visited: HashSet<i32> = HashSet::default();
 
     loop {
-        if cur.is_null() {
-            break;
-        }
-        if visited.contains(&cur.0) {
+        if cur.is_null() || visited.contains(&cur.0) {
             break;
         }
         visited.insert(cur.0);
@@ -361,7 +365,6 @@ pub(crate) fn collect_face_polygon(sat: &SatDocument, face: &SatFace, circ_segs:
         if let Some(ce_rec) = sat.resolve(cur) {
             if let Some(coedge) = SatCoedge::from_record(ce_rec) {
                 append_coedge_points(sat, &coedge, circ_segs, &mut pts);
-
                 let next = coedge.next();
                 if next == first_ptr {
                     break;
@@ -372,8 +375,33 @@ pub(crate) fn collect_face_polygon(sat: &SatDocument, face: &SatFace, circ_segs:
         }
         break;
     }
-
     pts
+}
+
+/// All loops of a face: the outer boundary first, then any inner hole loops.
+/// Each loop is returned as an ordered 3-D polygon (≥ 3 points).
+pub(crate) fn collect_face_loops(
+    sat: &SatDocument,
+    face: &SatFace,
+    circ_segs: usize,
+) -> Vec<Vec<[f64; 3]>> {
+    let mut loops: Vec<Vec<[f64; 3]>> = Vec::new();
+    let mut loop_ptr = face.first_loop();
+    let mut seen: HashSet<i32> = HashSet::default();
+    while !loop_ptr.is_null() && seen.insert(loop_ptr.0) {
+        let Some(loop_rec) = sat.resolve(loop_ptr) else {
+            break;
+        };
+        let Some(sat_loop) = SatLoop::from_record(loop_rec) else {
+            break;
+        };
+        let poly = collect_loop_polygon(sat, &sat_loop, circ_segs);
+        if poly.len() >= 3 {
+            loops.push(poly);
+        }
+        loop_ptr = sat_loop.next_loop();
+    }
+    loops
 }
 
 /// Append a coedge's boundary points to `pts`. Ellipse/circle curves are
@@ -522,10 +550,6 @@ fn tess_plane_face(
     };
     let nf = [nx as f32, ny as f32, nz as f32];
 
-    // Wind the polygon so its CCW area normal agrees with the outward face
-    // normal. Curved boundaries are sampled in their curve's own orientation,
-    // which may run either way relative to the face; reversing here keeps the
-    // fan's winding-derived normal (flat shading) matching `nf` (Gouraud).
     if dot3(newell_normal(&poly), [nx, ny, nz]) < 0.0 {
         poly.reverse();
     }
@@ -536,7 +560,8 @@ fn tess_plane_face(
         normals.push(nf);
     }
 
-    // Fan triangulation from vertex 0.
+    // Fan triangulation from vertex 0 (outer loop only; holes are handled by
+    // the truck B-rep path in `acis_to_truck`).
     let n = poly.len() as u32;
     for i in 1..(n - 1) {
         indices.extend_from_slice(&[base, base + i, base + i + 1]);

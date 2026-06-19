@@ -28,7 +28,7 @@ use acadrust::entities::acis::{
 
 use crate::scene::model::mesh_model::{MeshLodSet, MeshModel};
 use crate::scene::convert::solid3d_tess::{
-    apply_body_transform, body_transform, collect_face_polygon, cone_axis_span, mesh_aabb,
+    apply_body_transform, body_transform, collect_face_loops, cone_axis_span, mesh_aabb,
 };
 
 /// Slightly over 2π so revolution builders close the loop.
@@ -198,20 +198,61 @@ fn build_face_group(
 /// boundary edges (circles) are sampled into line segments, which keeps the
 /// wire planar so `try_attach_plane` can fit the plane.
 fn plane_face(sat: &SatDocument, face: &SatFace) -> Option<Face> {
-    let poly = collect_face_polygon(sat, face, BOUNDARY_SEGS);
-    if poly.len() < 3 {
+    // Outer boundary first, then inner hole loops — `try_attach_plane` fits the
+    // plane from the outer wire and cuts the rest as holes, so a pierced face
+    // (e.g. a wall with a window opening) renders with the opening. (#123)
+    let loops = collect_face_loops(sat, face, BOUNDARY_SEGS);
+    if loops.first().map_or(true, |l| l.len() < 3) {
         return None;
     }
-    let verts: Vec<_> = poly
-        .iter()
-        .map(|p| builder::vertex(Point3::new(p[0], p[1], p[2])))
-        .collect();
-    let n = verts.len();
-    let edges: Vec<_> = (0..n)
-        .map(|i| builder::line(&verts[i], &verts[(i + 1) % n]))
-        .collect();
-    let wire: Wire = edges.into();
-    builder::try_attach_plane(&[wire]).ok()
+    let build_wire = |pts: &[[f64; 3]], reverse: bool| -> Option<Wire> {
+        if pts.len() < 3 {
+            return None;
+        }
+        let verts: Vec<_> = if reverse {
+            pts.iter()
+                .rev()
+                .map(|p| builder::vertex(Point3::new(p[0], p[1], p[2])))
+                .collect::<Vec<_>>()
+        } else {
+            pts.iter()
+                .map(|p| builder::vertex(Point3::new(p[0], p[1], p[2])))
+                .collect::<Vec<_>>()
+        };
+        let n = verts.len();
+        let edges: Vec<_> = (0..n)
+            .map(|i| builder::line(&verts[i], &verts[(i + 1) % n]))
+            .collect();
+        Some(edges.into())
+    };
+    // `try_attach_plane` only cuts an inner wire as a hole when it winds the
+    // *opposite* way to the outer boundary. ACIS doesn't guarantee that, so
+    // reverse any hole loop whose winding matches the outer's. (#123)
+    let outer_n = loop_normal(&loops[0]);
+    let mut wires: Vec<Wire> = Vec::new();
+    let outer = build_wire(&loops[0], false)?;
+    wires.push(outer);
+    for lp in &loops[1..] {
+        let same = vdot(loop_normal(lp), outer_n) > 0.0;
+        if let Some(w) = build_wire(lp, same) {
+            wires.push(w);
+        }
+    }
+    builder::try_attach_plane(&wires).ok()
+}
+
+/// Newell area-weighted normal of a closed 3-D polygon (orientation only).
+fn loop_normal(pts: &[[f64; 3]]) -> [f64; 3] {
+    let mut n = [0.0f64; 3];
+    let m = pts.len();
+    for i in 0..m {
+        let a = pts[i];
+        let b = pts[(i + 1) % m];
+        n[0] += (a[1] - b[1]) * (a[2] + b[2]);
+        n[1] += (a[2] - b[2]) * (a[0] + b[0]);
+        n[2] += (a[0] - b[0]) * (a[1] + b[1]);
+    }
+    n
 }
 
 // ── Cone / cylinder face ─────────────────────────────────────────────────────
@@ -429,3 +470,5 @@ fn vnorm(a: [f64; 3]) -> [f64; 3] {
         [a[0] / l, a[1] / l, a[2] / l]
     }
 }
+
+
