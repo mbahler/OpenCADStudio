@@ -2031,13 +2031,45 @@ impl Scene {
                 }
             }
         }
-        let mut all: Vec<MeshLodSet> = self.meshes.values().cloned().collect();
+        // Top-level solids: drop those whose layer is off/frozen or that are
+        // flagged invisible / isolated-hidden, mirroring the 2D wire path.
+        let mut all: Vec<MeshLodSet> = self
+            .meshes
+            .iter()
+            .filter(|(&h, _)| self.mesh_entity_visible(h))
+            .map(|(_, set)| set.clone())
+            .collect();
         // Block-definition solids are instanced per model-space INSERT so a
         // block placed at an INSERT scale renders at the right size. (#123)
         all.extend(self.instanced_block_meshes(self.model_space_block_handle()));
         let arc = Arc::new(all);
         *self.mesh_cache.borrow_mut() = Some((self.geometry_epoch, Arc::clone(&arc)));
         arc
+    }
+
+    /// True when `layer` is turned off or frozen — entities on it never render.
+    fn layer_hidden(&self, layer: &str) -> bool {
+        self.document
+            .layers
+            .get(layer)
+            .map(|l| l.flags.off || l.flags.frozen)
+            .unwrap_or(false)
+    }
+
+    /// Visibility test for a solid mesh entity, mirroring the 2D wire path:
+    /// honour the invisible flag, the isolate/hide set, and the layer's
+    /// off/frozen state.
+    fn mesh_entity_visible(&self, handle: Handle) -> bool {
+        let Some(c) = self.document.get_entity(handle).map(|e| e.common()) else {
+            return false;
+        };
+        if c.invisible {
+            return false;
+        }
+        if !self.hidden.is_empty() && self.hidden.contains(&handle) {
+            return false;
+        }
+        !self.layer_hidden(&c.layer)
     }
 
     /// One transformed mesh per block-definition solid instance reached from an
@@ -2054,6 +2086,11 @@ impl Scene {
                 continue;
             }
             if let EntityType::Insert(ins) = e {
+                // INSERT on an off/frozen (or invisible) layer hides the whole
+                // instance, block-internal solids included.
+                if !self.mesh_entity_visible(ins.common.handle) {
+                    continue;
+                }
                 self.expand_block_meshes(&ins.block_name, &ins.get_transform(), 0, woff, &mut out);
             }
         }
@@ -2081,6 +2118,11 @@ impl Scene {
             let Some(e) = self.document.get_entity(h) else {
                 continue;
             };
+            // A block-internal solid / nested INSERT on an off/frozen layer
+            // (or flagged invisible) must not render, same as a top-level one.
+            if !self.mesh_entity_visible(h) {
+                continue;
+            }
             if let EntityType::Insert(ins) = e {
                 let composed = ins.get_transform().then(accum);
                 self.expand_block_meshes(&ins.block_name, &composed, depth + 1, woff, out);

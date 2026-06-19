@@ -253,6 +253,14 @@ fn collect_referenced_blocks(doc: &CadDocument) -> Vec<String> {
     seen.into_iter().collect()
 }
 
+/// True when `layer` is turned off or frozen — entities on it never render.
+fn layer_hidden(doc: &CadDocument, layer: &str) -> bool {
+    doc.layers
+        .get(layer)
+        .map(|l| l.flags.off || l.flags.frozen)
+        .unwrap_or(false)
+}
+
 fn build_defn(
     doc: &CadDocument,
     block_name: &str,
@@ -358,6 +366,13 @@ fn build_defn(
         // invisible — honouring the flag is what shows a single profile
         // instead of every variant stacked on top of each other.
         if entity.common().invisible {
+            continue;
+        }
+        // A sub-entity on a layer that is off or frozen must not render, same
+        // as a top-level entity on that layer. The defn cache is rebuilt on
+        // every layer off/freeze toggle (bump_geometry bumps block_epoch), so
+        // baking the visibility here stays in sync.
+        if layer_hidden(doc, &entity.common().layer) {
             continue;
         }
         match entity {
