@@ -2907,6 +2907,10 @@ fn viewport_context_menu_overlay(
             ));
             items.push(sep());
             items.push(item("Select Similar".to_string(), Message::SelectSimilar));
+            items.push(item(
+                "Invert Selection".to_string(),
+                Message::InvertSelection,
+            ));
         }
         if isolation_active {
             items.push(item(

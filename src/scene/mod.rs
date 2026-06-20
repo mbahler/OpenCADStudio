@@ -4896,6 +4896,27 @@ impl Scene {
         added
     }
 
+    /// Replace the selection with its complement: every selectable object
+    /// in the active layout that isn't currently selected. The candidate
+    /// set is the visible wire set, so objects on off/frozen layers (which
+    /// can't be picked anyway) are excluded. Returns the new count.
+    pub fn invert_selection(&mut self) -> usize {
+        let prev: rustc_hash::FxHashSet<Handle> = self.selected.iter().copied().collect();
+        let all: Vec<Handle> = self
+            .entity_wires()
+            .iter()
+            .filter_map(|w| Self::handle_from_wire_name(&w.name))
+            .collect();
+        self.selected.clear();
+        for h in all {
+            if !prev.contains(&h) {
+                self.selected.insert(h);
+            }
+        }
+        self.bump_selection();
+        self.selected.len()
+    }
+
     /// Replaces (or extends, when `append` is true) the current
     /// selection with every entity in the active layout that matches
     /// the filter. Returns the number of newly-matching entities.

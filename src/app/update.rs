@@ -4971,6 +4971,16 @@ impl OpenCADStudio {
                 Task::none()
             }
 
+            Message::InvertSelection => {
+                let i = self.active_tab;
+                self.tabs[i].scene.selection.borrow_mut().context_menu = None;
+                let count = self.tabs[i].scene.invert_selection();
+                self.command_line
+                    .push_output(&format!("Invert Selection: {} object(s) selected.", count));
+                self.refresh_properties();
+                Task::none()
+            }
+
             Message::QSelectOpen => {
                 let i = self.active_tab;
                 self.tabs[i].scene.selection.borrow_mut().context_menu = None;

@@ -1289,6 +1289,9 @@ pub enum Message {
     /// Extend the current selection with every entity in the active
     /// layout that matches a selected entity by (type, layer).
     SelectSimilar,
+    /// Replace the current selection with every other selectable object in
+    /// the active layout (the complement of what's selected now).
+    InvertSelection,
     /// Keyboard modifier state changed — tracks whether Shift is held so the
     /// pick path can do subtractive (Shift+click) selection.
     SetShiftDown(bool),
