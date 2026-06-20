@@ -1811,7 +1811,9 @@ impl OpenCADStudio {
     }
 
     /// Boot function for `iced::daemon`: returns initial state plus a task that
-    /// opens the primary application window.
+    /// opens the primary application window. Native only — the web build uses
+    /// [`Self::boot_web`].
+    #[cfg(not(target_arch = "wasm32"))]
     fn boot() -> (Self, Task<Message>) {
         use helpers::build_window_icon;
         // Silently (re)register this binary as a .dwg/.dxf handler so it appears
