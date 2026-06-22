@@ -26,6 +26,19 @@ pub struct Uniforms {
     /// Pads the struct to 112 B (next multiple of 16) so wgpu's uniform
     /// alignment rules are satisfied.
     pub _pad: [f32; 2],
+
+    // ── Relative-to-eye (double-single) additions ───────────────────────────
+    // Appended at the end so existing field offsets are unchanged; shaders that
+    // still read only the legacy fields keep working. Pipelines migrate to RTE
+    // one at a time. `view_rot` is the rotation-only view-projection; vertices
+    // pre-subtract the eye (via `eye_high`/`eye_low`, two f32 emulating f64) so
+    // the large eye translation never enters the f32 matrix → no large-coord
+    // jitter.
+    pub view_rot: glam::Mat4,
+    pub eye_high: [f32; 3],
+    pub _pad_eh: f32,
+    pub eye_low: [f32; 3],
+    pub _pad_el: f32,
 }
 
 impl Uniforms {
@@ -36,6 +49,7 @@ impl Uniforms {
         } else {
             0.0
         };
+        let (eye_high, eye_low) = camera.eye_high_low();
         Self {
             view_proj: camera.view_proj(bounds),
             camera_pos: camera.position_vec4(),
@@ -45,6 +59,11 @@ impl Uniforms {
             flat_shade: 0.0,
             transparency_enable: 1.0,
             _pad: [0.0; 2],
+            view_rot: camera.view_proj_rte(bounds),
+            eye_high,
+            _pad_eh: 0.0,
+            eye_low,
+            _pad_el: 0.0,
         }
     }
 }

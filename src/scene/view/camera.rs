@@ -113,6 +113,48 @@ impl Camera {
         OPENGL_TO_WGPU * proj * view
     }
 
+    /// Relative-to-eye view-projection: identical projection, but the view
+    /// matrix carries rotation only (translation zeroed). Positions fed to it
+    /// must already be expressed relative to the eye (done per-vertex with
+    /// double-single precision in the shader), so the large eye translation
+    /// never enters the f32 matrix and large-coordinate jitter disappears.
+    #[allow(dead_code)] // consumed by the RTE uniform / shaders (next phase)
+    pub fn view_proj_rte(&self, bounds: Rectangle) -> Mat4 {
+        let near = self.distance * 0.001;
+        let far = self.distance * 1000.0;
+        let aspect = bounds.width / bounds.height;
+        let up_dir = self.rotation * Vec3::Y;
+
+        let mut view = Mat4::look_at_rh(self.eye(), self.target.as_vec3(), up_dir);
+        // Zero the translation column → pure rotation (world→view basis).
+        view.w_axis = glam::vec4(0.0, 0.0, 0.0, 1.0);
+
+        let proj = match self.projection {
+            Projection::Perspective => Mat4::perspective_rh(self.fov_y, aspect, near, far),
+            Projection::Orthographic => {
+                let h = self.ortho_size();
+                let w = h * aspect;
+                Mat4::orthographic_rh(-w, w, -h, h, near, far)
+            }
+        };
+        OPENGL_TO_WGPU * proj * view
+    }
+
+    /// Eye position split into two f32 (high + low) emulating f64, for the
+    /// double-single relative-to-eye shaders. `high + low ≈ eye` to ~f64
+    /// precision; the shader subtracts these from each vertex's own high/low.
+    #[allow(dead_code)] // consumed by the RTE uniform (next phase)
+    pub fn eye_high_low(&self) -> ([f32; 3], [f32; 3]) {
+        let e = self.eye_f64();
+        let high = [e.x as f32, e.y as f32, e.z as f32];
+        let low = [
+            (e.x - high[0] as f64) as f32,
+            (e.y - high[1] as f64) as f32,
+            (e.z - high[2] as f64) as f32,
+        ];
+        (high, low)
+    }
+
     /// Project a screen point onto an arbitrary world-space plane.
     ///
     /// The plane is defined by `plane_normal` (unit vector) and a `plane_point`
