@@ -14,7 +14,6 @@
 //   • pat0/pat1 encode up to 8 elements: positive=dash, negative=gap.
 
 struct Uniforms {
-    view_proj:        mat4x4<f32>,
     viewport_size:    vec2<f32>,
     world_per_pixel:  f32,
     // LWDISPLAY toggle: 0.0 = force 1 px (half_width 0.5), 1.0 = use the

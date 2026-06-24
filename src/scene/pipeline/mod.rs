@@ -1041,11 +1041,11 @@ impl Pipeline {
 
     /// Recompute pixel scissor rects for viewport-clipped wires from the current view_proj.
     /// Called every frame from prepare() because scissor pixels shift with pan/zoom.
-    pub fn compute_wire_scissors(&mut self, view_proj: glam::Mat4, clip_w: u32, clip_h: u32) {
+    pub fn compute_wire_scissors(&mut self, view_rot: glam::Mat4, eye: glam::DVec3, clip_w: u32, clip_h: u32) {
         self.wire_pixel_scissors = self
             .gpu_wires
             .iter()
-            .map(|w| project_scissor(w.vp_scissor, view_proj, clip_w, clip_h))
+            .map(|w| project_scissor(w.vp_scissor, view_rot, eye, clip_w, clip_h))
             .collect();
     }
 
@@ -1058,7 +1058,8 @@ impl Pipeline {
     pub fn compute_hatch_lod(
         &mut self,
         queue: &wgpu::Queue,
-        view_proj: glam::Mat4,
+        view_rot: glam::Mat4,
+        eye: glam::DVec3,
         clip_w: u32,
         clip_h: u32,
     ) {
@@ -1066,19 +1067,19 @@ impl Pipeline {
             return;
         };
         for (i, aabb) in batch.instance_aabbs.iter().enumerate() {
-            let skip = aabb_below_pixel(*aabb, view_proj, clip_w, clip_h, 2.0)
-                || aabb_offscreen(*aabb, view_proj, clip_w, clip_h);
+            let skip = aabb_below_pixel(*aabb, view_rot, eye, clip_w, clip_h, 2.0)
+                || aabb_offscreen(*aabb, view_rot, eye, clip_w, clip_h);
             batch.visibility[i] = if skip { 0 } else { 1 };
         }
         batch.upload_visibility(queue);
     }
 
     /// Recompute pixel scissor rects for viewport-clipped wipeouts.
-    pub fn compute_wipeout_scissors(&mut self, view_proj: glam::Mat4, clip_w: u32, clip_h: u32) {
+    pub fn compute_wipeout_scissors(&mut self, view_rot: glam::Mat4, eye: glam::DVec3, clip_w: u32, clip_h: u32) {
         self.wipeout_pixel_scissors = self
             .gpu_wipeouts
             .iter()
-            .map(|h| project_scissor(h.vp_scissor, view_proj, clip_w, clip_h))
+            .map(|h| project_scissor(h.vp_scissor, view_rot, eye, clip_w, clip_h))
             .collect();
     }
 
@@ -1086,20 +1087,20 @@ impl Pipeline {
     /// `compute_hatch_lod`'s frustum branch. No sub-pixel skip:
     /// wipeouts mask, so dropping a sub-pixel one wouldn't be wrong
     /// but also wouldn't pay off — they're usually few.
-    pub fn compute_wipeout_lod(&mut self, view_proj: glam::Mat4, clip_w: u32, clip_h: u32) {
+    pub fn compute_wipeout_lod(&mut self, view_rot: glam::Mat4, eye: glam::DVec3, clip_w: u32, clip_h: u32) {
         self.wipeout_skip_flags = self
             .gpu_wipeouts
             .iter()
-            .map(|h| aabb_offscreen(h.world_aabb, view_proj, clip_w, clip_h))
+            .map(|h| aabb_offscreen(h.world_aabb, view_rot, eye, clip_w, clip_h))
             .collect();
     }
 
     /// Recompute pixel scissor rects for viewport-clipped raster images.
-    pub fn compute_image_scissors(&mut self, view_proj: glam::Mat4, clip_w: u32, clip_h: u32) {
+    pub fn compute_image_scissors(&mut self, view_rot: glam::Mat4, eye: glam::DVec3, clip_w: u32, clip_h: u32) {
         self.image_pixel_scissors = self
             .gpu_images
             .iter()
-            .map(|i| project_scissor(i.vp_scissor, view_proj, clip_w, clip_h))
+            .map(|i| project_scissor(i.vp_scissor, view_rot, eye, clip_w, clip_h))
             .collect();
     }
 
@@ -1175,11 +1176,11 @@ impl Pipeline {
     /// projected pixel diagonal of each mesh's `world_aabb` (Phase 3.4
     /// ladder: >200 px → 0, 50–200 → 1, <50 → 2). Falls back to the
     /// nearest available lower slot when a level wasn't generated.
-    pub fn compute_mesh_lod(&mut self, view_proj: glam::Mat4, clip_w: u32, clip_h: u32) {
+    pub fn compute_mesh_lod(&mut self, view_rot: glam::Mat4, eye: glam::DVec3, clip_w: u32, clip_h: u32) {
         self.mesh_lod_levels = self
             .gpu_meshes
             .iter()
-            .map(|m| pick_mesh_lod(m, view_proj, clip_w, clip_h))
+            .map(|m| pick_mesh_lod(m, view_rot, eye, clip_w, clip_h))
             .collect();
         // Phase 2.2 — frustum-visibility flag per mesh. Cheap: same
         // 4-corner projection used for LOD selection, just answering a
@@ -1187,7 +1188,7 @@ impl Pipeline {
         self.mesh_visible = self
             .gpu_meshes
             .iter()
-            .map(|m| !aabb_offscreen(m.world_aabb, view_proj, clip_w, clip_h))
+            .map(|m| !aabb_offscreen(m.world_aabb, view_rot, eye, clip_w, clip_h))
             .collect();
     }
 
@@ -1847,11 +1848,12 @@ impl Pipeline {
 /// to the next available coarser/finer level so the mesh always renders.
 fn pick_mesh_lod(
     mesh: &MeshLodGpu,
-    view_proj: glam::Mat4,
+    view_rot: glam::Mat4,
+    eye: glam::DVec3,
     clip_w: u32,
     clip_h: u32,
 ) -> usize {
-    let diag_px = aabb_diagonal_pixels(mesh.world_aabb, view_proj, clip_w, clip_h);
+    let diag_px = aabb_diagonal_pixels(mesh.world_aabb, view_rot, eye, clip_w, clip_h);
     let target = if diag_px > 200.0 {
         0
     } else if diag_px > 50.0 {
@@ -1870,7 +1872,8 @@ fn pick_mesh_lod(
 
 fn aabb_diagonal_pixels(
     aabb: [f32; 4],
-    view_proj: glam::Mat4,
+    view_rot: glam::Mat4,
+    eye: glam::DVec3,
     clip_w: u32,
     clip_h: u32,
 ) -> f32 {
@@ -1881,10 +1884,10 @@ fn aabb_diagonal_pixels(
     let w = clip_w as f32;
     let h = clip_h as f32;
     let corners = [
-        view_proj.project_point3(glam::Vec3::new(x0, y0, 0.0)),
-        view_proj.project_point3(glam::Vec3::new(x1, y0, 0.0)),
-        view_proj.project_point3(glam::Vec3::new(x0, y1, 0.0)),
-        view_proj.project_point3(glam::Vec3::new(x1, y1, 0.0)),
+        view_rot.project_point3((glam::DVec3::new(x0 as f64, y0 as f64, 0.0) - eye).as_vec3()),
+        view_rot.project_point3((glam::DVec3::new(x1 as f64, y0 as f64, 0.0) - eye).as_vec3()),
+        view_rot.project_point3((glam::DVec3::new(x0 as f64, y1 as f64, 0.0) - eye).as_vec3()),
+        view_rot.project_point3((glam::DVec3::new(x1 as f64, y1 as f64, 0.0) - eye).as_vec3()),
     ];
     let mut min_px = f32::INFINITY;
     let mut max_px = f32::NEG_INFINITY;
@@ -1916,7 +1919,8 @@ fn aabb_diagonal_pixels(
 /// extents` for this reason; meshes already store an absolute rect.
 fn aabb_offscreen(
     aabb: [f32; 4],
-    view_proj: glam::Mat4,
+    view_rot: glam::Mat4,
+    eye: glam::DVec3,
     clip_w: u32,
     clip_h: u32,
 ) -> bool {
@@ -1927,10 +1931,10 @@ fn aabb_offscreen(
     let w = clip_w as f32;
     let h = clip_h as f32;
     let corners = [
-        view_proj.project_point3(glam::Vec3::new(x0, y0, 0.0)),
-        view_proj.project_point3(glam::Vec3::new(x1, y0, 0.0)),
-        view_proj.project_point3(glam::Vec3::new(x0, y1, 0.0)),
-        view_proj.project_point3(glam::Vec3::new(x1, y1, 0.0)),
+        view_rot.project_point3((glam::DVec3::new(x0 as f64, y0 as f64, 0.0) - eye).as_vec3()),
+        view_rot.project_point3((glam::DVec3::new(x1 as f64, y0 as f64, 0.0) - eye).as_vec3()),
+        view_rot.project_point3((glam::DVec3::new(x0 as f64, y1 as f64, 0.0) - eye).as_vec3()),
+        view_rot.project_point3((glam::DVec3::new(x1 as f64, y1 as f64, 0.0) - eye).as_vec3()),
     ];
     let mut min_px = f32::INFINITY;
     let mut max_px = f32::NEG_INFINITY;
@@ -1958,7 +1962,8 @@ fn aabb_offscreen(
 /// draw calls that wouldn't contribute a visible pixel.
 fn aabb_below_pixel(
     aabb: [f32; 4],
-    view_proj: glam::Mat4,
+    view_rot: glam::Mat4,
+    eye: glam::DVec3,
     clip_w: u32,
     clip_h: u32,
     threshold_px: f32,
@@ -1970,10 +1975,10 @@ fn aabb_below_pixel(
     let w = clip_w as f32;
     let h = clip_h as f32;
     let corners = [
-        view_proj.project_point3(glam::Vec3::new(x0, y0, 0.0)),
-        view_proj.project_point3(glam::Vec3::new(x1, y0, 0.0)),
-        view_proj.project_point3(glam::Vec3::new(x0, y1, 0.0)),
-        view_proj.project_point3(glam::Vec3::new(x1, y1, 0.0)),
+        view_rot.project_point3((glam::DVec3::new(x0 as f64, y0 as f64, 0.0) - eye).as_vec3()),
+        view_rot.project_point3((glam::DVec3::new(x1 as f64, y0 as f64, 0.0) - eye).as_vec3()),
+        view_rot.project_point3((glam::DVec3::new(x0 as f64, y1 as f64, 0.0) - eye).as_vec3()),
+        view_rot.project_point3((glam::DVec3::new(x1 as f64, y1 as f64, 0.0) - eye).as_vec3()),
     ];
     let mut min_px = f32::INFINITY;
     let mut max_px = f32::NEG_INFINITY;
@@ -1996,7 +2001,8 @@ fn aabb_below_pixel(
 /// the projection collapses (off-screen, behind camera).
 fn project_scissor(
     rect: Option<[f32; 4]>,
-    view_proj: glam::Mat4,
+    view_rot: glam::Mat4,
+    eye: glam::DVec3,
     clip_w: u32,
     clip_h: u32,
 ) -> Option<[u32; 4]> {
@@ -2004,10 +2010,10 @@ fn project_scissor(
     let w = clip_w as f32;
     let h = clip_h as f32;
     let corners = [
-        view_proj.project_point3(glam::Vec3::new(x0, y0, 0.0)),
-        view_proj.project_point3(glam::Vec3::new(x1, y0, 0.0)),
-        view_proj.project_point3(glam::Vec3::new(x0, y1, 0.0)),
-        view_proj.project_point3(glam::Vec3::new(x1, y1, 0.0)),
+        view_rot.project_point3((glam::DVec3::new(x0 as f64, y0 as f64, 0.0) - eye).as_vec3()),
+        view_rot.project_point3((glam::DVec3::new(x1 as f64, y0 as f64, 0.0) - eye).as_vec3()),
+        view_rot.project_point3((glam::DVec3::new(x0 as f64, y1 as f64, 0.0) - eye).as_vec3()),
+        view_rot.project_point3((glam::DVec3::new(x1 as f64, y1 as f64, 0.0) - eye).as_vec3()),
     ];
     let px: Vec<f32> = corners.iter().map(|c| (c.x + 1.0) * 0.5 * w).collect();
     let py: Vec<f32> = corners.iter().map(|c| (1.0 - c.y) * 0.5 * h).collect();

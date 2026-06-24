@@ -305,13 +305,20 @@ impl shader::Primitive for Primitive {
             // refreshed every frame it's present, so a drag never re-uploads
             // the resident base wire buffer.
             inner.upload_preview_wires(device, &vp.preview_wires[..], &vp.draw_depths);
-            let vproj = vp.uniforms.view_proj;
-            inner.compute_wire_scissors(vproj, clip_size.width, clip_size.height);
-            inner.compute_wipeout_scissors(vproj, clip_size.width, clip_size.height);
-            inner.compute_image_scissors(vproj, clip_size.width, clip_size.height);
-            inner.compute_hatch_lod(queue, vproj, clip_size.width, clip_size.height);
-            inner.compute_wipeout_lod(vproj, clip_size.width, clip_size.height);
-            inner.compute_mesh_lod(vproj, clip_size.width, clip_size.height);
+            // Cull / scissor / LOD project AABBs relative-to-eye (matching the
+            // GPU's RTE path) so the math stays precise at UTM-scale coords.
+            let view_rot = vp.uniforms.view_rot;
+            let eye = glam::DVec3::new(
+                vp.uniforms.eye_high[0] as f64 + vp.uniforms.eye_low[0] as f64,
+                vp.uniforms.eye_high[1] as f64 + vp.uniforms.eye_low[1] as f64,
+                vp.uniforms.eye_high[2] as f64 + vp.uniforms.eye_low[2] as f64,
+            );
+            inner.compute_wire_scissors(view_rot, eye, clip_size.width, clip_size.height);
+            inner.compute_wipeout_scissors(view_rot, eye, clip_size.width, clip_size.height);
+            inner.compute_image_scissors(view_rot, eye, clip_size.width, clip_size.height);
+            inner.compute_hatch_lod(queue, view_rot, eye, clip_size.width, clip_size.height);
+            inner.compute_wipeout_lod(view_rot, eye, clip_size.width, clip_size.height);
+            inner.compute_mesh_lod(view_rot, eye, clip_size.width, clip_size.height);
             if vp.show_viewcube {
                 inner.viewcube.upload(
                     queue,
@@ -743,9 +750,7 @@ impl Scene {
         };
         let mut uniforms =
             Uniforms::new(&inst.camera, full_bounds, self.document.header.lineweight_display);
-        uniforms.view_proj = crop_view_proj(uniforms.view_proj, uo, vo, us, vs);
-        // The RTE matrix is a view-projection too, so the same clip-space crop
-        // applies — keep it in lock-step with view_proj for tiled / sub-rect panes.
+        // Crop the rotation-only RTE view-projection to the visible sub-rect.
         uniforms.view_rot = crop_view_proj(uniforms.view_rot, uo, vo, us, vs);
         uniforms.viewport_size = [visible_w, visible_h];
         uniforms.flat_shade = if flags.flat_shade { 1.0 } else { 0.0 };

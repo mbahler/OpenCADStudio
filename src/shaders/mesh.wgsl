@@ -10,7 +10,6 @@
 //     flat shade (FlatShaded).
 
 struct Uniforms {
-    view_proj:           mat4x4<f32>,
     viewport_size:       vec2<f32>,
     world_per_pixel:     f32,
     lwdisplay_enable:    f32,

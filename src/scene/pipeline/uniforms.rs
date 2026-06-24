@@ -4,11 +4,6 @@ use iced::Rectangle;
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct Uniforms {
-    /// Full view-projection (with translation) — GPU rendering no longer uses
-    /// this; it remains for the CPU-side frustum-cull / scissor / LOD passes
-    /// that project offset-relative AABBs to screen. The GPU draws via the
-    /// relative-to-eye `view_rot` + `eye_high`/`eye_low` below.
-    pub view_proj: glam::Mat4,
     pub viewport_size: [f32; 2],
     /// World units per screen pixel at the current zoom. Used by the
     /// hatch shader to substitute solid fill when pattern line spacing
@@ -54,7 +49,6 @@ impl Uniforms {
         };
         let (eye_high, eye_low) = camera.eye_high_low();
         Self {
-            view_proj: camera.view_proj(bounds),
             viewport_size: [bounds.width, bounds.height],
             world_per_pixel,
             lwdisplay_enable: if lwdisplay_enable { 1.0 } else { 0.0 },

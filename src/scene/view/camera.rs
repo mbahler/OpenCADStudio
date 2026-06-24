@@ -91,28 +91,6 @@ impl Camera {
 
     // ── Projection matrices ────────────────────────────────────────────────
 
-    pub fn view_proj(&self, bounds: Rectangle) -> Mat4 {
-        let aspect = bounds.width / bounds.height;
-
-        // Up vector: use the rotation to find which world direction is "up"
-        // in the current camera frame.
-        let up_dir = self.rotation * Vec3::Y;
-
-        let view = Mat4::look_at_rh(self.eye(), self.target.as_vec3(), up_dir);
-        let proj = match self.projection {
-            Projection::Perspective => {
-                Mat4::perspective_rh(self.fov_y, aspect, self.distance * 0.001, self.distance * 1000.0)
-            }
-            Projection::Orthographic => {
-                let h = self.ortho_size();
-                let w = h * aspect;
-                let (near, far) = self.ortho_depth_range();
-                Mat4::orthographic_rh(-w, w, -h, h, near, far)
-            }
-        };
-        OPENGL_TO_WGPU * proj * view
-    }
-
     /// Orthographic near/far that CENTRE the target plane at ndc-z ≈ 0.5.
     ///
     /// The draw-order depth bias shifts clip-z by ±`DRAW_ORDER_BIAS` (0.001).
