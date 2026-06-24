@@ -1127,9 +1127,8 @@ impl MultiLeaderTess for MultiLeader {
 
         let name = handle.value().to_string();
         let nan = [f32::NAN; 3];
-        let [ox, oy, oz] = [0.0_f64; 3];
         let p3 = |v: &acadrust::types::Vector3| -> [f32; 3] {
-            [(v.x - ox) as f32, (v.y - oy) as f32, (v.z - oz) as f32]
+            [(v.x) as f32, (v.y) as f32, (v.z) as f32]
         };
 
         // ── Scaling ──────────────────────────────────────────────────────────────
@@ -1261,8 +1260,8 @@ impl MultiLeaderTess for MultiLeader {
                 // Horizontal landing toward the text's side (mirrors live).
                 let d = ml.dogleg_length * effective_scale as f64;
                 let landing_end = [
-                    (cp.x + text_sign_w * d - ox) as f32,
-                    (cp.y - oy) as f32,
+                    (cp.x + text_sign_w * d) as f32,
+                    (cp.y) as f32,
                     cp_f[2],
                 ];
                 points.push(nan);
@@ -1272,8 +1271,8 @@ impl MultiLeaderTess for MultiLeader {
                 // attached as the text moves.
                 if ml.content_type == LeaderContentType::MText && !ml.context.text_string.is_empty()
                 {
-                    let tx = (ml.context.text_location.x - ox) as f32;
-                    let ty = (ml.context.text_location.y - oy) as f32;
+                    let tx = (ml.context.text_location.x) as f32;
+                    let ty = (ml.context.text_location.y) as f32;
                     points.push(landing_end);
                     points.push([tx, ty, cp_f[2]]);
                 }
@@ -1389,9 +1388,9 @@ impl MultiLeaderTess for MultiLeader {
             // Subtract world_offset in f64 before casting to f32: drawings often
             // sit at large absolute coordinates and casting first then subtracting
             // throws away the precision needed for the rotated sub-glyph offsets.
-            let local_ins_x = (ins.x - ox) as f32;
-            let local_ins_y = (ins.y - oy) as f32;
-            let z = (ins.z - oz) as f32;
+            let local_ins_x = (ins.x) as f32;
+            let local_ins_y = (ins.y) as f32;
+            let z = (ins.z) as f32;
 
             // Rotation: prefer text_direction (transforms survive rotations /
             // mirrors when acadrust updates it) and fall back to text_rotation.

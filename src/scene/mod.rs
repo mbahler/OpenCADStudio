@@ -549,7 +549,6 @@ fn overlap_len(a: (f32, f32), b: (f32, f32)) -> f32 {
 /// geometry. Also recomputes `world_aabb` so per-frame LOD / cull math
 /// uses the same space.
 fn offset_mesh_lod_set(mut set: MeshLodSet) -> MeshLodSet {
-    let [ox, oy, oz] = [0.0_f64; 3];
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;
@@ -563,9 +562,9 @@ fn offset_mesh_lod_set(mut set: MeshLodSet) -> MeshLodSet {
             lod.verts_low = vec![[0.0; 3]; lod.verts.len()];
         }
         for (v, vl) in lod.verts.iter_mut().zip(lod.verts_low.iter_mut()) {
-            let ax = v[0] as f64 + vl[0] as f64 - ox;
-            let ay = v[1] as f64 + vl[1] as f64 - oy;
-            let az = v[2] as f64 + vl[2] as f64 - oz;
+            let ax = v[0] as f64 + vl[0] as f64;
+            let ay = v[1] as f64 + vl[1] as f64;
+            let az = v[2] as f64 + vl[2] as f64;
             let hx = ax as f32;
             let hy = ay as f32;
             let hz = az as f32;
@@ -592,7 +591,6 @@ fn transform_block_mesh_lod_set(
     xform: &acadrust::types::Transform,
 ) -> MeshLodSet {
     use acadrust::types::Vector3;
-    let [ox, oy, oz] = [0.0_f64; 3];
     let mut out = set.clone();
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
@@ -611,9 +609,9 @@ fn transform_block_mesh_lod_set(
                 v[1] as f64 + vl[1] as f64,
                 v[2] as f64 + vl[2] as f64,
             ));
-            let ax = w.x - ox;
-            let ay = w.y - oy;
-            let az = w.z - oz;
+            let ax = w.x;
+            let ay = w.y;
+            let az = w.z;
             let hx = ax as f32;
             let hy = ay as f32;
             let hz = az as f32;
@@ -2782,12 +2780,11 @@ impl Scene {
         // Paper space and the first-frame "settle" path fall back to the
         // full doc scan — preserving prior behaviour.
         let visible: Vec<&EntityType> = if let Some(local_view) = view_aabb {
-            let [ox, oy, _] = [0.0_f64; 3];
             let view_wcs: [f64; 4] = [
-                local_view[0] as f64 + ox,
-                local_view[1] as f64 + oy,
-                local_view[2] as f64 + ox,
-                local_view[3] as f64 + oy,
+                local_view[0] as f64,
+                local_view[1] as f64,
+                local_view[2] as f64,
+                local_view[3] as f64,
             ];
             let (candidates, unbounded): (Vec<Handle>, Vec<Handle>) = {
                 let idx = self.entity_index();
@@ -3195,7 +3192,6 @@ impl Scene {
         if model_block.is_null() {
             return None;
         }
-        let [ox, oy, _] = [0.0_f64; 3];
         let mut min = glam::Vec3::splat(f32::INFINITY);
         let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
         let mut any = false;
@@ -3208,8 +3204,8 @@ impl Scene {
                     for wire in arc.iter() {
                         let [ax, ay, bx, by] = wire.aabb;
                         if ax.is_finite() && bx.is_finite() {
-                            min = min.min(glam::Vec3::new(ax + ox as f32, ay + oy as f32, 0.0));
-                            max = max.max(glam::Vec3::new(bx + ox as f32, by + oy as f32, 0.0));
+                            min = min.min(glam::Vec3::new(ax as f32, ay as f32, 0.0));
+                            max = max.max(glam::Vec3::new(bx as f32, by as f32, 0.0));
                             any = true;
                         }
                     }
@@ -3218,8 +3214,8 @@ impl Scene {
                     for set in self.meshes.values() {
                         let [ax, ay, bx, by] = set.world_aabb;
                         if ax.is_finite() && bx.is_finite() {
-                            min = min.min(glam::Vec3::new(ax + ox as f32, ay + oy as f32, 0.0));
-                            max = max.max(glam::Vec3::new(bx + ox as f32, by + oy as f32, 0.0));
+                            min = min.min(glam::Vec3::new(ax as f32, ay as f32, 0.0));
+                            max = max.max(glam::Vec3::new(bx as f32, by as f32, 0.0));
                             any = true;
                         }
                     }
@@ -3237,7 +3233,6 @@ impl Scene {
         // offset-rel coords there silently double-subtracts world_offset
         // inside `camera_for_viewport` and points the viewport at the
         // wrong location on UTM-scale drawings.
-        let oz = [0.0_f64; 3][2] as f32;
         for entity in self.document.entities() {
             let c = entity.common();
             if c.owner_handle != model_block || c.invisible {
@@ -3246,16 +3241,8 @@ impl Scene {
             for wire in self.tessellate_one(entity) {
                 for &[x, y, z] in &wire.key_vertices {
                     if x.is_finite() && y.is_finite() && z.is_finite() {
-                        min = min.min(glam::Vec3::new(
-                            (x + ox) as f32,
-                            (y + oy) as f32,
-                            (z + oz as f64) as f32,
-                        ));
-                        max = max.max(glam::Vec3::new(
-                            (x + ox) as f32,
-                            (y + oy) as f32,
-                            (z + oz as f64) as f32,
-                        ));
+                        min = min.min(glam::Vec3::new(x as f32, y as f32, z as f32));
+                        max = max.max(glam::Vec3::new(x as f32, y as f32, z as f32));
                         any = true;
                     }
                 }
@@ -3265,8 +3252,8 @@ impl Scene {
         for set in self.meshes.values() {
             let [ax, ay, bx, by] = set.world_aabb;
             if ax.is_finite() && bx.is_finite() {
-                min = min.min(glam::Vec3::new(ax + ox as f32, ay + oy as f32, oz));
-                max = max.max(glam::Vec3::new(bx + ox as f32, by + oy as f32, oz));
+                min = min.min(glam::Vec3::new(ax, ay, 0.0));
+                max = max.max(glam::Vec3::new(bx, by, 0.0));
                 any = true;
             }
         }
@@ -4559,9 +4546,6 @@ impl Scene {
         }
 
         // Wide LWPolyline and Polyline2D fills
-        let [ox, oy, _] = [0.0_f64; 3];
-        let ox = ox as f32;
-        let oy = oy as f32;
         for entity in self.document.entities() {
             let (common, fills) = match entity {
                 EntityType::LwPolyline(pl) => (&pl.common, crate::entities::lwpolyline::wide_fills(pl)),
@@ -4584,14 +4568,7 @@ impl Scene {
             } else {
                 base_color
             };
-            for mut boundary in fills {
-                // Wires subtract world_offset during tessellation; fills must
-                // match or the band drifts away from the centerline on
-                // drawings far from origin.
-                for p in boundary.iter_mut() {
-                    p[0] -= ox;
-                    p[1] -= oy;
-                }
+            for boundary in fills {
                 models.push(HatchModel {
                     boundary: Arc::new(boundary),
                     pattern: model::hatch_model::HatchPattern::Solid,
@@ -4672,14 +4649,13 @@ impl Scene {
     ) -> Vec<[f32; 2]> {
         use acadrust::entities::WipeoutClipType;
 
-        let [wox, woy, _woz] = [0.0_f64; 3];
         let is_polygon = wo.clipping_enabled
             && wo.clip_boundary_vertices.len() >= 3
             && matches!(wo.clip_type, WipeoutClipType::Polygonal);
 
         if is_polygon {
-            let ox = (wo.insertion_point.x - wox) as f32;
-            let oy = (wo.insertion_point.y - woy) as f32;
+            let ox = (wo.insertion_point.x) as f32;
+            let oy = (wo.insertion_point.y) as f32;
             // DXF clip vertices live in image-pixel space, centred on the
             // image (range −size/2 … +size/2). Image-bottom-left → insertion,
             // image-y-axis points DOWN (per the DXF "v_vector points down the
@@ -4711,8 +4687,8 @@ impl Scene {
             poly
         } else {
             // Rectangular boundary from 4 corners.
-            let ox = (wo.insertion_point.x - wox) as f32;
-            let oy = (wo.insertion_point.y - woy) as f32;
+            let ox = (wo.insertion_point.x) as f32;
+            let oy = (wo.insertion_point.y) as f32;
             let oz = wo.insertion_point.z as f32;
             let ux = (wo.u_vector.x * wo.size.x) as f32;
             let uy = (wo.u_vector.y * wo.size.x) as f32;
@@ -4737,7 +4713,6 @@ impl Scene {
         dxf: &DxfHatch,
         color: [f32; 4],
     ) -> Option<HatchModel> {
-        let [ox, oy, _oz] = [0.0_f64; 3];
         let normal = (dxf.normal.x, dxf.normal.y, dxf.normal.z);
         // Build the boundary in f64 first so the precision-preserving
         // origin computation below sees full WCS precision. We only cast
@@ -4747,7 +4722,7 @@ impl Scene {
         let to_xy = |x: f64, y: f64| -> [f64; 2] {
             let (wx, wy, _) =
                 crate::scene::view::transform::ocs_point_to_wcs((x, y, dxf.elevation), normal);
-            [wx - ox, wy - oy]
+            [wx, wy]
         };
         if dxf.paths.is_empty() {
             return None;
@@ -5200,23 +5175,22 @@ impl Scene {
     /// DXF SOLID corners are in "Z-order": p0-p1 top, p2-p3 bottom.
     /// Visual quad is p0→p1→p3→p2 (closed).
     fn solid_hatch_model(solid: &DxfSolid, color: [f32; 4]) -> HatchModel {
-        let [ox, oy, _oz] = [0.0_f64; 3];
         let boundary = vec![
             [
-                (solid.first_corner.x - ox) as f32,
-                (solid.first_corner.y - oy) as f32,
+                (solid.first_corner.x) as f32,
+                (solid.first_corner.y) as f32,
             ],
             [
-                (solid.second_corner.x - ox) as f32,
-                (solid.second_corner.y - oy) as f32,
+                (solid.second_corner.x) as f32,
+                (solid.second_corner.y) as f32,
             ],
             [
-                (solid.fourth_corner.x - ox) as f32,
-                (solid.fourth_corner.y - oy) as f32,
+                (solid.fourth_corner.x) as f32,
+                (solid.fourth_corner.y) as f32,
             ],
             [
-                (solid.third_corner.x - ox) as f32,
-                (solid.third_corner.y - oy) as f32,
+                (solid.third_corner.x) as f32,
+                (solid.third_corner.y) as f32,
             ],
         ];
         HatchModel {
@@ -8295,11 +8269,10 @@ fn tessellate_entity(
         // Resolve the INSERT's own style so ByBlock sub-entities can inherit it.
         let (ins_color, ins_pat_len, ins_pat, ins_lw_px, _) = view::render::render_style_for(document, e);
         let ins_color = view::render::adapt_to_bg(ins_color, bg_color);
-        let [ox, oy, oz] = [0.0_f64; 3];
         let ip = glam::Vec3::new(
-            (ins.insert_point.x - ox) as f32,
-            (ins.insert_point.y - oy) as f32,
-            (ins.insert_point.z - oz) as f32,
+            (ins.insert_point.x) as f32,
+            (ins.insert_point.y) as f32,
+            (ins.insert_point.z) as f32,
         );
         let marker = WireModel {
             name: h.value().to_string(),
@@ -8746,11 +8719,10 @@ fn lod_stub_wire_3d(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn entity_aabb(e: &acadrust::EntityType) -> [f32; 4] {
     let bbox = e.as_entity().bounding_box();
-    let [ox, oy, _] = [0.0_f64; 3];
-    let min_x = (bbox.min.x - ox) as f32;
-    let min_y = (bbox.min.y - oy) as f32;
-    let max_x = (bbox.max.x - ox) as f32;
-    let max_y = (bbox.max.y - oy) as f32;
+    let min_x = (bbox.min.x) as f32;
+    let min_y = (bbox.min.y) as f32;
+    let max_x = (bbox.max.x) as f32;
+    let max_y = (bbox.max.y) as f32;
     // A degenerate box (min == max == 0) means bounding_box() returned Default —
     // use UNBOUNDED so the wire is never wrongly pre-rejected.
     if min_x == max_x && min_y == max_y {

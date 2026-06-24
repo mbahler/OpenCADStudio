@@ -354,12 +354,11 @@ pub fn tessellate_table(
         return Vec::new();
     }
 
-    let [ox, oy, oz] = [0.0_f64; 3];
     let rel = |p: Vec3| -> [f32; 3] {
         [
-            (p.x as f64 - ox) as f32,
-            (p.y as f64 - oy) as f32,
-            (p.z as f64 - oz) as f32,
+            (p.x as f64) as f32,
+            (p.y as f64) as f32,
+            (p.z as f64) as f32,
         ]
     };
     let resolve_col = |c: &Color, fallback: [f32; 4]| -> [f32; 4] {
@@ -652,7 +651,7 @@ pub fn tessellate_table(
             let rot = content.map(|c| c.rotation as f32).unwrap_or(0.0) + cell.rotation as f32;
             let layout = layout_mtext(&MTextRenderOpts {
                 value: text,
-                insertion: [(to.x as f64 - ox), (to.y as f64 - oy), (to.z as f64 - oz)],
+                insertion: [(to.x as f64), (to.y as f64), (to.z as f64)],
                 height: cell_h,
                 rect_w: 0.0,
                 rotation: rot,
@@ -688,7 +687,7 @@ pub fn tessellate_table(
                         buf.push([f32::NAN; 3]);
                     }
                     for &[x, y] in stroke {
-                        buf.push([x + sx, y + sy, (to.z as f64 - oz) as f32]);
+                        buf.push([x + sx, y + sy, (to.z as f64) as f32]);
                     }
                 }
             }

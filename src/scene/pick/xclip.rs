@@ -82,7 +82,6 @@ pub fn world_clip_polygon_f64(
 ) -> Vec<[f64; 2]> {
     let xform = ins.get_transform();
     let inv_block = &sf.inverse_block_transform;
-    let [ox, oy, _] = [0.0_f64; 3];
     let local: Vec<[f64; 2]> = if sf.boundary_points.len() == 2 {
         let a = sf.boundary_points[0];
         let b = sf.boundary_points[1];
@@ -95,7 +94,7 @@ pub fn world_clip_polygon_f64(
         .map(|[x, y]| {
             let block = inv_block.transform_point(Vector3::new(x, y, 0.0));
             let w = xform.apply(block);
-            [w.x - ox, w.y - oy]
+            [w.x, w.y]
         })
         .collect()
 }
@@ -243,7 +242,7 @@ pub fn clip_hatch_boundary(
                 out.push([f32::NAN, f32::NAN]);
             }
             for p in clipped {
-                out.push([p[0] - ox, p[1] - oy]);
+                out.push([p[0], p[1]]);
             }
         }
     }
