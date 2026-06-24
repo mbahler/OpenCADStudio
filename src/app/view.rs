@@ -167,7 +167,11 @@ impl OpenCADStudio {
                 let cam = tab.scene.camera.borrow();
                 let (_, ux, uy, uz) = tab.ucs_xform().axes();
                 Some(overlay::UcsIconParams {
-                    view_proj: cam.view_proj(vp_bounds),
+                    // Rotation-only projection: the icon shows axis DIRECTIONS
+                    // only, so the full view_proj's huge UTM translation would
+                    // just cancel catastrophically in f32 and make the tripod
+                    // jitter. view_proj_rte drops the translation. (#utm-ucs)
+                    view_proj: cam.view_proj_rte(vp_bounds),
                     bounds: vp_bounds,
                     axes: (ux, uy, uz),
                 })

@@ -348,13 +348,15 @@ impl FallbackTess for Hatch {
         let [ox, oy, oz] = world_offset;
         let normal = (self.normal.x, self.normal.y, self.normal.z);
         // Convert a 2D OCS hatch boundary point to WCS, then subtract world_offset.
-        let to_wcs = |x: f64, y: f64| -> [f32; 3] {
+        let to_wcs = |x: f64, y: f64| -> [f64; 3] {
             let (wx, wy, wz) =
                 crate::scene::view::transform::ocs_point_to_wcs((x, y, self.elevation), normal);
-            [(wx - ox) as f32, (wy - oy) as f32, (wz - oz) as f32]
+            [wx - ox, wy - oy, wz - oz]
         };
-        let mut pts: Vec<[f32; 3]> = Vec::new();
-        let mut key_verts: Vec<[f32; 3]> = Vec::new();
+        // Snap point at a world (f64) location, cast to the f32 snap buffer.
+        let snap_at = |w: [f64; 3]| Vec3::new(w[0] as f32, w[1] as f32, w[2] as f32);
+        let mut pts: Vec<[f64; 3]> = Vec::new();
+        let mut key_verts: Vec<[f64; 3]> = Vec::new();
         let mut snap_pts: Vec<(Vec3, SnapHint)> = Vec::new();
         for path in &self.paths {
             for edge in &path.edges {
@@ -376,7 +378,7 @@ impl FallbackTess for Hatch {
                         // shows up as a stray boundary line between hatch
                         // regions.
                         if !pts.is_empty() {
-                            pts.push([f32::NAN; 3]);
+                            pts.push([f64::NAN; 3]);
                         }
                         let start_idx = pts.len();
                         let seg_count = if poly.is_closed {
@@ -435,7 +437,7 @@ impl FallbackTess for Hatch {
                         let p0 = to_wcs(ln.start.x, ln.start.y);
                         let p1 = to_wcs(ln.end.x, ln.end.y);
                         if !pts.is_empty() {
-                            pts.push([f32::NAN; 3]);
+                            pts.push([f64::NAN; 3]);
                         }
                         pts.push(p0);
                         pts.push(p1);
@@ -447,7 +449,7 @@ impl FallbackTess for Hatch {
                             arc_signed_span(arc.start_angle, arc.end_angle, arc.counter_clockwise);
                         let segs = arc_segments(arc.radius, span.abs(), wire_chord_tol(arc.radius));
                         if !pts.is_empty() {
-                            pts.push([f32::NAN; 3]);
+                            pts.push([f64::NAN; 3]);
                         }
                         for i in 0..=segs {
                             let t = sa + span * (i as f64 / segs as f64);
@@ -461,7 +463,7 @@ impl FallbackTess for Hatch {
                             }
                         }
                         snap_pts.push((
-                            Vec3::from(to_wcs(arc.center.x, arc.center.y)),
+                            snap_at(to_wcs(arc.center.x, arc.center.y)),
                             SnapHint::Center,
                         ));
                     }
@@ -475,7 +477,7 @@ impl FallbackTess for Hatch {
                             arc_signed_span(ell.start_angle, ell.end_angle, ell.counter_clockwise);
                         let segs = arc_segments(r_maj, span.abs(), wire_chord_tol(r_maj));
                         if !pts.is_empty() {
-                            pts.push([f32::NAN; 3]);
+                            pts.push([f64::NAN; 3]);
                         }
                         let (cr, sr) = (rot.cos(), rot.sin());
                         for i in 0..=segs {
@@ -492,7 +494,7 @@ impl FallbackTess for Hatch {
                             }
                         }
                         snap_pts.push((
-                            Vec3::from(to_wcs(ell.center.x, ell.center.y)),
+                            snap_at(to_wcs(ell.center.x, ell.center.y)),
                             SnapHint::Center,
                         ));
                     }

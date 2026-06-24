@@ -471,7 +471,7 @@ pub fn tessellate(
                 // SOLVIEW output or when the SAT kernel cannot parse the
                 // ACIS data).
                 let wire_pts = solid_wire_fallback(entity, world_offset);
-                let mut wm = WireModel::solid(name, wire_pts, color, selected);
+                let mut wm = WireModel::solid_f64(name, wire_pts, color, selected);
                 // Add insertion snap at point_of_reference.
                 let [ox, oy, oz] = world_offset;
                 if let Some(p) = crate::entities::solid3d::point_of_reference(entity) {
@@ -484,19 +484,33 @@ pub fn tessellate(
     }
 
     // ── Fallback for Viewport / Insert / Hatch / Ole2Frame ────────────────
-    let (points, snap_pts, tangent_geoms, key_vertices) = fallback_geometry(entity, world_offset);
+    let (points_f64, snap_pts, tangent_geoms, key_vertices) =
+        fallback_geometry(entity, world_offset);
+    // `points_f64` are absolute world coords; split into the double-single
+    // high/low pair so the outline reconstructs to f64 precision at UTM scale
+    // (a NaN separator stays NaN in both buffers).
+    let mut points: Vec<[f32; 3]> = Vec::with_capacity(points_f64.len());
+    let mut points_low: Vec<[f32; 3]> = Vec::with_capacity(points_f64.len());
+    for [x, y, z] in &points_f64 {
+        if !x.is_finite() || !y.is_finite() {
+            points.push([f32::NAN, f32::NAN, f32::NAN]);
+            points_low.push([0.0; 3]);
+            continue;
+        }
+        let (hx, lx) = split_ds(*x);
+        let (hy, ly) = split_ds(*y);
+        let (hz, lz) = split_ds(*z);
+        points.push([hx, hy, hz]);
+        points_low.push([lx, ly, lz]);
+    }
     // fallback_geometry still emits offset-relative f32 snap points; widen to
     // f64 for the WireModel's double-single-era snap buffer.
     let snap_pts: Vec<(glam::DVec3, SnapHint)> =
         snap_pts.into_iter().map(|(p, h)| (p.as_dvec3(), h)).collect();
-    let key_vertices: Vec<[f64; 3]> = key_vertices
-        .into_iter()
-        .map(|[x, y, z]| [x as f64, y as f64, z as f64])
-        .collect();
     vec![WireModel {
         name,
         points,
-        points_low: Vec::new(),
+        points_low,
         color,
         selected,
         aci: 0,
@@ -704,7 +718,7 @@ fn fallback_geometry(entity: &EntityType, world_offset: [f64; 3]) -> Geometry {
             (pts, snap, vec![], vec![])
         }
         _ => {
-            let s = 0.5_f32;
+            let s = 0.5_f64;
             (vec![[-s, 0.0, 0.0], [s, 0.0, 0.0]], vec![], vec![], vec![])
         }
     }
@@ -715,7 +729,7 @@ fn fallback_geometry(entity: &EntityType, world_offset: [f64; 3]) -> Geometry {
 /// AutoCAD stores explicit wire geometry (from SOLVIEW / 3DPLOT) alongside the
 /// ACIS data.  We use this as a visible fallback when the SAT tessellator
 /// produces no mesh (e.g. binary SAB data or unsupported geometry).
-fn solid_wire_fallback(entity: &EntityType, world_offset: [f64; 3]) -> Vec<[f32; 3]> {
+fn solid_wire_fallback(entity: &EntityType, world_offset: [f64; 3]) -> Vec<[f64; 3]> {
     let [ox, oy, oz] = world_offset;
     let Some(wires) = crate::entities::solid3d::fallback_wires(entity) else {
         return vec![];
@@ -724,16 +738,16 @@ fn solid_wire_fallback(entity: &EntityType, world_offset: [f64; 3]) -> Vec<[f32;
         return vec![];
     }
 
-    let mut pts: Vec<[f32; 3]> = Vec::new();
+    let mut pts: Vec<[f64; 3]> = Vec::new();
     for wire in wires {
         if wire.points.len() < 2 {
             continue;
         }
         for v in &wire.points {
-            pts.push([(v.x - ox) as f32, (v.y - oy) as f32, (v.z - oz) as f32]);
+            pts.push([v.x - ox, v.y - oy, v.z - oz]);
         }
         // NaN sentinel separates distinct wire segments.
-        pts.push([f32::NAN, f32::NAN, f32::NAN]);
+        pts.push([f64::NAN, f64::NAN, f64::NAN]);
     }
     pts
 }

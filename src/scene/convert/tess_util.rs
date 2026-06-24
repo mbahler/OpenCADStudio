@@ -16,11 +16,16 @@ use crate::scene::model::wire_model::{SnapHint, TangentGeom, WireModel};
 /// callsite when the dispatcher wraps these into a WireModel.
 ///
 /// Layout: `(points, snap_pts, tangent_geoms, key_vertices)`.
+///
+/// `points` are ABSOLUTE world coordinates in f64 — the dispatcher splits them
+/// into the double-single high/low pair the relative-to-eye renderer needs, so
+/// fallback outlines (hatch boundary, viewport/insert/ole2frame frames) stay
+/// glued to their fills at UTM scale instead of quantizing ~0.5 m in f32.
 pub type FallbackGeometry = (
-    Vec<[f32; 3]>,
+    Vec<[f64; 3]>,
     Vec<(Vec3, SnapHint)>,
     Vec<TangentGeom>,
-    Vec<[f32; 3]>,
+    Vec<[f64; 3]>,
 );
 
 // ── Arc tessellation helpers ─────────────────────────────────────────────

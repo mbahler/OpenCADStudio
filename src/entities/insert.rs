@@ -104,17 +104,18 @@ impl crate::entities::traits::FallbackTess for Insert {
         world_offset: [f64; 3],
     ) -> crate::scene::convert::tess_util::FallbackGeometry {
         let [ox, oy, oz] = world_offset;
-        let ip = Vec3::new(
-            (self.insert_point.x - ox) as f32,
-            (self.insert_point.y - oy) as f32,
-            (self.insert_point.z - oz) as f32,
+        let (ipx, ipy, ipz) = (
+            self.insert_point.x - ox,
+            self.insert_point.y - oy,
+            self.insert_point.z - oz,
         );
-        let s = 0.1_f32;
+        let ip = Vec3::new(ipx as f32, ipy as f32, ipz as f32);
+        let s = 0.1_f64;
         let pts = vec![
-            [ip.x - s, ip.y, ip.z],
-            [ip.x + s, ip.y, ip.z],
-            [ip.x, ip.y - s, ip.z],
-            [ip.x, ip.y + s, ip.z],
+            [ipx - s, ipy, ipz],
+            [ipx + s, ipy, ipz],
+            [ipx, ipy - s, ipz],
+            [ipx, ipy + s, ipz],
         ];
         (
             pts,

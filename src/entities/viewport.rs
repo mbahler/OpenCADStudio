@@ -551,11 +551,11 @@ impl crate::entities::traits::FallbackTess for Viewport {
         world_offset: [f64; 3],
     ) -> crate::scene::convert::tess_util::FallbackGeometry {
         let [ox, oy, oz] = world_offset;
-        let cx = (self.center.x - ox) as f32;
-        let cy = (self.center.y - oy) as f32;
-        let cz = (self.center.z - oz) as f32;
-        let hw = (self.width / 2.0) as f32;
-        let hh = (self.height / 2.0) as f32;
+        let cx = self.center.x - ox;
+        let cy = self.center.y - oy;
+        let cz = self.center.z - oz;
+        let hw = self.width / 2.0;
+        let hh = self.height / 2.0;
         let pts = vec![
             [cx - hw, cy - hh, cz],
             [cx + hw, cy - hh, cz],

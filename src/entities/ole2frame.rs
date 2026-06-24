@@ -187,14 +187,14 @@ impl crate::entities::traits::FallbackTess for Ole2Frame {
         // OLE objects carry a bounding rectangle in model space.
         // Render a simple X-through-rectangle placeholder.
         let [ox, oy, oz] = world_offset;
-        let x0 = (self.upper_left_corner.x - ox) as f32;
-        let y0 = (self.lower_right_corner.y - oy) as f32;
-        let x1 = (self.lower_right_corner.x - ox) as f32;
-        let y1 = (self.upper_left_corner.y - oy) as f32;
-        let z = (self.upper_left_corner.z - oz) as f32;
+        let x0 = self.upper_left_corner.x - ox;
+        let y0 = self.lower_right_corner.y - oy;
+        let x1 = self.lower_right_corner.x - ox;
+        let y1 = self.upper_left_corner.y - oy;
+        let z = self.upper_left_corner.z - oz;
         if (x1 - x0).abs() < 1e-6 && (y1 - y0).abs() < 1e-6 {
             // Degenerate / unknown size — show a small cross.
-            let s = 0.5_f32;
+            let s = 0.5_f64;
             return (vec![[-s, 0.0, 0.0], [s, 0.0, 0.0]], vec![], vec![], vec![]);
         }
         let pts = vec![
@@ -210,7 +210,7 @@ impl crate::entities::traits::FallbackTess for Ole2Frame {
             // Diagonal X
             [x0, y0, z],
             [x1, y1, z],
-            [f32::NAN, f32::NAN, f32::NAN],
+            [f64::NAN, f64::NAN, f64::NAN],
             [x1, y0, z],
             [x0, y1, z],
         ];
