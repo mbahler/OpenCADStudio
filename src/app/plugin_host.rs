@@ -333,13 +333,13 @@ impl crate::command::CadCommand for PluginProcessInteractiveAdapter {
     fn prompt(&self) -> String {
         self.prompt.clone().unwrap_or_default()
     }
-    fn on_point(&mut self, pt: glam::Vec3) -> crate::command::CmdResult {
+    fn on_point(&mut self, pt: glam::DVec3) -> crate::command::CmdResult {
         use ocs_plugin_api::ipc::protocol::InteractiveEvent;
         let result = self
             .process
             .interactive_event(
                 self.command_id,
-                InteractiveEvent::Point([pt.x as f64, pt.y as f64, pt.z as f64]),
+                InteractiveEvent::Point([pt.x, pt.y, pt.z]),
             )
             .map(plugin_step_to_result)
             .unwrap_or(crate::command::CmdResult::Cancel);
@@ -359,7 +359,7 @@ impl crate::command::CadCommand for PluginProcessInteractiveAdapter {
     fn needs_entity_pick(&self) -> bool {
         self.needs_entity_pick.unwrap_or(false)
     }
-    fn on_entity_pick(&mut self, handle: Handle, pt: glam::Vec3) -> crate::command::CmdResult {
+    fn on_entity_pick(&mut self, handle: Handle, pt: glam::DVec3) -> crate::command::CmdResult {
         use ocs_plugin_api::ipc::protocol::InteractiveEvent;
         let result = self
             .process
@@ -367,7 +367,7 @@ impl crate::command::CadCommand for PluginProcessInteractiveAdapter {
                 self.command_id,
                 InteractiveEvent::ObjectPick {
                     handle,
-                    pt: [pt.x as f64, pt.y as f64, pt.z as f64],
+                    pt: [pt.x, pt.y, pt.z],
                 },
             )
             .map(plugin_step_to_result)

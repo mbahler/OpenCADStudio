@@ -77,7 +77,7 @@ impl PluginProcess {
         // Create the listener before spawning so the runner can connect immediately.
         let listener = ListenerOptions::new().name(socket_name_ref).create_sync()?;
 
-        let mut child = Command::new(&runner_path)
+        let child = Command::new(&runner_path)
             .arg("--ocs-plugin-runner")
             .arg(&socket_name)
             .arg(cdylib_path)
@@ -99,11 +99,11 @@ impl PluginProcess {
             }
             Ok(Err(e)) => return Err(e.into()),
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = child.kill();
+                reap(child);
                 return Err(PluginError::SpawnTimeout(spawn_timeout()));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = child.kill();
+                reap(child);
                 return Err(PluginError::RunnerExited);
             }
         };
@@ -244,11 +244,8 @@ impl PluginProcess {
     pub fn shutdown(&self) {
         let (stream, child) = self.take_resources();
         drop(stream);
-        if let Some(mut child) = child {
-            let _ = child.kill();
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
+        if let Some(child) = child {
+            reap(child);
         }
     }
 
@@ -285,6 +282,16 @@ impl PluginProcess {
         let stream = guard.as_mut().ok_or_else(shutdown_error)?;
         recv(stream).map_err(Into::into)
     }
+}
+
+/// Kill a child process and reap it without blocking the caller. The blocking
+/// `wait()` runs in a detached thread so the host never stalls on a plugin, and
+/// the child is reaped rather than left as a zombie on Unix.
+fn reap(mut child: Child) {
+    let _ = child.kill();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 fn shutdown_error() -> PluginError {

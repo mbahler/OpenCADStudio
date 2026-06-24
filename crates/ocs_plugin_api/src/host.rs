@@ -97,9 +97,18 @@ macro_rules! export_plugin {
         #[no_mangle]
         pub extern "C" fn ocs_plugin_register(
         ) -> *mut ::std::boxed::Box<dyn $crate::host::BuiltinPlugin> {
-            let plugin: ::std::boxed::Box<dyn $crate::host::BuiltinPlugin> =
-                ::std::boxed::Box::new($ctor);
-            ::std::boxed::Box::into_raw(::std::boxed::Box::new(plugin))
+            // The constructor runs across a C ABI boundary; a panic unwinding
+            // past it is undefined behavior. Contain it and report failure as a
+            // null pointer, which the host loader treats as "registration
+            // failed" rather than crashing the runner process.
+            match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
+                let plugin: ::std::boxed::Box<dyn $crate::host::BuiltinPlugin> =
+                    ::std::boxed::Box::new($ctor);
+                ::std::boxed::Box::into_raw(::std::boxed::Box::new(plugin))
+            })) {
+                ::std::result::Result::Ok(ptr) => ptr,
+                ::std::result::Result::Err(_) => ::std::ptr::null_mut(),
+            }
         }
     };
 }
