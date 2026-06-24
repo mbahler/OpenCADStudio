@@ -3929,6 +3929,20 @@ impl Scene {
         }
     }
 
+    /// Current gaze direction (canonical +Z eye dir, world space) of whichever
+    /// camera owns the ViewCube — the active floating viewport in MSPACE, else
+    /// the main camera. Used by the ViewCube "already there → flip to opposite"
+    /// check, which must test the camera the cube actually reflects (the paper
+    /// camera always looks straight down, so testing it flipped every snap).
+    pub fn active_gaze_dir(&self) -> glam::Vec3 {
+        if let Some(h) = self.active_viewport {
+            if let Some(cam) = self.camera_for_viewport(h) {
+                return cam.rotation * glam::Vec3::Z;
+            }
+        }
+        self.camera.borrow().rotation * glam::Vec3::Z
+    }
+
     /// View-rotation matrix for the active viewport (MSPACE), or the
     /// paper-space camera's matrix when not in MSPACE.
     /// Used by ViewCube hit-testing so clicks map to the correct camera.
@@ -3959,28 +3973,73 @@ impl Scene {
     }
 
     /// Return the handle of the user viewport whose bounding rectangle contains
-    /// the given paper-space point, or `None` if no viewport matches.
+    /// the given paper-space point, or `None` if no viewport matches. When
+    /// viewports overlap (e.g. a large viewport that runs off-screen spanning
+    /// smaller ones), pick the SMALLEST-area match — the topmost one the user
+    /// actually sees and means to click, not the first in document order.
     pub fn viewport_at_paper_point(&self, px: f32, py: f32) -> Option<Handle> {
         let layout_block = self.current_layout_block_handle();
-        self.document.entities().find_map(|e| {
-            let EntityType::Viewport(vp) = e else {
-                return None;
-            };
-            if !self.is_content_viewport_in_layout(vp, layout_block)
-                || !vp.status.is_on
-            {
-                return None;
-            }
-            let hw = (vp.width / 2.0) as f32;
-            let hh = (vp.height / 2.0) as f32;
-            let cx = vp.center.x as f32;
-            let cy = vp.center.y as f32;
-            if px >= cx - hw && px <= cx + hw && py >= cy - hh && py <= cy + hh {
-                Some(vp.common.handle)
-            } else {
-                None
-            }
-        })
+        self.document
+            .entities()
+            .filter_map(|e| {
+                let EntityType::Viewport(vp) = e else {
+                    return None;
+                };
+                if !self.is_content_viewport_in_layout(vp, layout_block) || !vp.status.is_on {
+                    return None;
+                }
+                let hw = (vp.width / 2.0) as f32;
+                let hh = (vp.height / 2.0) as f32;
+                let cx = vp.center.x as f32;
+                let cy = vp.center.y as f32;
+                if px >= cx - hw && px <= cx + hw && py >= cy - hh && py <= cy + hh {
+                    Some((vp.common.handle, (vp.width * vp.height).abs()))
+                } else {
+                    None
+                }
+            })
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(h, _)| h)
+    }
+
+    /// Like [`viewport_at_paper_point`] but tested against each viewport's
+    /// *visible* on-screen rectangle (clamped to the canvas), in screen pixels.
+    /// Viewport activation goes through this so a click only enters a viewport
+    /// when it lands on the part the user can actually see — clicking the empty
+    /// area beside a viewport that runs off-screen no longer matches its full
+    /// (partly off-canvas) paper rect and switches to it by mistake.
+    pub fn viewport_at_screen_point(
+        &self,
+        px: f32,
+        py: f32,
+        canvas: (f32, f32),
+    ) -> Option<Handle> {
+        let layout_block = self.current_layout_block_handle();
+        self.document
+            .entities()
+            .filter_map(|e| {
+                let EntityType::Viewport(vp) = e else {
+                    return None;
+                };
+                if !self.is_content_viewport_in_layout(vp, layout_block) || !vp.status.is_on {
+                    return None;
+                }
+                let rect = self.viewport_screen_rect(vp.common.handle, canvas)?;
+                let x0 = rect.x.max(0.0);
+                let y0 = rect.y.max(0.0);
+                let x1 = (rect.x + rect.width).min(canvas.0);
+                let y1 = (rect.y + rect.height).min(canvas.1);
+                if x1 <= x0 || y1 <= y0 {
+                    return None; // fully off-canvas → nothing to click
+                }
+                if px >= x0 && px <= x1 && py >= y0 && py <= y1 {
+                    Some((vp.common.handle, (x1 - x0) * (y1 - y0)))
+                } else {
+                    None
+                }
+            })
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(h, _)| h)
     }
 
     /// Return the handle of the first active user viewport in the current layout,

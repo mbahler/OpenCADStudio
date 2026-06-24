@@ -469,8 +469,16 @@ impl OpenCADStudio {
             None
         };
         if let Some(rect) = active_vp_rect {
+            // Clip the outline to the visible canvas. Clamping only the origin
+            // (max(0.0)) while keeping the full width/height shifted the whole
+            // outline inward when the viewport ran off the top/left edge, so
+            // its drawn border no longer matched the real viewport — clicks
+            // that looked outside landed in (and activated) another viewport.
+            let (cw, ch) = tab.scene.selection.borrow().vp_size;
             let x = rect.x.max(0.0);
             let y = rect.y.max(0.0);
+            let vw = ((rect.x + rect.width).min(cw) - x).max(1.0);
+            let vh = ((rect.y + rect.height).min(ch) - y).max(1.0);
             // Highlight the active viewport with a 2-px border so its
             // boundary is always visible over the GPU shader.
             const VP_BORDER: Color = Color {
@@ -481,8 +489,8 @@ impl OpenCADStudio {
             };
             let border_frame = container(
                 Space::new()
-                    .width(iced::Length::Fixed(rect.width.max(1.0)))
-                    .height(iced::Length::Fixed(rect.height.max(1.0))),
+                    .width(iced::Length::Fixed(vw))
+                    .height(iced::Length::Fixed(vh)),
             )
             .style(move |_: &Theme| container::Style {
                 border: iced::Border {

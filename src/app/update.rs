@@ -4200,7 +4200,7 @@ impl OpenCADStudio {
                         };
 
                         // 1) Try direct wire hit — works when the border is clicked.
-                        let hit_vp: Option<acadrust::Handle> = {
+                        let wire_hit: Option<acadrust::Handle> = {
                             let (view_rot, eye) = { let c = self.tabs[i].scene.camera.borrow(); (c.view_proj_rte(bounds), c.eye()) };
                             let all_wires = self.tabs[i].scene.hit_test_wires();
                             scene::pick::hit_test::click_hit(p, &all_wires[..], view_rot, eye, bounds)
@@ -4220,19 +4220,35 @@ impl OpenCADStudio {
                                 })
                         };
 
-                        // 2) Geometric fallback: check if the cursor is inside any
-                        //    viewport's bounding rectangle in paper space.  This handles
-                        //    double-clicks on model-entity content wires or empty areas.
-                        let hit_vp = hit_vp.or_else(|| {
-                            let paper_pt = self.tabs[i]
-                                .scene
-                                .camera
-                                .borrow()
-                                .pick_on_target_plane(p, bounds);
+                        // 2) Decide which viewport (if any) the click enters,
+                        //    keyed on the *visible* on-screen rectangle. Screen-space
+                        //    (not the full paper rect) so a click on the empty area
+                        //    beside an off-screen viewport doesn't match its
+                        //    partly-off-canvas rect and switch to it by mistake.
+                        //    The wire hit only refines *which* visible viewport
+                        //    (border precision / overlap), and only when the click
+                        //    actually lands inside THAT viewport's visible rect —
+                        //    otherwise its border-wire pick tolerance could match a
+                        //    far viewport whose edge merely passes near the cursor
+                        //    (e.g. clicking the overlap of two viewports while a
+                        //    third's border runs nearby) and enter the wrong one.
+                        let screen_hit = self
+                            .tabs[i]
+                            .scene
+                            .viewport_at_screen_point(p.x, p.y, (vw, vh));
+                        let wire_in_visible = wire_hit.filter(|&h| {
                             self.tabs[i]
                                 .scene
-                                .viewport_at_paper_point(paper_pt.x as f32, paper_pt.y as f32)
+                                .viewport_screen_rect(h, (vw, vh))
+                                .is_some_and(|r| {
+                                    let x0 = r.x.max(0.0);
+                                    let y0 = r.y.max(0.0);
+                                    let x1 = (r.x + r.width).min(vw);
+                                    let y1 = (r.y + r.height).min(vh);
+                                    p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1
+                                })
                         });
+                        let hit_vp = wire_in_visible.or(screen_hit);
 
                         if let Some(handle) = hit_vp {
                             return Task::done(Message::EnterViewport(handle));
@@ -4421,10 +4437,7 @@ impl OpenCADStudio {
                 // "Already there → flip to opposite" check: compare the
                 // current gaze direction with the region's target gaze.
                 let target_dir = r_ucs.transform_vector3(region.snap_direction());
-                let cur_dir = {
-                    let cam = self.tabs[i].scene.camera.borrow();
-                    cam.rotation * glam::Vec3::Z
-                };
+                let cur_dir = self.tabs[i].scene.active_gaze_dir();
                 if cur_dir.dot(target_dir) > 0.9999 {
                     region = region.opposite();
                 }
