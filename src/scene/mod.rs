@@ -3906,9 +3906,13 @@ impl Scene {
     /// paper-space camera's matrix when not in MSPACE.
     /// Used by ViewCube hit-testing so clicks map to the correct camera.
     pub fn active_view_rotation_mat(&self) -> glam::Mat4 {
+        // Must match exactly what the drawn cube uses (see ViewportData's
+        // `cam_rotation`): the active context's camera composed with the
+        // ViewCube UCS. Inside a floating viewport that's the viewport's own
+        // camera; the UCS factor applies in both cases.
         if let Some(h) = self.active_viewport {
             if let Some(cam) = self.camera_for_viewport(h) {
-                return cam.view_rotation_mat();
+                return cam.view_rotation_mat() * self.viewcube_ucs_mat();
             }
         }
         self.camera.borrow().view_rotation_mat() * self.viewcube_ucs_mat()

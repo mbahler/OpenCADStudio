@@ -2386,7 +2386,7 @@ impl OpenCADStudio {
                     Some(rect) => rect,
                     None => self.tabs[i].scene.active_model_tile_bounds(vw, vh),
                 };
-                let cam_rot = self.tabs[i].scene.camera.borrow().view_rotation_mat();
+                let cam_rot = self.tabs[i].scene.active_view_rotation_mat();
                 let hover = hover_id(
                     self.cursor_pos.x - tile.x,
                     self.cursor_pos.y - tile.y,
@@ -2443,7 +2443,7 @@ impl OpenCADStudio {
                     Some(rect) => rect,
                     None => self.tabs[i].scene.active_model_tile_bounds(svw, svh),
                 };
-                let cam_rot = self.tabs[i].scene.camera.borrow().view_rotation_mat();
+                let cam_rot = self.tabs[i].scene.active_view_rotation_mat();
                 self.tabs[i].scene.viewcube_hover.set(hover_id(
                     p.x - cube_tile.x,
                     p.y - cube_tile.y,
@@ -2643,10 +2643,10 @@ impl OpenCADStudio {
                         }
                     };
                     let (view_rot, eye) = match &edit_cam {
-                        Some(cam) => (cam.view_proj_rte(bounds), cam.eye_f64()),
+                        Some(cam) => (cam.view_proj_rte(bounds), cam.eye()),
                         None => {
                             let cam = self.tabs[i].scene.camera.borrow();
-                            (cam.view_proj_rte(bounds), cam.eye_f64())
+                            (cam.view_proj_rte(bounds), cam.eye())
                         }
                     };
 
@@ -2781,10 +2781,10 @@ impl OpenCADStudio {
                     // main model view — no paper projection, tracks pan/zoom/twist.
                     let cursor_world = self.cursor_model_point(i, &edit_cam, p, bounds);
                     let (view_rot, eye) = match &edit_cam {
-                        Some(cam) => (cam.view_proj_rte(bounds), cam.eye_f64()),
+                        Some(cam) => (cam.view_proj_rte(bounds), cam.eye()),
                         None => {
                             let cam = self.tabs[i].scene.camera.borrow();
-                            (cam.view_proj_rte(bounds), cam.eye_f64())
+                            (cam.view_proj_rte(bounds), cam.eye())
                         }
                     };
                     // Sync grid-snap spacing to the adaptive spacing of the visible grid.
@@ -3217,9 +3217,23 @@ impl OpenCADStudio {
                 let (vw, vh) = vp_size;
 
                 if vw > 1.0 && vh > 1.0 {
-                    let rot = self.tabs[i].scene.camera.borrow().view_rotation_mat()
-                        * self.tabs[i].scene.viewcube_ucs_mat();
-                    if scene::hit_test(p.x, p.y, vw, vh, rot, VIEWCUBE_PX).is_some() {
+                    let rot = self.tabs[i].scene.active_view_rotation_mat();
+                    // Map the cursor into whichever area owns the cube (active
+                    // viewport rect in paper, active tile in model) so the
+                    // consume-check lines up with the gizmo — same framing as
+                    // ViewportClick's snap hit-test.
+                    let (cx, cy, w, h) = match self.tabs[i]
+                        .scene
+                        .active_viewport
+                        .and_then(|hndl| self.tabs[i].scene.viewport_screen_rect(hndl, (vw, vh)))
+                    {
+                        Some(rect) => (p.x - rect.x, p.y - rect.y, rect.width, rect.height),
+                        None => {
+                            let tb = self.tabs[i].scene.active_model_tile_bounds(vw, vh);
+                            (p.x - tb.x, p.y - tb.y, tb.width, tb.height)
+                        }
+                    };
+                    if scene::hit_test(cx, cy, w, h, rot, VIEWCUBE_PX).is_some() {
                         return Task::none();
                     }
                 }
@@ -3306,7 +3320,7 @@ impl OpenCADStudio {
                                 p,
                                 &self.tabs[i].selected_grips,
                                 cam.view_proj_rte(bounds),
-                                cam.eye_f64(),
+                                cam.eye(),
                                 bounds,
                             )
                         } else if is_paper {
@@ -3478,10 +3492,10 @@ impl OpenCADStudio {
                         // else paper sheet → model). Model space throughout.
                         let raw = self.cursor_model_point(i, &edit_cam, p, bounds);
                         let (view_rot, eye) = match &edit_cam {
-                            Some(cam) => (cam.view_proj_rte(bounds), cam.eye_f64()),
+                            Some(cam) => (cam.view_proj_rte(bounds), cam.eye()),
                             None => {
                                 let c = self.tabs[i].scene.camera.borrow();
-                                (c.view_proj_rte(bounds), c.eye_f64())
+                                (c.view_proj_rte(bounds), c.eye())
                             }
                         };
                         let snap_cursor = raw;
@@ -4115,7 +4129,7 @@ impl OpenCADStudio {
                             width: vw,
                             height: vh,
                         };
-                        let (view_rot, eye) = { let c = self.tabs[i].scene.camera.borrow(); (c.view_proj_rte(bounds), c.eye_f64()) };
+                        let (view_rot, eye) = { let c = self.tabs[i].scene.camera.borrow(); (c.view_proj_rte(bounds), c.eye()) };
                         let all_wires = self.tabs[i].scene.hit_test_wires();
                         // Resolve the double-clicked object — its wire, or (for a
                         // block/solid with no wire under the cursor) its shaded
@@ -4187,7 +4201,7 @@ impl OpenCADStudio {
 
                         // 1) Try direct wire hit — works when the border is clicked.
                         let hit_vp: Option<acadrust::Handle> = {
-                            let (view_rot, eye) = { let c = self.tabs[i].scene.camera.borrow(); (c.view_proj_rte(bounds), c.eye_f64()) };
+                            let (view_rot, eye) = { let c = self.tabs[i].scene.camera.borrow(); (c.view_proj_rte(bounds), c.eye()) };
                             let all_wires = self.tabs[i].scene.hit_test_wires();
                             scene::pick::hit_test::click_hit(p, &all_wires[..], view_rot, eye, bounds)
                                 .and_then(|s| Scene::handle_from_wire_name(s))
@@ -8368,12 +8382,12 @@ impl OpenCADStudio {
                     Some(h) => self.tabs[i].scene.model_wires_for_viewport_arc(h, bounds.height),
                     None => self.tabs[i].scene.hit_test_wires(),
                 };
-                (cam.view_proj_rte(bounds), cam.eye_f64(), wires)
+                (cam.view_proj_rte(bounds), cam.eye(), wires)
             }
             None => {
                 let (view_rot, eye) = {
                     let c = self.tabs[i].scene.camera.borrow();
-                    (c.view_proj_rte(bounds), c.eye_f64())
+                    (c.view_proj_rte(bounds), c.eye())
                 };
                 (view_rot, eye, self.tabs[i].scene.hit_test_wires())
             }
@@ -8419,7 +8433,7 @@ impl OpenCADStudio {
                 p_local,
                 &self.tabs[i].selected_grips,
                 cam.view_proj_rte(local),
-                cam.eye_f64(),
+                cam.eye(),
                 local,
             )
         } else if is_paper {
