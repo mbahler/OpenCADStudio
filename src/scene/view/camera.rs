@@ -390,11 +390,31 @@ impl Camera {
         self.sync_yaw_pitch();
     }
 
-    /// Jump to the default "home" view — top-down (looking along −Z), expressed
-    /// in the active UCS so it lands square to the user's coordinate frame.
+    /// Snap to a canonical face view: looks along `eye_dir` with a fixed
+    /// upright orientation — north (UCS +Y) up for top/bottom, world (UCS +Z)
+    /// up for the side elevations. Unlike [`snap_to_direction`] this ignores
+    /// the current up-sense, so a face click always lands square and never
+    /// upside-down, even when the drawing opened with a twisted view.
+    pub fn snap_to_face(&mut self, eye_dir: Vec3, ucs: glam::Mat4) {
+        let new_eye = eye_dir.normalize_or(Vec3::Z);
+        let uy = ucs.transform_vector3(Vec3::Y).normalize_or(Vec3::Y);
+        let uz = ucs.transform_vector3(Vec3::Z).normalize_or(Vec3::Z);
+        // Looking along the UCS Z axis (top/bottom) has no "world up" to use,
+        // so fall back to north (+Y); every side view uses world up.
+        let up_ref = if new_eye.dot(uz).abs() > 0.9 { uy } else { uz };
+        let projected = up_ref - new_eye * up_ref.dot(new_eye);
+        let new_up = projected.normalize_or(uy);
+        let new_right = new_up.cross(new_eye).normalize();
+        let mat = glam::Mat3::from_cols(new_right, new_up, new_eye);
+        self.rotation = Quat::from_mat3(&mat).normalize();
+        self.sync_yaw_pitch();
+    }
+
+    /// Jump to the default "home" view — a canonical top-down view (north up),
+    /// expressed in the active UCS. Doubles as a "reset" for a twisted view.
     pub fn home_view(&mut self, ucs: glam::Mat4) {
         let dir = ucs.transform_vector3(Vec3::Z);
-        self.snap_to_direction(dir, ucs);
+        self.snap_to_face(dir, ucs);
     }
 
     /// Roll the camera about its own view axis by `angle` radians. The gaze

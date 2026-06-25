@@ -4512,13 +4512,27 @@ impl OpenCADStudio {
                 }
                 let eye_dir = r_ucs.transform_vector3(region.snap_direction());
 
+                // Faces snap to a canonical upright orientation (never upside
+                // down); edges/corners keep the current up-sense so they spin
+                // smoothly around the clicked feature.
+                let is_face = matches!(region, scene::CubeRegion::Face(_));
                 if self.tabs[i].scene.active_viewport.is_some() {
-                    self.tabs[i]
-                        .scene
-                        .snap_active_viewport_to_direction(eye_dir, r_ucs);
+                    if is_face {
+                        self.tabs[i]
+                            .scene
+                            .mutate_active_viewport_camera(|c| c.snap_to_face(eye_dir, r_ucs));
+                    } else {
+                        self.tabs[i]
+                            .scene
+                            .snap_active_viewport_to_direction(eye_dir, r_ucs);
+                    }
                 } else {
                     let mut cam = self.tabs[i].scene.camera.borrow_mut();
-                    cam.snap_to_direction(eye_dir, r_ucs);
+                    if is_face {
+                        cam.snap_to_face(eye_dir, r_ucs);
+                    } else {
+                        cam.snap_to_direction(eye_dir, r_ucs);
+                    }
                 }
                 self.tabs[i].scene.camera_generation += 1;
                 self.command_line
