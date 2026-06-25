@@ -6060,6 +6060,60 @@ impl Scene {
         self.add_entity(entity)
     }
 
+    /// Duplicate the anonymous block `src_name`, transforming every sub-entity
+    /// by `t`, and return the new block's name. A dimension's drawn geometry
+    /// lives in such a baked `*D` block, so a copied dimension needs its own
+    /// transformed block — otherwise it still references the source block and
+    /// renders on top of the original instead of at the copy. Returns None when
+    /// the source block is missing or empty. (#161)
+    fn clone_transformed_block(&mut self, src_name: &str, t: &EntityTransform) -> Option<String> {
+        let sub_handles = self
+            .document
+            .block_records
+            .iter()
+            .find(|br| br.name.eq_ignore_ascii_case(src_name))
+            .map(|br| br.entity_handles.clone())?;
+        if sub_handles.is_empty() {
+            return None;
+        }
+        // Smallest free `*D<n>` anonymous name.
+        let mut n = 0u64;
+        let new_name = loop {
+            let cand = format!("*D{n}");
+            if self.document.block_records.get(&cand).is_none() {
+                break cand;
+            }
+            n += 1;
+        };
+        let next = self.document.next_handle();
+        let br_handle = Handle::new(next);
+        let block_handle = Handle::new(next + 1);
+        let end_handle = Handle::new(next + 2);
+        let mut br = acadrust::tables::BlockRecord::new(&new_name);
+        br.handle = br_handle;
+        br.block_entity_handle = block_handle;
+        br.block_end_handle = end_handle;
+        self.document.block_records.add(br).ok()?;
+        let mut block = Block::new(&new_name, acadrust::types::Vector3::ZERO);
+        block.common.handle = block_handle;
+        block.common.owner_handle = br_handle;
+        self.document.add_entity(EntityType::Block(block)).ok()?;
+        let mut block_end = BlockEnd::new();
+        block_end.common.handle = end_handle;
+        block_end.common.owner_handle = br_handle;
+        self.document.add_entity(EntityType::BlockEnd(block_end)).ok()?;
+        for sh in sub_handles {
+            if let Some(mut sub) = self.document.get_entity(sh).cloned() {
+                view::dispatch::apply_transform(&mut sub, t);
+                Self::reset_clone_subhandles(&mut self.document, &mut sub);
+                sub.common_mut().handle = Handle::NULL;
+                sub.common_mut().owner_handle = br_handle;
+                let _ = self.document.add_entity(sub);
+            }
+        }
+        Some(new_name)
+    }
+
     pub fn copy_entities(&mut self, handles: &[Handle], t: &EntityTransform) -> Vec<Handle> {
         let clones: Vec<EntityType> = handles
             .iter()
@@ -6068,6 +6122,19 @@ impl Scene {
         let mut new_handles = Vec::with_capacity(clones.len());
         for mut entity in clones {
             view::dispatch::apply_transform(&mut entity, t);
+            // A dimension draws from its baked `*D` block; give the copy its own
+            // transformed block so it lands at the copy position rather than
+            // rendering on top of the source. (#161)
+            if let EntityType::Dimension(d) = &entity {
+                let bn = d.base().block_name.clone();
+                if !bn.trim().is_empty() {
+                    if let Some(new_bn) = self.clone_transformed_block(&bn, t) {
+                        if let EntityType::Dimension(d) = &mut entity {
+                            d.base_mut().block_name = new_bn;
+                        }
+                    }
+                }
+            }
             Self::reset_clone_subhandles(&mut self.document, &mut entity);
             entity.common_mut().handle = Handle::NULL;
             let h = self.document.add_entity(entity).unwrap_or(Handle::NULL);
