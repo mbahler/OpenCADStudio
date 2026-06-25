@@ -889,17 +889,22 @@ pub(crate) fn resolve_pattern(
         return solid;
     }
 
+    // Keep dots (element length exactly 0) as 0.0 so the shader can render
+    // them as a fixed ~1 px mark; trailing array slots stay 0.0 padding and
+    // the shader tells the two apart by position (a 0.0 before the last
+    // non-zero element is a dot, trailing 0.0s are padding). The old code
+    // encoded dots as `0.01 * scale` — a tiny world-length dash that went
+    // sub-pixel at normal zoom and dragged the pattern's `min_elem` below one
+    // pixel, so the dash LOD collapsed dotted / dash-dot lines to solid (or,
+    // at larger LTSCALE, left only invisible sub-pixel dots between big
+    // gaps). (#149)
     let mut pat = [0.0f32; 8];
     let mut pat_len = 0.0f32;
     for (i, el) in lt.elements.iter().take(8).enumerate() {
-        let raw = el.length as f32 * scale;
-        let encoded = if raw == 0.0 {
-            0.01 * scale.max(0.01)
-        } else {
-            raw
-        };
-        pat[i] = encoded;
-        pat_len += encoded.abs();
+        // positive = dash, negative = gap, exactly 0 = dot.
+        let v = el.length as f32 * scale;
+        pat[i] = v;
+        pat_len += v.abs();
     }
     if pat_len < 1e-6 {
         return solid;

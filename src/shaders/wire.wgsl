@@ -11,7 +11,9 @@
 //   • distance = cumulative arc-length, linearly interpolated from
 //     (distance_a, distance_b) by `which_end`.
 //   • pattern_length > 0 enables the dash test; 0 = solid (no discard).
-//   • pat0/pat1 encode up to 8 elements: positive=dash, negative=gap.
+//   • pat0/pat1 encode up to 8 elements: positive=dash, negative=gap,
+//     exactly 0=dot (rendered as a fixed ~1 px mark). Trailing 0.0 slots are
+//     padding; the real element count is (index of last non-zero) + 1.
 
 struct Uniforms {
     viewport_size:    vec2<f32>,
@@ -154,17 +156,35 @@ struct VertexOut {
     return out;
 }
 
-// Returns true if arc-length `dist` falls inside a dash segment.
+// Returns true if arc-length `dist` falls inside a dash or on a dot.
 fn in_dash(dist: f32, pat_len: f32, p0: vec4<f32>, p1: vec4<f32>) -> bool {
     let d   = ((dist % pat_len) + pat_len) % pat_len;
     var pos = 0.0f;
+    // A dot is a zero-length element: render it as a fixed ~1.5 px mark
+    // (half-width ~0.75 px in world units) so it stays visible at any zoom
+    // instead of vanishing with its zero world-length. Mirrors the hatch
+    // shader's pixel-snapped dot. (#149)
+    let dot_half = u.world_per_pixel * 0.75;
     let elems = array<f32, 8>(p0.x, p0.y, p0.z, p0.w, p1.x, p1.y, p1.z, p1.w);
+    // Real element count = (index of last non-zero) + 1. Trailing 0.0 slots
+    // are padding; a 0.0 within this range is a real dot.
+    var count = 0u;
     for (var i = 0u; i < 8u; i++) {
+        if elems[i] != 0.0 { count = i + 1u; }
+    }
+    for (var i = 0u; i < count; i++) {
         let elem = elems[i];
-        if elem == 0.0 { break; }
-        let len = abs(elem);
-        if d < pos + len { return elem > 0.0; }
-        pos += len;
+        if elem == 0.0 {
+            // Dot centred at `pos` (zero length); light a small mark, wrapped
+            // around the pattern so a dot at 0 also covers the seam at pat_len.
+            let dd = abs(d - pos);
+            if min(dd, pat_len - dd) <= dot_half { return true; }
+        } else if elem > 0.0 {
+            if d >= pos && d < pos + elem { return true; }   // inside a dash
+            pos += elem;
+        } else {
+            pos += -elem;                                    // skip a gap
+        }
     }
     return false;
 }
