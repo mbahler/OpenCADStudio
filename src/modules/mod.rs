@@ -4,7 +4,7 @@
 //   1. Create `src/modules/my_name/` directory (no `plugin.toml`)
 //   2. Add `src/modules/my_name/mod.rs` implementing `CadModule` as `MyNameModule`
 //   3. Add `pub mod my_name;` below
-//   4. `cargo build` — tab appears via build.rs registry
+//   4. Add a `Box::new(my_name::MyNameModule)` line in `registry::all_modules()`
 //
 // To add an **add-on plugin** (Storm Sewer, …):
 //   See `docs/plugin-architecture.md` and copy `docs/plugin-template/`.
@@ -32,6 +32,6 @@ pub mod layout;
 pub mod manage;
 pub mod view;
 
-// ── Auto-generated module registry ───────────────────────────────────────
-// build.rs writes this file; it contains only `all_modules()`.
+// ── Core module registry ─────────────────────────────────────────────────
+// Hand-written `all_modules()` listing the built-in ribbon tabs.
 pub mod registry;
