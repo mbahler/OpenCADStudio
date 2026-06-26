@@ -436,6 +436,7 @@ impl OpenCADStudio {
                 self.show_grid,
                 self.snapper.grid_snap(),
                 true,
+                tab.scene.model_tiles.borrow().len(),
             );
             // Position the bar at the active model tile's top-left corner so
             // it follows the active panel in a tiled layout (full canvas when
@@ -520,6 +521,7 @@ impl OpenCADStudio {
                         self.show_grid,
                         self.snapper.grid_snap(),
                         false,
+                        0,
                     )),
                 ],
             ]
@@ -4504,6 +4506,7 @@ fn viewport_controls<'a>(
     show_grid: bool,
     snap_on: bool,
     include_split: bool,
+    tile_count: usize,
 ) -> Element<'a, Message> {
     use acadrust::entities::ViewportRenderMode as M;
     let render_modes: Vec<RenderModeChoice> = vec![
@@ -4586,19 +4589,25 @@ fn viewport_controls<'a>(
     let mut bar = row![]
         .spacing(3)
         .align_y(iced::alignment::Vertical::Center);
-    if include_split {
-        bar = bar
-            .push(icon_btn(crate::ui::icons::SPLIT_H, false, Message::SplitModelViewport(true)))
-            .push(sep())
-            .push(icon_btn(crate::ui::icons::SPLIT_V, false, Message::SplitModelViewport(false)))
-            .push(sep());
-    }
     bar = bar
-        .push(picker)
-        .push(sep())
         .push(icon_btn(crate::ui::icons::GRID, show_grid, Message::ToggleGrid))
         .push(sep())
-        .push(icon_btn(crate::ui::icons::SNAP, snap_on, Message::ToggleGridSnap));
+        .push(icon_btn(crate::ui::icons::SNAP, snap_on, Message::ToggleGridSnap))
+        .push(sep())
+        .push(picker);
+    if include_split {
+        bar = bar
+            .push(sep())
+            .push(icon_btn(crate::ui::icons::SPLIT_V, false, Message::SplitModelViewport(false)))
+            .push(sep())
+            .push(icon_btn(crate::ui::icons::SPLIT_H, false, Message::SplitModelViewport(true)));
+        // Close button: only meaningful with more than one model tile.
+        if tile_count > 1 {
+            bar = bar
+                .push(sep())
+                .push(icon_btn(crate::ui::icons::CLOSE, false, Message::CloseModelViewport));
+        }
+    }
 
     container(bar)
         .padding(2)

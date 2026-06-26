@@ -1078,6 +1078,9 @@ pub enum Message {
     /// Split the active Model viewport in two. `true` → horizontal divider
     /// (top / bottom); `false` → vertical divider (left / right).
     SplitModelViewport(bool),
+    /// Close the active Model viewport, merging it into a neighbour.
+    /// Only meaningful when more than one model tile exists.
+    CloseModelViewport,
     /// Recall previous command in history (↑ arrow key).
     CommandHistoryPrev,
     /// Recall next command in history (↓ arrow key).

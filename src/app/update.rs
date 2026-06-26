@@ -53,10 +53,9 @@ const VIEWCUBE_HIT_SIZE: f32 = VIEWCUBE_DRAW_PX;
 /// Pixel distance from a Model-tile inner divider that still registers as
 /// a resize grip on the press.
 const TILE_EDGE_HIT_PX: f32 = 4.0;
-/// Normalized minimum tile size before `collapse_small_model_tiles` merges
-/// it into a neighbour. Sized to comfortably contain the ViewCube + its
-/// padding so a tile that's still GPU-rendered always has room to show
-/// the gizmo.
+/// Normalized minimum tile size a divider drag clamps to. Sized to
+/// comfortably contain the ViewCube + its padding so every tile always
+/// has room to show the gizmo.
 fn tile_min_norm(canvas_w: f32, canvas_h: f32) -> (f32, f32) {
     let px = VIEWCUBE_DRAW_PX + 2.0 * VIEWCUBE_PAD + 16.0;
     (
@@ -1558,6 +1557,13 @@ impl OpenCADStudio {
             Message::SplitModelViewport(horizontal) => {
                 let i = self.active_tab;
                 self.tabs[i].scene.split_active_model_tile(horizontal);
+                self.tabs[i].scene.camera_generation += 1;
+                Task::none()
+            }
+
+            Message::CloseModelViewport => {
+                let i = self.active_tab;
+                self.tabs[i].scene.close_active_model_tile();
                 self.tabs[i].scene.camera_generation += 1;
                 Task::none()
             }
@@ -3472,15 +3478,10 @@ impl OpenCADStudio {
                     return Task::none();
                 }
 
-                // End an in-flight tile-divider drag. Any tile that fell
-                // below the minimum (viewcube fits comfortably) gets
-                // absorbed into its longest-contact neighbour, so the
-                // user can drag a divider all the way to one side to
-                // remove a pane.
+                // End an in-flight tile-divider drag. The move clamps
+                // each side to its minimum, so panes never collapse from
+                // dragging — use the close button to remove a pane.
                 if self.tile_drag.take().is_some() {
-                    let (vw, vh) = self.tabs[i].scene.selection.borrow().vp_size;
-                    let (min_w, min_h) = tile_min_norm(vw, vh);
-                    self.tabs[i].scene.collapse_small_model_tiles(min_w, min_h);
                     self.tabs[i].scene.camera_generation += 1;
                     return Task::none();
                 }
