@@ -106,8 +106,9 @@ impl OpenCADStudio {
             }
 
             // ── Background color ───────────────────────────────────────────
-            // Usage:  BACKGROUND <r> <g> <b>   (0–255 each)
-            //         BACKGROUND RESET          (restore default)
+            // Usage:  BACKGROUND <r> <g> <b>      (0–255 each)
+            //         BACKGROUND WHITE|BLACK|GRAY|DARKGRAY|LTGRAY   (preset)
+            //         BACKGROUND RESET            (restore default)
             // The chosen colour is also stored as the persisted default
             // (`default_bg_color` / `default_paper_bg_color`) so it survives
             // restarts and applies to new drawings (#188).
@@ -140,11 +141,7 @@ impl OpenCADStudio {
                     self.tabs[i].scene.bump_geometry();
                     self.command_line
                         .push_output("Background reset to default.");
-                } else if args.len() >= 3 {
-                    let r = args[0].parse::<u8>().unwrap_or(0) as f32 / 255.0;
-                    let g = args[1].parse::<u8>().unwrap_or(0) as f32 / 255.0;
-                    let b = args[2].parse::<u8>().unwrap_or(0) as f32 / 255.0;
-                    let rgba = [r, g, b, 1.0];
+                } else if let Some(rgba) = parse_background_color(&args) {
                     if is_paper {
                         self.tabs[i].paper_bg_color = Some(rgba);
                         self.tabs[i].scene.paper_bg_color = rgba;
@@ -156,15 +153,19 @@ impl OpenCADStudio {
                     }
                     self.tabs[i].scene.recolor_meshes();
                     self.tabs[i].scene.bump_geometry();
+                    let [r, g, b, _] = rgba;
                     self.command_line.push_output(&format!(
                         "Background: rgb({}, {}, {})",
-                        args[0], args[1], args[2]
+                        (r * 255.0).round() as u8,
+                        (g * 255.0).round() as u8,
+                        (b * 255.0).round() as u8
                     ));
                     // Persisted centrally after this message via
                     // `persist_settings_if_changed()`.
                 } else {
-                    self.command_line
-                        .push_info("Usage: BACKGROUND <r> <g> <b>  (0–255)  |  BACKGROUND RESET");
+                    self.command_line.push_info(
+                        "Usage: BACKGROUND <r> <g> <b> (0–255) | WHITE|BLACK|GRAY|DARKGRAY|LTGRAY | RESET",
+                    );
                 }
             }
             "ORTHO" => return Task::done(Message::SetProjection(true)),
@@ -5816,6 +5817,37 @@ fn flatten_entity_z(entity: &mut acadrust::EntityType) {
         }
         _ => {}
     }
+}
+
+/// Parse the argument list of the `BACKGROUND` command into an `[r,g,b,a]`
+/// colour (channels 0.0–1.0, `a` always 1.0). Accepts:
+///   * three whitespace-separated 0–255 values: `255 255 255`
+///   * a named preset: WHITE / BLACK / GRAY|GREY / DARKGRAY|DARKGREY / LTGRAY
+/// Returns `None` if the arguments don't match either form.
+fn parse_background_color(args: &[&str]) -> Option<[f32; 4]> {
+    let to_rgba = |[r, g, b]: [u8; 3]| {
+        [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
+    };
+    // Single token: a named preset.
+    if args.len() == 1 {
+        let preset = match args[0].to_ascii_uppercase().as_str() {
+            "WHITE" => [255, 255, 255],
+            "BLACK" => [0, 0, 0],
+            "GRAY" | "GREY" => [128, 128, 128],
+            "DARKGRAY" | "DARKGREY" | "DKGRAY" => [64, 64, 64],
+            "LTGRAY" | "LIGHTGRAY" | "LIGHTGREY" => [192, 192, 192],
+            _ => return None,
+        };
+        return Some(to_rgba(preset));
+    }
+    // Three separate tokens: `r g b`.
+    if args.len() >= 3 {
+        let r = args[0].parse::<u8>().ok()?;
+        let g = args[1].parse::<u8>().ok()?;
+        let b = args[2].parse::<u8>().ok()?;
+        return Some(to_rgba([r, g, b]));
+    }
+    None
 }
 
 /// Find the last placed linear or aligned dimension in the document.
