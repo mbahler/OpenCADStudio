@@ -221,7 +221,7 @@ pub(super) struct OpenCADStudio {
     /// When set, the cycling list box is open: (canvas point, candidates).
     cycle_candidates: Option<(iced::Point, Vec<acadrust::Handle>)>,
     /// Which status-bar pills the user has chosen to show (persisted).
-    statusbar_config: crate::ui::statusbar_config::StatusBarConfig,
+    statusbar_config: crate::ui::statusbar::statusbar_config::StatusBarConfig,
     /// Last persisted user preferences (DYN/OSNAP/OTRACK/POLAR/…). Compared
     /// after each message so a change is written to disk exactly once.
     last_saved_settings: Option<settings::UserSettings>,
@@ -1095,7 +1095,7 @@ pub enum Message {
     LayerToggleLock(usize),
     LayerToggleFreeze(usize),
     /// Sort the Layer Manager table by a clicked column header.
-    LayerSort(crate::ui::layers::LayerSortCol),
+    LayerSort(crate::ui::window::layers::LayerSortCol),
     /// Toggle per-viewport freeze: (layer_index, vp_col_index)
     LayerToggleVpFreeze(usize, usize),
     LayerNew,
@@ -1186,7 +1186,7 @@ pub enum Message {
     /// Close the status-bar customization menu.
     CloseStatusBarMenu,
     /// Show/hide a single status-bar pill.
-    ToggleStatusPill(crate::ui::statusbar_config::StatusPill),
+    ToggleStatusPill(crate::ui::statusbar::statusbar_config::StatusPill),
     /// Toggle clean-screen mode (hide ribbon + side panels).
     ToggleCleanScreen,
     /// Toggle whether entity transparency is shown on screen.
@@ -1763,7 +1763,7 @@ impl OpenCADStudio {
             units_popup_open: false,
             isolate_popup_open: false,
             selection_filter_popup_open: false,
-            statusbar_config: crate::ui::statusbar_config::StatusBarConfig::load(),
+            statusbar_config: crate::ui::statusbar::statusbar_config::StatusBarConfig::load(),
             last_saved_settings: None,
             otrack_active: None,
             clean_screen: false,

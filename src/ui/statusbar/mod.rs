@@ -1,5 +1,8 @@
 //! Bottom status bar — Model/Layout tabs + OSNAP toggle + status info
 
+pub mod statusbar_config;
+pub mod statusbar_menu;
+
 use iced::widget::tooltip::Position as TipPos;
 use iced::widget::{button, column, container, mouse_area, row, text, text_input, tooltip, Row};
 use iced::{Background, Border, Color, Element, Length, Theme};
@@ -10,7 +13,7 @@ pub const LAYOUT_RENAME_INPUT_ID: &str = "layout_rename_input";
 
 use crate::app::Message;
 use crate::snap::Snapper;
-use crate::ui::statusbar_config::{StatusBarConfig, StatusPill};
+use crate::ui::statusbar::statusbar_config::{StatusBarConfig, StatusPill};
 
 #[derive(Clone, Default)]
 pub struct StatusBar {

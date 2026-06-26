@@ -17,16 +17,16 @@ impl OpenCADStudio {
                 .into()
         }
         Some(match self.active_modal? {
-            super::super::ModalKind::About => crate::ui::about::view_window(),
+            super::super::ModalKind::About => crate::ui::window::about::view_window(),
             super::super::ModalKind::Shortcuts => {
-                sized(crate::ui::shortcuts::view_window(&self.shortcut_overrides), 720, 520)
+                sized(crate::ui::window::shortcuts::view_window(&self.shortcut_overrides), 720, 520)
             }
             super::super::ModalKind::PluginManager => sized(
-                crate::ui::plugin_manager::view_window(
+                crate::ui::window::plugin_manager::view_window(
                     &self.disabled_plugins,
                     &self.external_plugins,
                     &self.loaded_plugin_ids,
-                    crate::ui::plugin_manager::MarketView {
+                    crate::ui::window::plugin_manager::MarketView {
                         registry: &self.plugin_registry,
                         input: &self.plugin_repo_input,
                         repos: &self.plugin_repos,
@@ -41,14 +41,14 @@ impl OpenCADStudio {
             super::super::ModalKind::UpdateNotice => {
                 let latest = self.update_notice_version.as_deref().unwrap_or("?");
                 let body = self.update_notice_body.as_deref().unwrap_or("");
-                sized(crate::ui::update_notice::view_window(latest, body), 560, 460)
+                sized(crate::ui::window::update_notice::view_window(latest, body), 560, 460)
             }
             super::super::ModalKind::Layers => {
                 let tab = &self.tabs[self.active_tab];
                 sized(tab.layers.view_window(), 900, 360)
             }
             super::super::ModalKind::PageSetup => sized(
-                crate::ui::page_setup::view_window(
+                crate::ui::window::page_setup::view_window(
                     &self.page_setup_w,
                     &self.page_setup_h,
                     &self.page_setup_plot_area,
@@ -66,7 +66,7 @@ impl OpenCADStudio {
                 let layouts = self.tabs[i].scene.layout_names();
                 let current = self.tabs[i].scene.current_layout.clone();
                 sized(
-                    crate::ui::layout_manager::view_window(
+                    crate::ui::window::layout_manager::view_window(
                         layouts,
                         &self.layout_manager_selected,
                         &self.layout_manager_rename_buf,

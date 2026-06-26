@@ -1083,7 +1083,7 @@ impl OpenCADStudio {
         };
 
         let statusbar_menu_layer: Element<'_, Message> = if self.statusbar_menu_open {
-            crate::ui::statusbar_menu::statusbar_menu_overlay(&self.statusbar_config)
+            crate::ui::statusbar::statusbar_menu::statusbar_menu_overlay(&self.statusbar_config)
         } else {
             iced::widget::Space::new().width(0).height(0).into()
         };
@@ -1141,7 +1141,7 @@ impl OpenCADStudio {
         };
 
         let open_progress_layer: Element<'_, Message> = if let Some(p) = &self.opening {
-            crate::ui::open_progress::view(p, iced::time::Instant::now())
+            crate::ui::window::open_progress::view(p, iced::time::Instant::now())
         } else {
             iced::widget::Space::new().width(0).height(0).into()
         };

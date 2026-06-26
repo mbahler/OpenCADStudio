@@ -954,7 +954,7 @@ impl OpenCADStudio {
                         if let Some(dl) = self.tabs[i].scene.document.layers.get_mut(&name) {
                             dl.color = AcadColor::Index(aci);
                         }
-                        use crate::ui::layers::iced_color_from_acad;
+                        use crate::ui::window::layers::iced_color_from_acad;
                         let new_color = iced_color_from_acad(&AcadColor::Index(aci));
                         if let Some(pl) = self.tabs[i].layers.layers.get_mut(idx) {
                             pl.color = new_color;

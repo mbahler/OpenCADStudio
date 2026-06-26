@@ -6,7 +6,7 @@ use iced::widget::{button, column, container, mouse_area, row, text};
 use iced::{Background, Border, Color, Element, Fill, Length, Padding, Theme};
 
 use crate::app::Message;
-use crate::ui::statusbar_config::{StatusBarConfig, StatusPill};
+use crate::ui::statusbar::statusbar_config::{StatusBarConfig, StatusPill};
 
 /// Full-screen overlay: transparent click-catcher + the menu panel pinned to
 /// the bottom-right, just above the status bar.
