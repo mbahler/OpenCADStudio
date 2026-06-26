@@ -792,7 +792,7 @@ pub fn view_window<'a>(
         left: 0.0,
     });
 
-    crate::ui::style_manager::view(crate::ui::style_manager::Scaffold {
+    crate::ui::style::style_manager::view(crate::ui::style::style_manager::Scaffold {
         kind: crate::app::StyleKind::Dim,
         styles: &styles,
         selected,

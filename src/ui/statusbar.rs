@@ -167,7 +167,7 @@ impl StatusBar {
         if vis(StatusPill::Units) {
             right_status = right_status.push(tip(
                 units_btn(
-                    crate::ui::units_popup::unit_short(insertion_units),
+                    crate::ui::popup::units_popup::unit_short(insertion_units),
                     units_popup_open,
                 ),
                 "Drawing Units (INSUNITS)\nClick to change",

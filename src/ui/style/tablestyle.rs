@@ -369,7 +369,7 @@ pub fn view_window<'a>(
 
     let right_panel = container(details).width(Fill).height(Fill);
 
-    crate::ui::style_manager::view(crate::ui::style_manager::Scaffold {
+    crate::ui::style::style_manager::view(crate::ui::style::style_manager::Scaffold {
         kind: crate::app::StyleKind::Table,
         styles: &styles,
         selected,

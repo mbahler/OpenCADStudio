@@ -2703,7 +2703,7 @@ impl OpenCADStudio {
                 self.style_rename_start(kind, name);
                 // Focus the freshly-shown rename field so the user can type
                 // immediately after the double click.
-                iced::widget::operation::focus(crate::ui::style_list::rename_input_id())
+                iced::widget::operation::focus(crate::ui::style::style_list::rename_input_id())
             }
             Message::StyleRenameEdit(s) => {
                 self.style_rename_buf = s;

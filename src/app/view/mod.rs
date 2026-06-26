@@ -883,7 +883,7 @@ impl OpenCADStudio {
                     .collect();
                 if !items.is_empty() {
                     viewport_stack = viewport_stack
-                        .push(crate::ui::cycle_popup::cycle_popup_overlay(*pt, items));
+                        .push(crate::ui::popup::cycle_popup::cycle_popup_overlay(*pt, items));
                 }
             }
         }
@@ -1065,14 +1065,14 @@ impl OpenCADStudio {
         .height(Fill);
 
         let snap_layer: Element<'_, Message> = if self.snap_popup_open {
-            crate::ui::snap_popup::snap_popup_overlay(&self.snapper, 4.0)
+            crate::ui::popup::snap_popup::snap_popup_overlay(&self.snapper, 4.0)
         } else {
             iced::widget::Space::new().width(0).height(0).into()
         };
 
         let scale_layer: Element<'_, Message> = if self.scale_popup_open {
             let is_model = tab.scene.current_layout == "Model";
-            crate::ui::scale_popup::scale_popup_overlay(
+            crate::ui::popup::scale_popup::scale_popup_overlay(
                 is_model,
                 tab.scene.annotation_scale,
                 tab.scene.first_viewport_scale(),
@@ -1089,13 +1089,13 @@ impl OpenCADStudio {
         };
 
         let units_layer: Element<'_, Message> = if self.units_popup_open {
-            crate::ui::units_popup::units_popup_overlay(tab.scene.document.header.insertion_units)
+            crate::ui::popup::units_popup::units_popup_overlay(tab.scene.document.header.insertion_units)
         } else {
             iced::widget::Space::new().width(0).height(0).into()
         };
 
         let isolate_layer: Element<'_, Message> = if self.isolate_popup_open {
-            crate::ui::isolate_popup::isolate_popup_overlay(
+            crate::ui::popup::isolate_popup::isolate_popup_overlay(
                 !tab.scene.selected.is_empty(),
                 tab.scene.is_isolation_active(),
             )
@@ -1110,7 +1110,7 @@ impl OpenCADStudio {
                 .into_iter()
                 .map(|s| s.to_string())
                 .collect();
-            crate::ui::selection_filter_popup::selection_filter_popup_overlay(
+            crate::ui::popup::selection_filter_popup::selection_filter_popup_overlay(
                 types,
                 &tab.scene.selection_filter,
             )

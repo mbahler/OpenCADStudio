@@ -306,7 +306,7 @@ pub fn view_window<'a>(v: TextStyleView<'a>) -> Element<'a, Message> {
 
     let editor = row![font_panel, vsep(), ttf_panel, vsep(), props_panel].height(Fill);
 
-    crate::ui::style_manager::view(crate::ui::style_manager::Scaffold {
+    crate::ui::style::style_manager::view(crate::ui::style::style_manager::Scaffold {
         kind: StyleKind::Text,
         styles: &styles,
         selected,

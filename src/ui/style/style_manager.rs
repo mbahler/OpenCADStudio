@@ -115,7 +115,7 @@ pub fn view<'a, 'b>(s: Scaffold<'a, 'b>) -> Element<'a, Message> {
         .map(|name| {
             let is_sel = name.as_str() == s.selected;
             let is_current = s.current == Some(name.as_str());
-            crate::ui::style_list::item(
+            crate::ui::style::style_list::item(
                 name,
                 is_current,
                 is_sel,

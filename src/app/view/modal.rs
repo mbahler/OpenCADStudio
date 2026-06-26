@@ -77,7 +77,7 @@ impl OpenCADStudio {
                 )
             }
             super::super::ModalKind::Plotstyle => sized(
-                crate::ui::plotstyle::view_window(
+                crate::ui::style::plotstyle::view_window(
                     self.active_plot_style.as_ref(),
                     self.plotstyle_panel_aci,
                     &self.ps_color_buf,
@@ -104,7 +104,7 @@ impl OpenCADStudio {
                     .map(|s| (s.flags.backward, s.flags.upside_down, s.annotative))
                     .unwrap_or((false, false, false));
                 sized(
-                    crate::ui::textstyle::view_window(crate::ui::textstyle::TextStyleView {
+                    crate::ui::style::textstyle::view_window(crate::ui::style::textstyle::TextStyleView {
                         styles,
                         selected: &self.textstyle_selected,
                         current: &tab.scene.document.header.current_text_style_name,
@@ -144,7 +144,7 @@ impl OpenCADStudio {
                     _ => None,
                 });
                 sized(
-                    crate::ui::mlstyle::view_window(
+                    crate::ui::style::mlstyle::view_window(
                         styles,
                         &self.mlstyle_selected,
                         selected_style,
@@ -174,7 +174,7 @@ impl OpenCADStudio {
                     _ => None,
                 });
                 sized(
-                    crate::ui::tablestyle::view_window(
+                    crate::ui::style::tablestyle::view_window(
                         styles,
                         &self.tablestyle_selected,
                         &self.ribbon.active_table_style,
@@ -270,7 +270,7 @@ impl OpenCADStudio {
                         None => Default::default(),
                     };
                 sized(
-                    crate::ui::mleaderstyle::view_window(crate::ui::mleaderstyle::MLeaderStyleView {
+                    crate::ui::style::mleaderstyle::view_window(crate::ui::style::mleaderstyle::MLeaderStyleView {
                         styles,
                         selected: &self.mleaderstyle_selected,
                         style: selected_style,
@@ -370,7 +370,7 @@ impl OpenCADStudio {
                 ),
                 None => Default::default(),
             };
-            sized(crate::ui::dimstyle::view_window(
+            sized(crate::ui::style::dimstyle::view_window(
                 styles,
                 &self.dimstyle_selected,
                 &self.tabs[self.active_tab]
@@ -379,7 +379,7 @@ impl OpenCADStudio {
                     .header
                     .current_dimstyle_name,
                 self.dimstyle_tab,
-                crate::ui::dimstyle::DimStyleValues {
+                crate::ui::style::dimstyle::DimStyleValues {
                     dimdle: &self.ds_dimdle,
                     dimdli: &self.ds_dimdli,
                     dimgap: &self.ds_dimgap,
@@ -484,7 +484,7 @@ impl OpenCADStudio {
                 sized(unsaved_changes_dialog_window(&tab_name), 420, 160)
             }
             super::super::ModalKind::PointStyle => sized(
-                crate::ui::point_style::view_window(
+                crate::ui::style::point_style::view_window(
                     self.tabs[self.active_tab].scene.document.header.point_display_mode,
                     self.point_size_relative,
                     &self.point_size_buf,
