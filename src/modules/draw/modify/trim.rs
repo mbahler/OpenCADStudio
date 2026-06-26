@@ -11,8 +11,8 @@
 use std::f64::consts::TAU;
 
 use acadrust::entities::{
-    Arc as ArcEnt, Ellipse as EllipseEnt, Line as LineEnt, LwPolyline, LwVertex, Ray as RayEnt,
-    Spline as SplineEnt, XLine as XLineEnt,
+    Arc as ArcEnt, Circle as CircleEnt, Ellipse as EllipseEnt, Line as LineEnt, LwPolyline,
+    LwVertex, Ray as RayEnt, Spline as SplineEnt, XLine as XLineEnt,
 };
 use acadrust::types::Vector3;
 use acadrust::{EntityType, Handle};
@@ -1249,6 +1249,50 @@ fn trim_arc(orig: &ArcEnt, ts: &[f64], t_click: f64) -> Vec<EntityType> {
         .collect()
 }
 
+/// Trim a clicked Circle. A full circle has no endpoints, so it needs ≥2
+/// boundary crossings: the arc segment containing the click is removed and the
+/// circle becomes a single Arc spanning the rest. With fewer than two crossings
+/// there is nothing to cut, so an empty result leaves the circle unchanged.
+///
+/// `ts` are the cut parameters in [0,1) around the circle (angle / TAU), sorted.
+fn trim_circle(orig: &CircleEnt, ts: &[f64], t_click: f64) -> Vec<EntityType> {
+    if ts.len() < 2 {
+        return vec![];
+    }
+    let tc = t_click.rem_euclid(1.0);
+    // Find the cyclic gap (ta, tb) between adjacent cuts that holds the click;
+    // the last gap wraps past 1.0 back to the first cut.
+    let n = ts.len();
+    let mut removed: Option<(f64, f64)> = None;
+    for i in 0..n {
+        let ta = ts[i];
+        let tb = if i + 1 < n { ts[i + 1] } else { ts[0] + 1.0 };
+        if (tc >= ta - 1e-9 && tc <= tb + 1e-9)
+            || (tc + 1.0 >= ta - 1e-9 && tc + 1.0 <= tb + 1e-9)
+        {
+            removed = Some((ta, tb));
+            break;
+        }
+    }
+    let (ta, tb) = match removed {
+        Some(g) => g,
+        None => return vec![],
+    };
+
+    // Surviving arc runs CCW from the far edge of the removed gap all the way
+    // around to its near edge.
+    let mut arc = ArcEnt::new();
+    arc.common = orig.common.clone();
+    arc.common.handle = Handle::NULL;
+    arc.center = orig.center;
+    arc.radius = orig.radius;
+    arc.thickness = orig.thickness;
+    arc.normal = orig.normal;
+    arc.start_angle = (tb % 1.0) * TAU;
+    arc.end_angle = (ta % 1.0) * TAU;
+    vec![EntityType::Arc(arc)]
+}
+
 /// Trim a clicked LwPolyline: remove the portion containing the click, bounded
 /// by the nearest boundary intersections on each side. A closed polyline needs
 /// ≥2 cuts and becomes an open polyline (the surviving arc); an open one yields
@@ -1883,7 +1927,7 @@ fn line_pts(l: &LineEnt) -> Vec<[f32; 3]> {
     ]
 }
 
-fn arc_pts(cx: f64, cy: f64, r: f64, a0: f64, a1: f64, y: f64) -> Vec<[f32; 3]> {
+fn arc_pts(cx: f64, cy: f64, r: f64, a0: f64, a1: f64, z: f64) -> Vec<[f32; 3]> {
     let span = {
         let s = norm(a1) - norm(a0);
         if s <= 0.0 {
@@ -1898,8 +1942,8 @@ fn arc_pts(cx: f64, cy: f64, r: f64, a0: f64, a1: f64, y: f64) -> Vec<[f32; 3]> 
             let ang = norm(a0) + span * (i as f64 / steps as f64);
             [
                 (cx + r * ang.cos()) as f32,
-                y as f32,
                 (cy + r * ang.sin()) as f32,
+                z as f32,
             ]
         })
         .collect()
@@ -1914,7 +1958,7 @@ fn entity_pts(e: &EntityType) -> Vec<[f32; 3]> {
             a.radius,
             a.start_angle,
             a.end_angle,
-            a.center.y,
+            a.center.z,
         ),
         EntityType::Ellipse(e) => {
             let a = (e.major_axis.x.powi(2) + e.major_axis.y.powi(2)).sqrt();
@@ -2032,6 +2076,21 @@ impl CadCommand for TrimCommand {
                 let click_angle = (pt.y as f64 - cy).atan2(pt.x as f64 - cx);
                 let t_click = arc_t(click_angle, a0, a1);
                 Some(trim_arc(a, &ts, t_click))
+            }
+            Some(EntityType::Circle(c)) => {
+                let cx = c.center.x;
+                let cy = c.center.y;
+                let ts = arc_seg_ts(cx, cy, c.radius, 0.0, TAU, handle, &self.geos);
+                if ts.len() < 2 {
+                    return CmdResult::NeedPoint;
+                }
+                let click_angle = (pt.y as f64 - cy).atan2(pt.x as f64 - cx);
+                let t_click = arc_t(click_angle, 0.0, TAU);
+                let survivors = trim_circle(c, &ts, t_click);
+                if survivors.is_empty() {
+                    return CmdResult::NeedPoint;
+                }
+                Some(survivors)
             }
             Some(EntityType::Ray(r)) => {
                 // Virtual segment: base → base + dir * TRIM_EXTENT (t ∈ [0,1])
@@ -2225,7 +2284,34 @@ impl CadCommand for TrimCommand {
                 let click_angle = (pt.y as f64 - cy).atan2(pt.x as f64 - cx);
                 let t_click = arc_t(click_angle, a0, a1);
                 let survivors = trim_arc(a, &ts, t_click);
-                let orig_pts = arc_pts(cx, cy, a.radius, a0, a1, a.center.y);
+                let orig_pts = arc_pts(cx, cy, a.radius, a0, a1, a.center.z);
+                let removed = WireModel::solid("trim_rm".into(), orig_pts, DIM_RED, false);
+                let mut out = vec![removed];
+                for (i, e) in survivors.iter().enumerate() {
+                    let pts = entity_pts(e);
+                    out.push(WireModel::solid(
+                        format!("trim_keep_{i}"),
+                        pts,
+                        WireModel::CYAN,
+                        false,
+                    ));
+                }
+                out
+            }
+            Some(EntityType::Circle(c)) => {
+                let cx = c.center.x;
+                let cy = c.center.y;
+                let ts = arc_seg_ts(cx, cy, c.radius, 0.0, TAU, handle, &self.geos);
+                if ts.len() < 2 {
+                    return vec![];
+                }
+                let click_angle = (pt.y as f64 - cy).atan2(pt.x as f64 - cx);
+                let t_click = arc_t(click_angle, 0.0, TAU);
+                let survivors = trim_circle(c, &ts, t_click);
+                if survivors.is_empty() {
+                    return vec![];
+                }
+                let orig_pts = arc_pts(cx, cy, c.radius, 0.0, TAU, c.center.z);
                 let removed = WireModel::solid("trim_rm".into(), orig_pts, DIM_RED, false);
                 let mut out = vec![removed];
                 for (i, e) in survivors.iter().enumerate() {
@@ -2658,3 +2744,57 @@ impl CadCommand for ExtendCommand {
 // ── Autocomplete registry ─────────────────────────────────
 inventory::submit!(crate::command::CommandRegistration { names: &["EX", "EXTEND"] });  // ExtendCommand
 inventory::submit!(crate::command::CommandRegistration { names: &["TR", "TRIM"] });  // TrimCommand
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f64::consts::PI;
+
+    fn circle(r: f64) -> CircleEnt {
+        let mut c = CircleEnt::new();
+        c.center = Vector3::new(0.0, 0.0, 0.0);
+        c.radius = r;
+        c
+    }
+
+    /// A circle crossed by a horizontal cutter (cuts at angle 0 and π, i.e.
+    /// t = 0.0 and 0.5) becomes a single Arc; clicking the top half removes it
+    /// and leaves the bottom half (π → 0 CCW), clicking the bottom does the
+    /// reverse.
+    #[test]
+    fn trims_circle_into_arc_on_clicked_half() {
+        let c = circle(10.0);
+        let ts = [0.0, 0.5];
+
+        // Click top (t = 0.25) → removes top, keeps bottom half (start π, end 0).
+        let top = trim_circle(&c, &ts, 0.25);
+        assert_eq!(top.len(), 1, "circle should trim to exactly one arc");
+        match &top[0] {
+            EntityType::Arc(a) => {
+                assert!((norm(a.start_angle) - PI).abs() < 1e-9);
+                assert!(norm(a.end_angle).abs() < 1e-9);
+                assert_eq!(a.radius, 10.0);
+                assert!(a.common.handle.is_null());
+            }
+            _ => panic!("expected an Arc"),
+        }
+
+        // Click bottom (t = 0.75) → keeps top half (start 0, end π).
+        let bottom = trim_circle(&c, &ts, 0.75);
+        match &bottom[0] {
+            EntityType::Arc(a) => {
+                assert!(norm(a.start_angle).abs() < 1e-9);
+                assert!((norm(a.end_angle) - PI).abs() < 1e-9);
+            }
+            _ => panic!("expected an Arc"),
+        }
+    }
+
+    /// Fewer than two crossings can't cut a closed circle, so it is left as-is.
+    #[test]
+    fn circle_with_one_or_zero_cuts_is_left_unchanged() {
+        let c = circle(5.0);
+        assert!(trim_circle(&c, &[], 0.3).is_empty());
+        assert!(trim_circle(&c, &[0.4], 0.3).is_empty());
+    }
+}
