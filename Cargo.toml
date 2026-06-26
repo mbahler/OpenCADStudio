@@ -45,7 +45,7 @@ rfd = "0.17"
 clap = { version = "4", features = ["derive"] }
 # Opt-in logging via --log / RUST_LOG (surfaces wgpu / iced / winit diagnostics).
 env_logger = "0.11"
-acadrust = "0.3.4"
+acadrust = "0.4"
 flate2 = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
 inventory = "0.3"
@@ -75,10 +75,9 @@ lyon_tessellation = "1.0.20"
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Com", "Win32_System_Registry", "Win32_Foundation"] }
 
 [patch.crates-io]
-# Tracks HakanSeven12/acadrust main, which carries the hatch
-# boundary-handle cap, raster-image/wipeout clip-vertex fix, 3DFACE
-# Z-decode fix, and CANNOSCALE/CANNOSCALEVALUE header support on top of
-# upstream. Revert to upstream once those PRs land.
+# Tracks HakanSeven12/acadrust main (0.4.x): the plotstyle/material common-
+# entity ordering fix plus the in-flight DWG reader work, ahead of the crates.io
+# release. Drop the patch once those land in a published 0.4 crate.
 acadrust = { git = "https://github.com/HakanSeven12/acadrust", branch = "main" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
