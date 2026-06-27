@@ -71,7 +71,7 @@ pub fn explode_entity(entity: &EntityType, document: &CadDocument) -> Vec<Entity
             .map(normalize_insert_entity)
             .collect(),
         EntityType::MLine(ml) => explode_mline(ml),
-        EntityType::Dimension(dim) => explode_dimension(dim),
+        EntityType::Dimension(dim) => explode_dimension(dim, document),
         _ => vec![],
     }
 }
@@ -322,7 +322,142 @@ fn explode_mline(ml: &MLine) -> Vec<EntityType> {
 // ── Dimension explode ──────────────────────────────────────────────────────
 
 /// Convert a Dimension entity into Lines (geometry) + Text (label).
-fn explode_dimension(dim: &Dimension) -> Vec<EntityType> {
+/// A NULL-handle line segment for a baked dimension block.
+fn dim_seg(a: Vector3, b: Vector3, common: &acadrust::entities::EntityCommon) -> EntityType {
+    let mut c = common.clone();
+    c.handle = Handle::NULL;
+    EntityType::Line(LineEnt {
+        common: c,
+        start: a,
+        end: b,
+        ..LineEnt::new()
+    })
+}
+
+/// Open (two-stroke) arrowhead with its tip at `tip`, strokes pointing back
+/// along the unit vector `(dx,dy)` (from the tip toward the dimension line),
+/// sized `size`. Simple, valid in any reader, and far better than a bare line.
+fn dim_arrowhead(
+    tip: Vector3,
+    dx: f64,
+    dy: f64,
+    size: f64,
+    common: &acadrust::entities::EntityCommon,
+) -> Vec<EntityType> {
+    let ang = dy.atan2(dx);
+    let wing = 18f64.to_radians();
+    let mk = |a: f64| Vector3::new(tip.x + size * a.cos(), tip.y + size * a.sin(), tip.z);
+    vec![
+        dim_seg(tip, mk(ang + wing), common),
+        dim_seg(tip, mk(ang - wing), common),
+    ]
+}
+
+/// Center-mark cross at `center`, arm length |DIMCEN|. Empty when DIMCEN == 0.
+fn dim_center_mark(
+    center: Vector3,
+    dimcen: f64,
+    common: &acadrust::entities::EntityCommon,
+) -> Vec<EntityType> {
+    let s = dimcen.abs();
+    if s < 1e-9 {
+        return Vec::new();
+    }
+    vec![
+        dim_seg(
+            Vector3::new(center.x - s, center.y, center.z),
+            Vector3::new(center.x + s, center.y, center.z),
+            common,
+        ),
+        dim_seg(
+            Vector3::new(center.x, center.y - s, center.z),
+            Vector3::new(center.x, center.y + s, center.z),
+            common,
+        ),
+    ]
+}
+
+/// Arc from angle `a1` to `a2` (radians, swept the short way) at `radius` about
+/// `center`, approximated by straight chords (world f64).
+fn dim_arc_segs(
+    center: Vector3,
+    radius: f64,
+    a1: f64,
+    a2: f64,
+    common: &acadrust::entities::EntityCommon,
+) -> Vec<EntityType> {
+    use std::f64::consts::PI;
+    let mut sweep = a2 - a1;
+    while sweep > PI {
+        sweep -= 2.0 * PI;
+    }
+    while sweep < -PI {
+        sweep += 2.0 * PI;
+    }
+    let steps = 12usize.max((sweep.abs() / (PI / 36.0)).ceil() as usize);
+    let pt = |a: f64| Vector3::new(center.x + radius * a.cos(), center.y + radius * a.sin(), center.z);
+    let mut out = Vec::new();
+    let mut prev = pt(a1);
+    for i in 1..=steps {
+        let cur = pt(a1 + sweep * (i as f64 / steps as f64));
+        out.push(dim_seg(prev, cur, common));
+        prev = cur;
+    }
+    out
+}
+
+/// (DIMASZ, DIMCEN), DIMSCALE-applied, resolved from the dimension's style.
+fn dim_metrics(dim: &Dimension, doc: &CadDocument) -> (f64, f64) {
+    let name = dim.base().style_name.as_str();
+    let style = doc.dim_styles.iter().find(|s| {
+        s.name.eq_ignore_ascii_case(name)
+            || (name.trim().is_empty() && s.name.eq_ignore_ascii_case("Standard"))
+    });
+    let scale = style
+        .map(|s| if s.dimscale > 1e-6 { s.dimscale } else { 1.0 })
+        .unwrap_or(1.0);
+    let dimasz = style.map(|s| s.dimasz * scale).unwrap_or(0.18 * scale).max(1e-6);
+    let dimcen = style.map(|s| s.dimcen * scale).unwrap_or(0.09 * scale);
+    (dimasz, dimcen)
+}
+
+/// Baked geometry for an angular dimension: an extension line along each ray
+/// out to the dimension arc, plus the swept arc itself (which is what makes it
+/// read as an angle rather than two crossing lines — #181 / DIM-022).
+fn angular_block_segs(
+    vertex: Vector3,
+    p1: Vector3,
+    p2: Vector3,
+    arc_loc: Vector3,
+    common: &acadrust::entities::EntityCommon,
+) -> Vec<EntityType> {
+    let a1 = (p1.y - vertex.y).atan2(p1.x - vertex.x);
+    let a2 = (p2.y - vertex.y).atan2(p2.x - vertex.x);
+    let radius = ((arc_loc.x - vertex.x).powi(2) + (arc_loc.y - vertex.y).powi(2)).sqrt();
+    let mut out = Vec::new();
+    if radius < 1e-9 {
+        out.push(dim_seg(p1, vertex, common));
+        out.push(dim_seg(p2, vertex, common));
+        return out;
+    }
+    let e1 = Vector3::new(
+        vertex.x + a1.cos() * radius,
+        vertex.y + a1.sin() * radius,
+        vertex.z,
+    );
+    let e2 = Vector3::new(
+        vertex.x + a2.cos() * radius,
+        vertex.y + a2.sin() * radius,
+        vertex.z,
+    );
+    // Extension lines run from each measured ray point out to the arc.
+    out.push(dim_seg(p1, e1, common));
+    out.push(dim_seg(p2, e2, common));
+    out.extend(dim_arc_segs(vertex, radius, a1, a2, common));
+    out
+}
+
+fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
     use acadrust::entities::Text;
 
     let base = dim.base();
@@ -362,37 +497,94 @@ fn explode_dimension(dim: &Dimension) -> Vec<EntityType> {
             result.push(make_seg(&d.first_point, &d1, &common));
             result.push(make_seg(&d.second_point, &d2, &common));
             result.push(make_seg(&d1, &d2, &common));
+            let (asz, _) = dim_metrics(dim, doc);
+            let ml = ((d2.x - d1.x).powi(2) + (d2.y - d1.y).powi(2)).sqrt().max(1e-12);
+            let (ux, uy) = ((d2.x - d1.x) / ml, (d2.y - d1.y) / ml);
+            result.extend(dim_arrowhead(d1, ux, uy, asz, &common));
+            result.extend(dim_arrowhead(d2, -ux, -uy, asz, &common));
             let _ = len;
         }
         Dimension::Linear(d) => {
-            let angle = d.rotation.to_radians();
+            // `rotation` is the dimension-line angle, already in radians (the
+            // same convention the live renderer uses) — do not convert again.
+            let angle = d.rotation;
             let perp_x = -(angle.sin());
             let perp_y = angle.cos();
             let fx = d.first_point.x;
             let fy = d.first_point.y;
             let sx = d.second_point.x;
             let sy = d.second_point.y;
-            let offset =
-                (d.definition_point.x - fx) * perp_x + (d.definition_point.y - fy) * perp_y;
-            let d1 = v3(fx + perp_x * offset, fy + perp_y * offset, d.first_point.z);
-            let d2 = v3(sx + perp_x * offset, sy + perp_y * offset, d.second_point.z);
+            // The dimension line passes through `definition_point` at `rotation`.
+            // Project each extension origin onto that line *independently*: a
+            // point's landing offset is (def - point)·perp. A single shared
+            // offset only lands both origins on the line when they are level;
+            // for sloped origins (e.g. a DIMCONTINUE chain over non-level
+            // points) it tilts the dimension line — issue #181.
+            let dperp = d.definition_point.x * perp_x + d.definition_point.y * perp_y;
+            let off1 = dperp - (fx * perp_x + fy * perp_y);
+            let off2 = dperp - (sx * perp_x + sy * perp_y);
+            let d1 = v3(fx + perp_x * off1, fy + perp_y * off1, d.first_point.z);
+            let d2 = v3(sx + perp_x * off2, sy + perp_y * off2, d.second_point.z);
             result.push(make_seg(&d.first_point, &d1, &common));
             result.push(make_seg(&d.second_point, &d2, &common));
             result.push(make_seg(&d1, &d2, &common));
+            let (asz, _) = dim_metrics(dim, doc);
+            let ml = ((d2.x - d1.x).powi(2) + (d2.y - d1.y).powi(2)).sqrt().max(1e-12);
+            let (ux, uy) = ((d2.x - d1.x) / ml, (d2.y - d1.y) / ml);
+            result.extend(dim_arrowhead(d1, ux, uy, asz, &common));
+            result.extend(dim_arrowhead(d2, -ux, -uy, asz, &common));
         }
         Dimension::Radius(d) => {
-            result.push(make_seg(&d.angle_vertex, &d.definition_point, &common));
+            // center -> point on circle, arrowhead at the point toward centre,
+            // plus the centre mark.
+            let (center, point) = (d.angle_vertex, d.definition_point);
+            result.push(make_seg(&center, &point, &common));
+            let (asz, cen) = dim_metrics(dim, doc);
+            let m = ((center.x - point.x).powi(2) + (center.y - point.y).powi(2))
+                .sqrt()
+                .max(1e-12);
+            result.extend(dim_arrowhead(
+                point,
+                (center.x - point.x) / m,
+                (center.y - point.y) / m,
+                asz,
+                &common,
+            ));
+            result.extend(dim_center_mark(center, cen, &common));
         }
         Dimension::Diameter(d) => {
-            result.push(make_seg(&d.angle_vertex, &d.definition_point, &common));
+            // Full diameter line through the centre (far edge -> near edge),
+            // inward arrows at both edges, plus the centre mark. angle_vertex is
+            // the centre and definition_point the point on the circle.
+            let (center, edge) = (d.angle_vertex, d.definition_point);
+            let far = v3(2.0 * center.x - edge.x, 2.0 * center.y - edge.y, edge.z);
+            result.push(make_seg(&far, &edge, &common));
+            let (asz, cen) = dim_metrics(dim, doc);
+            let m = ((edge.x - far.x).powi(2) + (edge.y - far.y).powi(2))
+                .sqrt()
+                .max(1e-12);
+            let (ux, uy) = ((edge.x - far.x) / m, (edge.y - far.y) / m);
+            result.extend(dim_arrowhead(edge, -ux, -uy, asz, &common));
+            result.extend(dim_arrowhead(far, ux, uy, asz, &common));
+            result.extend(dim_center_mark(center, cen, &common));
         }
         Dimension::Angular2Ln(d) => {
-            result.push(make_seg(&d.first_point, &d.angle_vertex, &common));
-            result.push(make_seg(&d.second_point, &d.angle_vertex, &common));
+            result.extend(angular_block_segs(
+                d.angle_vertex,
+                d.first_point,
+                d.second_point,
+                d.dimension_arc,
+                &common,
+            ));
         }
         Dimension::Angular3Pt(d) => {
-            result.push(make_seg(&d.first_point, &d.angle_vertex, &common));
-            result.push(make_seg(&d.second_point, &d.angle_vertex, &common));
+            result.extend(angular_block_segs(
+                d.angle_vertex,
+                d.first_point,
+                d.second_point,
+                d.definition_point,
+                &common,
+            ));
         }
         Dimension::Ordinate(d) => {
             result.push(make_seg(&d.feature_location, &d.definition_point, &common));
@@ -400,37 +592,52 @@ fn explode_dimension(dim: &Dimension) -> Vec<EntityType> {
         }
     }
 
-    // Text entity for the dimension label
-    let text_val = if let Some(u) = &base.user_text {
-        if !u.trim().is_empty() {
-            u.clone()
-        } else {
-            format!("{:.4}", dim.measurement())
-        }
-    } else if !base.text.trim().is_empty() {
-        base.text.clone()
-    } else {
-        match dim {
-            Dimension::Radius(_) => format!("R{:.4}", dim.measurement()),
-            Dimension::Diameter(_) => format!("Ø{:.4}", dim.measurement()),
-            Dimension::Angular2Ln(_) | Dimension::Angular3Pt(_) => {
-                format!("{:.2}°", dim.measurement())
-            }
-            _ => format!("{:.4}", dim.measurement()),
-        }
-    };
-
-    let mut text = Text::with_value(text_val, base.text_middle_point.clone())
-        .with_height(base.line_spacing_factor.abs().max(0.1))
-        .with_rotation(base.text_rotation);
-    text.common = common.clone();
-    text.common.handle = Handle::NULL;
-    result.push(EntityType::Text(text));
+    // Measurement text: value, position, height and rotation are all taken
+    // from the SAME live-render path (style-resolved formatting incl.
+    // DIMDEC/DIMLFAC/DIMPOST/units/`<>` and DIMTAD/DIMGAP placement), so the
+    // baked block matches the on-screen dimension and nothing changes when the
+    // file is saved and reopened — the reload renders from this block. A `None`
+    // means the text is suppressed (user_text " "), so bake no Text. #181.
+    if let Some((value, text_pos, text_h, text_rot)) =
+        crate::entities::dimension::baked_dimension_text(dim, doc, 1.0)
+    {
+        let mut text = Text::with_value(value, text_pos)
+            .with_height(text_h.max(0.1))
+            .with_rotation(text_rot);
+        text.common = common.clone();
+        text.common.handle = Handle::NULL;
+        result.push(EntityType::Text(text));
+    }
 
     result
 }
 
 // ── Dimension block baking (DWG/DXF interop) ────────────────────────────────
+
+/// Mirror each dimension's authoritative geometric definition point into
+/// `base.definition_point`, which is the field the DWG/DXF writer emits as
+/// group 10. Edits (grips, properties, transforms) update the per-type struct
+/// field but not `base`, so without this the saved group 10 goes stale and the
+/// dimension's line / leader / origin jumps on reload (#181). Angular-2-line
+/// keeps a distinct base point (the second line's point) and is left alone.
+fn sync_dimension_base_points(doc: &mut CadDocument) {
+    for e in doc.entities_mut() {
+        if let EntityType::Dimension(d) = e {
+            let def = match d {
+                Dimension::Linear(x) => Some(x.definition_point),
+                Dimension::Aligned(x) => Some(x.definition_point),
+                Dimension::Radius(x) => Some(x.definition_point),
+                Dimension::Diameter(x) => Some(x.definition_point),
+                Dimension::Ordinate(x) => Some(x.definition_point),
+                Dimension::Angular3Pt(x) => Some(x.definition_point),
+                Dimension::Angular2Ln(_) => None,
+            };
+            if let Some(p) = def {
+                d.base_mut().definition_point = p;
+            }
+        }
+    }
+}
 
 /// Smallest free `*D<n>` anonymous block name in `doc`.
 fn next_dimension_block_name(doc: &CadDocument) -> String {
@@ -462,6 +669,10 @@ fn next_dimension_block_name(doc: &CadDocument) -> String {
 /// DWG, or copied via the `*D`-cloning copy path) are left untouched so their
 /// original graphics are preserved.
 pub fn bake_dimension_blocks(doc: &mut CadDocument) {
+    // Keep group-10 (base.definition_point) in step with the per-type geometry
+    // before writing — see sync_dimension_base_points.
+    sync_dimension_base_points(doc);
+
     // Handles of dimensions whose block reference is missing or dangling.
     let pending: Vec<Handle> = doc
         .entities()
@@ -483,7 +694,7 @@ pub fn bake_dimension_blocks(doc: &mut CadDocument) {
             Some(EntityType::Dimension(d)) => d.clone(),
             _ => continue,
         };
-        let subs = explode_dimension(&dim);
+        let subs = explode_dimension(&dim, doc);
         if subs.is_empty() {
             continue;
         }
@@ -598,6 +809,144 @@ mod tests {
             doc.block_records.len(),
             before,
             "a dimension that already owns a block must not be re-baked"
+        );
+    }
+
+    // Collect the line segments baked into the dimension's `*D` block.
+    fn baked_segments(doc: &CadDocument, block_name: &str) -> Vec<(Vector3, Vector3)> {
+        let rec = doc.block_records.get(block_name).expect("block record");
+        doc.entities()
+            .filter_map(|e| match e {
+                EntityType::Line(l) if l.common.owner_handle == rec.handle => {
+                    Some((l.start, l.end))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    // A horizontal (rotation = 0) linear dimension whose two measured points sit
+    // at *different* heights must still bake a level dimension line — both
+    // extension origins project onto the same line. Regression test for #181,
+    // where a shared offset tilted the dimension line.
+    #[test]
+    fn linear_dim_line_stays_level_over_sloped_points() {
+        let mut doc = CadDocument::new();
+        let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 5.0, 0.0));
+        d.rotation = 0.0;
+        d.definition_point = Vector3::new(0.0, 8.0, 0.0);
+        let handle = doc
+            .add_entity(EntityType::Dimension(Dimension::Linear(d)))
+            .unwrap();
+        bake_dimension_blocks(&mut doc);
+        let name = match doc.get_entity(handle) {
+            Some(EntityType::Dimension(d)) => d.base().block_name.clone(),
+            _ => panic!("dimension missing"),
+        };
+        // The dimension line is the segment spanning both x extents; it must be
+        // horizontal at the definition-point level (y = 8).
+        let dim_line = baked_segments(&doc, &name)
+            .into_iter()
+            .find(|(a, b)| (a.x - 0.0).abs() < 1e-6 && (b.x - 10.0).abs() < 1e-6)
+            .expect("dimension line segment");
+        assert!(
+            (dim_line.0.y - 8.0).abs() < 1e-6 && (dim_line.1.y - 8.0).abs() < 1e-6,
+            "dimension line must be level at y=8, got {:?}",
+            dim_line
+        );
+    }
+
+    // An angular dimension must bake its swept ARC (not just two rays), else a
+    // saved+reloaded angular dim collapses to a V. The block should carry the
+    // two extension lines plus many arc chords.
+    #[test]
+    fn angular_dim_bakes_an_arc() {
+        use acadrust::entities::DimensionAngular3Pt;
+        let mut doc = CadDocument::new();
+        let mut d = DimensionAngular3Pt::new(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(10.0, 0.0, 0.0),
+            Vector3::new(0.0, 10.0, 0.0),
+        );
+        d.definition_point = Vector3::new(5.0, 5.0, 0.0); // arc location
+        let handle = doc
+            .add_entity(EntityType::Dimension(Dimension::Angular3Pt(d)))
+            .unwrap();
+        bake_dimension_blocks(&mut doc);
+        let name = match doc.get_entity(handle) {
+            Some(EntityType::Dimension(d)) => d.base().block_name.clone(),
+            _ => panic!("dimension missing"),
+        };
+        let rec = doc.block_records.get(&name).expect("block");
+        let lines = doc
+            .entities()
+            .filter(|e| matches!(e, EntityType::Line(l) if l.common.owner_handle == rec.handle))
+            .count();
+        assert!(lines > 5, "angular bake must include arc chords, got {lines} lines");
+    }
+
+    // A diameter dimension bakes a line edge-to-edge THROUGH the centre, not a
+    // radius-length line. The two extreme endpoints must be equidistant from the
+    // centre (angle_vertex) and the centre must lie between them.
+    #[test]
+    fn diameter_dim_bakes_through_center() {
+        use acadrust::entities::DimensionDiameter;
+        let mut doc = CadDocument::new();
+        let center = Vector3::new(3.0, 4.0, 0.0);
+        let edge = Vector3::new(8.0, 4.0, 0.0); // radius 5 along +x
+        let mut d = DimensionDiameter::new(center, edge);
+        d.base.text_middle_point = Vector3::new(3.0, 9.0, 0.0);
+        let handle = doc
+            .add_entity(EntityType::Dimension(Dimension::Diameter(d)))
+            .unwrap();
+        bake_dimension_blocks(&mut doc);
+        let name = match doc.get_entity(handle) {
+            Some(EntityType::Dimension(d)) => d.base().block_name.clone(),
+            _ => panic!("dimension missing"),
+        };
+        // The longest baked segment is the diameter line; its endpoints span the
+        // full diameter (length ~= 2*radius = 10) centred on `center`.
+        let diam = baked_segments(&doc, &name)
+            .into_iter()
+            .find(|(a, b)| {
+                let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+                (len - 10.0).abs() < 1e-6
+            })
+            .expect("diameter line spanning 2*radius");
+        let mid_x = (diam.0.x + diam.1.x) * 0.5;
+        let mid_y = (diam.0.y + diam.1.y) * 0.5;
+        assert!(
+            (mid_x - center.x).abs() < 1e-6 && (mid_y - center.y).abs() < 1e-6,
+            "diameter line must be centred on the circle centre, mid=({mid_x},{mid_y})"
+        );
+    }
+
+    // A rotated linear dimension uses `rotation` directly (radians). Before the
+    // fix `to_radians()` shrank a 90° dim to ~1.57°, baking a nearly-horizontal
+    // line instead of a vertical one.
+    #[test]
+    fn rotated_linear_dim_bakes_at_its_angle() {
+        let mut doc = CadDocument::new();
+        let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 10.0, 0.0));
+        d.rotation = std::f64::consts::FRAC_PI_2; // 90°, vertical dimension line
+        d.definition_point = Vector3::new(8.0, 0.0, 0.0);
+        let handle = doc
+            .add_entity(EntityType::Dimension(Dimension::Linear(d)))
+            .unwrap();
+        bake_dimension_blocks(&mut doc);
+        let name = match doc.get_entity(handle) {
+            Some(EntityType::Dimension(d)) => d.base().block_name.clone(),
+            _ => panic!("dimension missing"),
+        };
+        // Dimension line spans both y extents and must be vertical at x = 8.
+        let dim_line = baked_segments(&doc, &name)
+            .into_iter()
+            .find(|(a, b)| (a.y - 0.0).abs() < 1e-6 && (b.y - 10.0).abs() < 1e-6)
+            .expect("dimension line segment");
+        assert!(
+            (dim_line.0.x - 8.0).abs() < 1e-6 && (dim_line.1.x - 8.0).abs() < 1e-6,
+            "dimension line must be vertical at x=8, got {:?}",
+            dim_line
         );
     }
 }

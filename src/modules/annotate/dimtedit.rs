@@ -78,6 +78,9 @@ impl CadCommand for DimTeditCommand {
                         acadrust::types::Vector3::new(pt.x as f64, pt.y as f64, pt.z as f64);
                     d.base_mut().text_middle_point = new_pt;
                     d.base_mut().insertion_point = new_pt;
+                    // Pin the text to this location, else the renderer recomputes
+                    // the style-default placement and the move is discarded.
+                    d.base_mut().text_user_positioned = true;
                 }
                 return CmdResult::ReplaceEntity(h, vec![ent]);
             }

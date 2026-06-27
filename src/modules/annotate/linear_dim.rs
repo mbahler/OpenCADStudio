@@ -151,28 +151,28 @@ fn preview_wire(points: Vec<Vec3>) -> WireModel {
     }
 }
 
-fn linear_dimension_preview(first: Vec3, second: Vec3, def: Vec3, axis: Vec3) -> Vec<Vec3> {
+/// Project the two extension origins onto the dimension line, which passes
+/// through `def` along `axis`. Each origin is projected *independently*: a
+/// single shared offset only lands both on the line when they are level, and
+/// tilts the dimension line when they are not (e.g. measuring across sloped
+/// points). See #181.
+fn dim_line_endpoints(first: Vec3, second: Vec3, def: Vec3, axis: Vec3) -> (Vec3, Vec3) {
     let perp = Vec3::new(-axis.y, axis.x, 0.0);
-    let offset = (def - first).dot(perp);
-    let d1 = first + perp * offset;
-    let d2 = second + perp * offset;
-    vec![
-        first,
-        d1,
-        Vec3::new(f32::NAN, f32::NAN, f32::NAN),
-        second,
-        d2,
-        Vec3::new(f32::NAN, f32::NAN, f32::NAN),
-        d1,
-        d2,
-    ]
+    let dperp = def.dot(perp);
+    let d1 = first + perp * (dperp - first.dot(perp));
+    let d2 = second + perp * (dperp - second.dot(perp));
+    (d1, d2)
+}
+
+fn linear_dimension_preview(first: Vec3, second: Vec3, def: Vec3, axis: Vec3) -> Vec<Vec3> {
+    let (d1, d2) = dim_line_endpoints(first, second, def, axis);
+    let nan = Vec3::new(f32::NAN, f32::NAN, f32::NAN);
+    vec![first, d1, nan, second, d2, nan, d1, d2]
 }
 
 fn linear_text_pos(first: Vec3, second: Vec3, def: Vec3, axis: Vec3) -> Vec3 {
+    let (d1, d2) = dim_line_endpoints(first, second, def, axis);
     let perp = Vec3::new(-axis.y, axis.x, 0.0);
-    let offset = (def - first).dot(perp);
-    let d1 = first + perp * offset;
-    let d2 = second + perp * offset;
     (d1 + d2) * 0.5 + perp * 0.15
 }
 

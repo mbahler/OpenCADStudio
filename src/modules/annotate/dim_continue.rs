@@ -31,6 +31,9 @@ pub struct DimContinueCommand {
     chain_p1: Vec3,
     /// Direction along the dimension axis (0.0 = horizontal, PI/2 = vertical).
     rotation: f64,
+    /// Text reading rotation inherited from the base dim so a UCS-aligned chain
+    /// keeps its text consistent with the originating DIMLINEAR. 0 = natural.
+    text_rotation: f64,
     /// Absolute perpendicular coordinate (dot with `perp`) of the base
     /// dimension line. Each continued dim line is projected onto this exact
     /// coordinate so the whole chain stays collinear — even when the extension
@@ -49,6 +52,7 @@ impl DimContinueCommand {
         Self {
             chain_p1: Vec3::ZERO,
             rotation: 0.0,
+            text_rotation: 0.0,
             dim_line_perp: 0.0,
             perp: Vec3::Y,
             ready: false,
@@ -64,7 +68,13 @@ impl DimContinueCommand {
     /// `definition_point` — where the dim line was placed; its perpendicular
     ///   coordinate is the line the whole chain stays collinear with.
     /// `rotation` — 0.0 = horizontal dim, PI/2 = vertical dim.
-    pub fn from_base(_p1: Vec3, p2: Vec3, definition_point: Vec3, rotation: f64) -> Self {
+    pub fn from_base(
+        _p1: Vec3,
+        p2: Vec3,
+        definition_point: Vec3,
+        rotation: f64,
+        text_rotation: f64,
+    ) -> Self {
         // Axis unit vector along the measurement direction — the base dim's
         // rotation angle (any angle, incl. a UCS-aligned one), not a world H/V.
         let axis = Vec3::new(rotation.cos() as f32, rotation.sin() as f32, 0.0);
@@ -74,6 +84,7 @@ impl DimContinueCommand {
         Self {
             chain_p1: p2,
             rotation,
+            text_rotation,
             dim_line_perp,
             perp,
             ready: true,
@@ -104,6 +115,9 @@ impl CadCommand for DimContinueCommand {
         // Build a new linear dimension.
         let mut dim = DimensionLinear::new(v3(p1), v3(p2));
         dim.rotation = self.rotation;
+        if self.text_rotation.abs() > 1e-9 {
+            dim.base.text_rotation = self.text_rotation;
+        }
 
         // Dim line stays collinear with the base: project both extension
         // origins onto the base dim line's absolute perpendicular coordinate.

@@ -34,11 +34,15 @@ fn base_props(base: &DimensionBase) -> Vec<crate::scene::model::object::Property
         edit("Text X", "text_x", base.text_middle_point.x),
         edit("Text Y", "text_y", base.text_middle_point.y),
         edit("Text Z", "text_z", base.text_middle_point.z),
-        edit("Text Rotation", "text_rotation", base.text_rotation),
         edit(
-            "Horizontal Dir",
+            "Text Rotation (deg)",
+            "text_rotation",
+            base.text_rotation.to_degrees(),
+        ),
+        edit(
+            "Horizontal Dir (deg)",
             "horizontal_direction",
-            base.horizontal_direction,
+            base.horizontal_direction.to_degrees(),
         ),
         edit(
             "Line Spacing",
@@ -63,9 +67,9 @@ fn properties(dim: &Dimension) -> PropSection {
                 d.definition_point,
             ));
             props.push(edit(
-                "Ext Rotation",
+                "Ext Rotation (deg)",
                 "ext_line_rotation",
-                d.ext_line_rotation,
+                d.ext_line_rotation.to_degrees(),
             ));
         }
         Dimension::Linear(d) => {
@@ -74,11 +78,11 @@ fn properties(dim: &Dimension) -> PropSection {
                 d.second_point,
                 d.definition_point,
             ));
-            props.push(edit("Rotation", "rotation", d.rotation));
+            props.push(edit("Rotation (deg)", "rotation", d.rotation.to_degrees()));
             props.push(edit(
-                "Ext Rotation",
+                "Ext Rotation (deg)",
                 "ext_line_rotation",
-                d.ext_line_rotation,
+                d.ext_line_rotation.to_degrees(),
             ));
         }
         Dimension::Radius(d) => {
@@ -217,8 +221,8 @@ fn apply_base_prop(base: &mut DimensionBase, field: &str, value: &str) -> bool {
             base.text_user_positioned = true;
             assign_f64(value, &mut base.text_middle_point.z)
         }
-        "text_rotation" => assign_f64(value, &mut base.text_rotation),
-        "horizontal_direction" => assign_f64(value, &mut base.horizontal_direction),
+        "text_rotation" => assign_deg(value, &mut base.text_rotation),
+        "horizontal_direction" => assign_deg(value, &mut base.horizontal_direction),
         "line_spacing_factor" => assign_f64(value, &mut base.line_spacing_factor),
         _ => false,
     }
@@ -229,6 +233,17 @@ fn assign_f64(value: &str, target: &mut f64) -> bool {
         return false;
     };
     *target = v;
+    true
+}
+
+/// Parse a value entered in DEGREES and store it as radians. Dimension angle
+/// fields are kept in radians internally but shown/edited in degrees, matching
+/// arc.rs / text.rs so the properties panel reads consistently.
+fn assign_deg(value: &str, target: &mut f64) -> bool {
+    let Some(v) = parse_f64(value) else {
+        return false;
+    };
+    *target = v.to_radians();
     true
 }
 
@@ -256,7 +271,11 @@ fn apply_linear_fields_aligned(d: &mut DimensionAligned, field: &str, value: &st
         field,
         value,
     );
-    let _ = assign_f64(value, &mut d.ext_line_rotation);
+    // Only the oblique field touches ext_line_rotation — otherwise editing a
+    // coordinate (e.g. First X) would corrupt the dimension's obliquing. #181.
+    if field == "ext_line_rotation" {
+        let _ = assign_deg(value, &mut d.ext_line_rotation);
+    }
 }
 
 fn apply_linear_fields_linear(d: &mut DimensionLinear, field: &str, value: &str) {
@@ -269,10 +288,10 @@ fn apply_linear_fields_linear(d: &mut DimensionLinear, field: &str, value: &str)
     );
     match field {
         "rotation" => {
-            let _ = assign_f64(value, &mut d.rotation);
+            let _ = assign_deg(value, &mut d.rotation);
         }
         "ext_line_rotation" => {
-            let _ = assign_f64(value, &mut d.ext_line_rotation);
+            let _ = assign_deg(value, &mut d.ext_line_rotation);
         }
         _ => {}
     }
@@ -604,7 +623,17 @@ fn apply_to_v3(target: &mut acadrust::types::Vector3, apply: &GripApply) {
 
 impl Grippable for Dimension {
     fn grips(&self) -> Vec<GripDef> {
-        let text = dv3(&self.base().text_middle_point);
+        // Auto-placed dimensions carry a zero text_middle_point sentinel; put
+        // the text grip at the style-default placement (default metrics) instead
+        // of the world origin, so it stays on the visible text and grabbable.
+        let text = {
+            let p = self.base().text_middle_point;
+            if p.x * p.x + p.y * p.y + p.z * p.z > 1e-16 {
+                dv3(&p)
+            } else {
+                dv3(&dimension_text_pos_f64(self, None, 2.5, 1.0))
+            }
+        };
         match self {
             Dimension::Linear(d) => vec![
                 square_grip(0, dv3(&d.first_point)),
@@ -1557,23 +1586,27 @@ fn dimension_geometry(
             append_center_mark(&mut g, center, params.dimcen, radius);
         }
         Dimension::Diameter(d) => {
-            let p1 = lv(d.angle_vertex);
-            let p2 = lv(d.definition_point);
-            add_segment(&mut g.dim_lines, p1, p2);
-            append_arrow(&mut g, p1, normalized_or(p2 - p1, Vec3::X), arrow1);
-            append_arrow(&mut g, p2, normalized_or(p1 - p2, Vec3::X), arrow2);
-            // DIMETER leader: continue past p2 toward the text.
+            // angle_vertex is the circle centre and definition_point a point on
+            // the circle. The diameter line runs edge-to-edge THROUGH the centre
+            // (far edge → near edge), with arrows pointing inward at each edge.
+            let center = lv(d.angle_vertex);
+            let edge = lv(d.definition_point);
+            let far = center * 2.0 - edge;
+            add_segment(&mut g.dim_lines, far, edge);
+            append_arrow(&mut g, edge, normalized_or(far - edge, Vec3::X), arrow1);
+            append_arrow(&mut g, far, normalized_or(edge - far, Vec3::X), arrow2);
+            // Diameter leader: continue past the near edge toward the text.
             if d.leader_length.abs() > 1e-9 {
                 let text = dimension_text_position(dim);
-                let leader_dir = normalized_or(text - p2, p2 - p1);
+                let leader_dir = normalized_or(text - edge, edge - far);
                 add_segment(
                     &mut g.dim_lines,
-                    p2,
-                    p2 + leader_dir * (d.leader_length as f32),
+                    edge,
+                    edge + leader_dir * (d.leader_length as f32),
                 );
             }
-            let radius = (p2 - p1).length() * 0.5;
-            append_center_mark(&mut g, (p1 + p2) * 0.5, params.dimcen, radius);
+            let radius = (edge - center).length();
+            append_center_mark(&mut g, center, params.dimcen, radius);
         }
         Dimension::Angular2Ln(d) => {
             append_angular_dimension(
@@ -1783,13 +1816,18 @@ fn append_angular_dimension(
     arrow1: &ArrowKind,
     arrow2: &ArrowKind,
 ) {
-    add_segment(&mut g.ext_lines, vertex, first);
-    add_segment(&mut g.ext_lines, vertex, second);
-
     let radius = vertex.distance(arc_point);
     if radius <= 1e-6 {
+        add_segment(&mut g.ext_lines, vertex, first);
+        add_segment(&mut g.ext_lines, vertex, second);
         return;
     }
+    // Extension lines run from each measured point out to the dimension arc so
+    // there is no gap between a ray and its arc endpoint. (#181 / DIM-027)
+    let dir1 = normalized_or(first - vertex, Vec3::X);
+    let dir2 = normalized_or(second - vertex, Vec3::X);
+    add_segment(&mut g.ext_lines, first, vertex + dir1 * radius);
+    add_segment(&mut g.ext_lines, second, vertex + dir2 * radius);
 
     let start = (first.y - vertex.y).atan2(first.x - vertex.x);
     let mut end = (second.y - vertex.y).atan2(second.x - vertex.x);
@@ -1936,29 +1974,7 @@ fn dimension_text_entity(
     let pos_f64 = dimension_text_pos_f64(dim, style, text_height, dim_scale);
     let base = dim.base();
 
-    // DIMTIH/DIMTOH: when set, text is forced horizontal (rotation = 0)
-    // regardless of the dim line angle. Honour explicit base.text_rotation
-    // first, then horizontal_direction override, then DIMTIH/DIMTOH.
-    let dimtih = style.map(|s| s.dimtih).unwrap_or(false);
-    let dimtoh = style.map(|s| s.dimtoh).unwrap_or(false);
-    let dimjust = style.map(|s| s.dimjust).unwrap_or(0);
-    let rotation = if base.text_rotation.abs() > 1e-9 {
-        base.text_rotation
-    } else if base.horizontal_direction.abs() > 1e-9 {
-        // horizontal_direction is the in-plane reading direction the writer
-        // baked in (used for vertical / oblique dims).
-        base.horizontal_direction
-    } else if dimtih || dimtoh {
-        0.0
-    } else {
-        let mut r = dimension_text_natural_rotation(dim);
-        // DIMJUST 3/4: text reads along the extension lines, i.e. rotated 90°
-        // from the dimension line.
-        if dimjust == 3 || dimjust == 4 {
-            r += std::f64::consts::FRAC_PI_2;
-        }
-        r
-    };
+    let rotation = dimension_text_rotation(dim, style);
 
     // Text style resolution priority:
     //   1. DIMTXSTY by handle (most reliable; survives rename)
@@ -2056,6 +2072,31 @@ fn attachment_to_text_align(
     }
 }
 
+/// Reading rotation for a dimension's measurement text, resolving the style
+/// flags the same way the live renderer does: explicit text_rotation, then
+/// horizontal_direction, then DIMTIH/DIMTOH force-horizontal, else the natural
+/// dim-line angle (+90° for DIMJUST 3/4). Shared by the live text entity and
+/// the bake so a reloaded dimension's text reads at the same angle. (#181)
+fn dimension_text_rotation(dim: &Dimension, style: Option<&DimStyle>) -> f64 {
+    let base = dim.base();
+    let dimtih = style.map(|s| s.dimtih).unwrap_or(false);
+    let dimtoh = style.map(|s| s.dimtoh).unwrap_or(false);
+    let dimjust = style.map(|s| s.dimjust).unwrap_or(0);
+    if base.text_rotation.abs() > 1e-9 {
+        base.text_rotation
+    } else if base.horizontal_direction.abs() > 1e-9 {
+        base.horizontal_direction
+    } else if dimtih || dimtoh {
+        0.0
+    } else {
+        let mut r = dimension_text_natural_rotation(dim);
+        if dimjust == 3 || dimjust == 4 {
+            r += std::f64::consts::FRAC_PI_2;
+        }
+        r
+    }
+}
+
 fn dimension_text_natural_rotation(dim: &Dimension) -> f64 {
     let angle = match dim {
         Dimension::Linear(d) => d.rotation,
@@ -2077,7 +2118,7 @@ fn dimension_text_natural_rotation(dim: &Dimension) -> f64 {
     }
 }
 
-fn dimension_text_value(dim: &Dimension, style: Option<&DimStyle>) -> Option<String> {
+pub(crate) fn dimension_text_value(dim: &Dimension, style: Option<&DimStyle>) -> Option<String> {
     let (main, tol) = dimension_text_parts(dim, style)?;
     // Tolerance is appended inline for callers (e.g. fill rect width) that
     // don't render a separate tolerance entity. The visual pipeline that
@@ -2731,13 +2772,12 @@ fn dimension_text_pos_f64(
             )
         }
         _ => {
-            // Non-linear (radius / diameter / angular / ordinate): keep the
-            // saved text point when present for fidelity, else lift the natural
-            // mid point straight up by the style offset.
-            let p = base.text_middle_point;
-            if p.x * p.x + p.y * p.y + p.z * p.z > 1e-16 {
-                return p;
-            }
+            // Non-linear (radius / diameter / angular / ordinate): lift the
+            // natural mid point straight up by the style offset. A user-dragged
+            // text point is already returned by the `use_saved` gate above, so
+            // we must NOT short-circuit on a merely-nonzero text_middle_point
+            // here — that would ignore the style placement for auto-placed dims
+            // and make a re-style a no-op. (#181)
             let mid = match dim {
                 Dimension::Radius(d) => Vector3::new(
                     (d.angle_vertex.x + d.definition_point.x) * 0.5,
@@ -2761,6 +2801,33 @@ fn dimension_text_pos_f64(
 
 fn perp_sign_default() -> f64 {
     1.0
+}
+
+/// Text placement (position, height, rotation) the live renderer uses for
+/// `dim`, resolving its dimension style from `document`. Shared with the
+/// dimension-block baking on save so a baked `*D` block places its measurement
+/// text exactly where OCS draws it on screen — otherwise the text jumps when
+/// the file is saved and reopened (the reload renders from the baked block).
+/// `anno_scale` is the annotative scale (1.0 for a plain model-space bake).
+pub(crate) fn baked_dimension_text(
+    dim: &Dimension,
+    document: &CadDocument,
+    anno_scale: f64,
+) -> Option<(String, Vector3, f64, f64)> {
+    let style_name = dim.base().style_name.as_str();
+    let style = document.dim_styles.iter().find(|s| {
+        s.name.eq_ignore_ascii_case(style_name)
+            || (style_name.trim().is_empty() && s.name.eq_ignore_ascii_case("Standard"))
+    });
+    // None => the dimension's text is suppressed (user_text " "): bake no Text.
+    let value = dimension_text_value(dim, style)?;
+    let dim_scale = style
+        .map(|s| if s.dimscale > 1e-6 { s.dimscale } else { anno_scale })
+        .unwrap_or(1.0);
+    let dim_txt = style.map(|s| s.dimtxt * dim_scale).unwrap_or(2.5 * dim_scale);
+    let pos = dimension_text_pos_f64(dim, style, dim_txt, dim_scale);
+    let rot = dimension_text_rotation(dim, style);
+    Some((value, pos, dim_txt, rot))
 }
 
 #[cfg(test)]

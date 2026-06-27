@@ -34,6 +34,9 @@ pub struct DimBaselineCommand {
     base_p1: Vec3,
     /// Direction along the measurement direction (0.0 = horizontal, PI/2 = vertical).
     rotation: f64,
+    /// Text reading rotation inherited from the base dim (keeps a UCS-aligned
+    /// chain's text consistent with the originating DIMLINEAR). 0 = natural.
+    text_rotation: f64,
     /// Unit vector perpendicular to the dimension axis, pointing toward the dim line side.
     perp: Vec3,
     /// Perpendicular distance of the NEXT dimension line from the extension-line axis.
@@ -50,6 +53,7 @@ impl DimBaselineCommand {
         Self {
             base_p1: Vec3::ZERO,
             rotation: 0.0,
+            text_rotation: 0.0,
             perp: Vec3::Y,
             next_offset: DEFAULT_DIMDLI,
             dimdli: DEFAULT_DIMDLI,
@@ -69,6 +73,7 @@ impl DimBaselineCommand {
         _p2: Vec3,
         definition_point: Vec3,
         rotation: f64,
+        text_rotation: f64,
         dimdli: f32,
     ) -> Self {
         // Measurement axis = the base dim's rotation angle (any angle, incl. a
@@ -79,18 +84,37 @@ impl DimBaselineCommand {
         let dimdli = if dimdli.abs() < 1e-6 {
             DEFAULT_DIMDLI
         } else {
-            dimdli
+            dimdli.abs()
         };
-        // Next baseline dim goes one DIMDLI further from the baseline.
+        // Stack each baseline outward — in the SIGN direction of the base dim's
+        // own offset. When the base dim sits on the -perp side (below / left of
+        // the points) a positive increment would march the stack back toward and
+        // across the points; the signed increment keeps it moving away. (#181)
+        let dir = if base_offset >= 0.0 { 1.0 } else { -1.0 };
+        let dimdli = dimdli * dir;
         let next_offset = base_offset + dimdli;
         Self {
             base_p1: p1,
             rotation,
+            text_rotation,
             perp,
             next_offset,
             dimdli,
             ready: true,
         }
+    }
+}
+
+impl DimBaselineCommand {
+    /// The two dimension-line endpoints for the new baseline at `p2`: the fixed
+    /// base origin and `p2` each projected INDEPENDENTLY onto the dim line (at
+    /// the current stacking offset). Projecting both keeps the line straight
+    /// even when the two origins aren't level — a shared offset tilts it. (#181)
+    fn dim_line_pts(&self, p2: Vec3) -> (Vec3, Vec3) {
+        let target = self.base_p1.dot(self.perp) + self.next_offset;
+        let d1 = self.base_p1 + self.perp * (target - self.base_p1.dot(self.perp));
+        let d2 = p2 + self.perp * (target - p2.dot(self.perp));
+        (d1, d2)
     }
 }
 
@@ -117,9 +141,11 @@ impl CadCommand for DimBaselineCommand {
         // Build a new linear dimension.
         let mut dim = DimensionLinear::new(v3(p1), v3(p2));
         dim.rotation = self.rotation;
+        if self.text_rotation.abs() > 1e-9 {
+            dim.base.text_rotation = self.text_rotation;
+        }
 
-        let dim_line_pt = p1 + self.perp * self.next_offset;
-        let dim_line_pt2 = p2 + self.perp * self.next_offset;
+        let (dim_line_pt, dim_line_pt2) = self.dim_line_pts(p2);
         dim.definition_point = v3(dim_line_pt);
         dim.base.definition_point = v3(dim_line_pt);
         dim.base.text_middle_point = v3((dim_line_pt + dim_line_pt2) * 0.5);
@@ -141,8 +167,7 @@ impl CadCommand for DimBaselineCommand {
             return None;
         }
         let p1 = self.base_p1;
-        let dim_line_pt = p1 + self.perp * self.next_offset;
-        let dim_line_pt2 = pt + self.perp * self.next_offset;
+        let (dim_line_pt, dim_line_pt2) = self.dim_line_pts(pt);
         Some(WireModel {
             name: "dimbase_preview".into(),
             points: vec![

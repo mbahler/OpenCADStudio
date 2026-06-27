@@ -75,9 +75,10 @@ impl OpenCADStudio {
 
             "DIMCONTINUE" | "DCO" => {
                 use crate::modules::annotate::dim_continue::DimContinueCommand;
-                let cmd = if let Some((p1, p2, dp, rot)) = find_last_linear_dim(&self.tabs[i].scene)
+                let cmd = if let Some((p1, p2, dp, rot, trot)) =
+                    find_last_linear_dim(&self.tabs[i].scene)
                 {
-                    DimContinueCommand::from_base(p1, p2, dp, rot)
+                    DimContinueCommand::from_base(p1, p2, dp, rot, trot)
                 } else {
                     DimContinueCommand::new()
                 };
@@ -87,7 +88,8 @@ impl OpenCADStudio {
 
             "DIMBASELINE" | "DBA" => {
                 use crate::modules::annotate::dim_baseline::DimBaselineCommand;
-                let cmd = if let Some((p1, p2, dp, rot)) = find_last_linear_dim(&self.tabs[i].scene)
+                let cmd = if let Some((p1, p2, dp, rot, trot)) =
+                    find_last_linear_dim(&self.tabs[i].scene)
                 {
                     let doc = &self.tabs[i].scene.document;
                     let dimdli = doc
@@ -99,7 +101,7 @@ impl OpenCADStudio {
                         })
                         .map(|s| s.dimdli as f32)
                         .unwrap_or(1.5);
-                    DimBaselineCommand::from_base(p1, p2, dp, rot, dimdli)
+                    DimBaselineCommand::from_base(p1, p2, dp, rot, trot, dimdli)
                 } else {
                     DimBaselineCommand::new()
                 };
@@ -502,10 +504,10 @@ impl OpenCADStudio {
 /// Returns `(first_point, second_point, definition_point, rotation_rad)` in world-space.
 fn find_last_linear_dim(
     scene: &crate::scene::Scene,
-) -> Option<(glam::Vec3, glam::Vec3, glam::Vec3, f64)> {
+) -> Option<(glam::Vec3, glam::Vec3, glam::Vec3, f64, f64)> {
     use acadrust::entities::Dimension;
     let mut best_handle: u64 = 0;
-    let mut result: Option<(glam::Vec3, glam::Vec3, glam::Vec3, f64)> = None;
+    let mut result: Option<(glam::Vec3, glam::Vec3, glam::Vec3, f64, f64)> = None;
 
     for entity in scene.document.entities() {
         if let acadrust::EntityType::Dimension(dim) = entity {
@@ -530,7 +532,7 @@ fn find_last_linear_dim(
                         d.base.definition_point.y as f32,
                         d.base.definition_point.z as f32,
                     );
-                    Some((p1, p2, dp, d.rotation))
+                    Some((p1, p2, dp, d.rotation, d.base.text_rotation))
                 }
                 Dimension::Aligned(d) => {
                     let p1 = glam::Vec3::new(
@@ -551,7 +553,7 @@ fn find_last_linear_dim(
                     let dx = (d.second_point.x - d.first_point.x) as f32;
                     let dy = (d.second_point.y - d.first_point.y) as f32;
                     let rot = dy.atan2(dx) as f64;
-                    Some((p1, p2, dp, rot))
+                    Some((p1, p2, dp, rot, d.base.text_rotation))
                 }
                 _ => None,
             };
