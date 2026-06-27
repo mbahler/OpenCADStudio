@@ -67,6 +67,9 @@ impl OpenCADStudio {
         // Reset the last committed point so the first click of the new command
         // is not constrained by ortho/polar relative to a previous command's endpoint.
         self.last_point = None;
+        // Starting a command restarts the right-click cycle, so its first
+        // right-click acts as Enter rather than opening the context menu.
+        self.tabs[i].scene.selection.borrow_mut().right_click_entered = false;
         // A fresh command starts at the polar/cartesian default — clear
         // any `,`-driven reshape from a previous command (#35).
         self.dyn_user_reshaped = false;
@@ -208,7 +211,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "P", "PAN", "PAGESETUP", "PERF", "PERSP", "PLOT", "PLOTSTYLE", "PLOTSTYLEEDITOR",
         "PLOTSTYLEPANEL", "PR",
         "PRINT", "PROPERTIES", "PROPS", "PSPACE", "PURGE", "QS", "QSAVE", "QSELECT",
-        "QUIT", "REDO", "REDRAW", "REDRWALL", "REGEN", "REGENALL", "RENAME", "REPORT", "RMBENTER",
+        "QUIT", "REDO", "REDRAW", "REDRWALL", "REGEN", "REGENALL", "RENAME", "REPORT",
         "SA", "SAVE", "SAVEAS", "SCALETEXT", "SELECTALL", "SELECTSIMILAR", "SELSIM", "SHEETSET",
         "SHORTCUTS", "SOLID", "SSM", "STEPOUT", "STLOUT", "STPOUT", "STYLE", "STYLESMANAGER",
         "TABLESTYLE", "TOOLPALETTES", "TP", "TS", "U", "UCS", "UCSICON", "UNDERLAY",

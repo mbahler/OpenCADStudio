@@ -585,6 +585,8 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
                         if held && moved {
                             sel.right_dragging = true;
                             sel.context_menu = None;
+                            // An orbit restarts the right-click cycle.
+                            sel.right_click_entered = false;
                             // Start the orbit from the current position so the
                             // view doesn't jump by the pre-threshold movement.
                             sel.right_last_pos = Some(p);
@@ -1226,6 +1228,7 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
                 sel.right_press_time = None;
                 sel.right_last_pos = None;
                 sel.right_dragging = false;
+                sel.right_click_entered = false;
                 sel.middle_down = false;
                 sel.middle_last_pos = None;
                 sel.box_anchor = None;
@@ -1440,6 +1443,10 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
 
     pub(super) fn on_viewport_left_press(&mut self) -> Task<Message> {
                 let i = self.active_tab;
+                // A left-click during a command resets the right-click cycle, so
+                // the next right-click acts as Enter again rather than opening
+                // the context menu.
+                self.tabs[i].scene.selection.borrow_mut().right_click_entered = false;
                 // A click in the viewport dismisses any open ribbon dropdown
                 // (e.g. the annotation style combo), which has no backdrop of
                 // its own to catch outside clicks.

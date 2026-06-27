@@ -1119,14 +1119,18 @@ impl OpenCADStudio {
                 if !was_click {
                     return Task::none();
                 }
-                // A right-click (no orbit). With "RMB = Enter" enabled, a click
-                // while a command is active fires Enter (commit/close) instead
-                // of the menu; when idle — or the option is off — it opens the
-                // context menu as before, so the menu is never lost.
-                if self.rmb_enter && self.tabs[i].active_cmd.is_some() {
+                // A right-click (no orbit). While a command is active the first
+                // right-click acts as Enter (commit / close); a second
+                // consecutive right-click opens the context menu instead. When
+                // idle it always opens the menu. (Right-drag, handled above,
+                // always orbits.) Any other interaction — a left-click pick or a
+                // new command — resets the cycle so the next right-click is Enter.
+                if self.tabs[i].active_cmd.is_some() && !sel.right_click_entered {
+                    sel.right_click_entered = true;
                     drop(sel);
                     return self.update(Message::CommandFinalize);
                 }
+                sel.right_click_entered = false;
                 sel.context_menu = Some(click_pos);
                 sel.draworder_submenu = false;
                 Task::none()

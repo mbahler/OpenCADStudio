@@ -27,6 +27,11 @@ pub struct SelectionState {
     pub right_press_time: Option<Instant>,
     pub right_dragging: bool,
     pub right_last_pos: Option<Point>,
+    /// While a command is active, a right-click acts as Enter; the *next*
+    /// consecutive right-click opens the context menu instead. This tracks
+    /// whether the previous right-click already fired Enter. Reset by any
+    /// other interaction (left-click pick, a new command) and on viewport exit.
+    pub right_click_entered: bool,
     pub middle_down: bool,
     pub middle_last_pos: Option<Point>,
     pub middle_last_press_time: Option<Instant>,
