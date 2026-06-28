@@ -1413,7 +1413,13 @@ fn emit_wire(
     }
     debug_assert_eq!(lw.fill_tris.len(), lw.fill_tris_low.len());
     for (idx, p) in lw.fill_tris.iter().enumerate() {
-        let pl = lw.fill_tris_low[idx];
+        // Empty/short fill_tris_low means "no low half" (all-zero), per the
+        // WireModel contract — same panic-safe access the other fill consumers
+        // use (face3d_gpu, xclip). A Leader with a filled arrowhead nested in a
+        // block reaches here with populated fill_tris but empty fill_tris_low;
+        // a raw `[idx]` would panic in release (bounds checks are not gated by
+        // debug-assertions). The debug_assert above stays as a tripwire.
+        let pl = lw.fill_tris_low.get(idx).copied().unwrap_or([0.0; 3]);
         let v = accum_xform.apply(Vector3::new(
             p[0] as f64 + pl[0] as f64,
             p[1] as f64 + pl[1] as f64,
