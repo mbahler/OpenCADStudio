@@ -60,6 +60,7 @@ impl CadModule for ViewModule {
                 title: "Navigate",
                 tools: vec![
                     RibbonItem::LargeTool(zoom_ext::tool()),
+                    RibbonItem::Tool(zoom_window::tool()),
                     RibbonItem::Tool(zoom_in::tool()),
                     RibbonItem::Tool(zoom_out::tool()),
                     RibbonItem::Tool(pan::tool()),

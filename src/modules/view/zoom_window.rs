@@ -3,7 +3,21 @@
 use glam::{DVec3, Vec3};
 
 use crate::command::{CadCommand, CmdResult};
+use crate::modules::{IconKind, ModuleEvent, ToolDef};
 use crate::scene::model::wire_model::WireModel;
+
+pub const ICON: IconKind =
+    IconKind::Svg(include_bytes!("../../../assets/icons/zoom_window.svg"));
+
+/// Ribbon button: zoom into a rectangle picked by two corners.
+pub fn tool() -> ToolDef {
+    ToolDef {
+        id: "ZOOM_WINDOW",
+        label: "Zoom Window",
+        icon: ICON,
+        event: ModuleEvent::Command("ZOOM WINDOW".to_string()),
+    }
+}
 
 pub struct ZoomWindowCommand {
     first: Option<Vec3>,
