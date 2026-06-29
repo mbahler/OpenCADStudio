@@ -566,6 +566,38 @@ impl OpenCADStudio {
                 return Some(Task::none());
             }
 
+            // HYPERLINK <url> — attach a hyperlink to the selected objects, stored
+            // in the standard PE_URL XData record so it round-trips in the file.
+            cmd if cmd == "HYPERLINK" || cmd.starts_with("HYPERLINK ") => {
+                use acadrust::xdata::{ExtendedDataRecord, XDataValue};
+                let url = cmd.strip_prefix("HYPERLINK").unwrap_or("").trim().to_string();
+                if url.is_empty() {
+                    self.command_line.push_info("Usage: HYPERLINK <url>   (select objects first)");
+                    return Some(Task::none());
+                }
+                let handles: Vec<acadrust::Handle> =
+                    self.tabs[i].scene.selected_entities().iter().map(|(h, _)| *h).collect();
+                if handles.is_empty() {
+                    self.command_line.push_error("HYPERLINK: select objects first.");
+                    return Some(Task::none());
+                }
+                self.push_undo_snapshot(i, "HYPERLINK");
+                let mut n = 0usize;
+                for h in &handles {
+                    if let Some(e) = self.tabs[i].scene.document.get_entity_mut(*h) {
+                        let xd = &mut e.common_mut().extended_data;
+                        let mut rec = ExtendedDataRecord::new("PE_URL");
+                        rec.add_value(XDataValue::String(url.clone()));
+                        xd.add_record(rec);
+                        n += 1;
+                    }
+                }
+                self.tabs[i].dirty = true;
+                self.command_line
+                    .push_output(&format!("HYPERLINK: attached to {n} object(s)."));
+                return Some(Task::none());
+            }
+
             // ADJUST — set brightness / contrast / fade on selected raster images
             //   ADJUST BRIGHTNESS|CONTRAST|FADE <0-100>
             cmd if cmd == "ADJUST" || cmd.starts_with("ADJUST ") => {

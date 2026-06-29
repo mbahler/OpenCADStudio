@@ -565,6 +565,36 @@ impl OpenCADStudio {
                 }
             }
 
+            // XOPEN — open the source file of the selected external reference in
+            // a new tab (reuses the existence-checked OpenRecent path).
+            "XOPEN" => {
+                let names: Vec<String> = self.tabs[i]
+                    .scene
+                    .selected_entities()
+                    .iter()
+                    .filter_map(|(_, e)| match e {
+                        acadrust::EntityType::Insert(ins) => Some(ins.block_name.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let path = names.iter().find_map(|bn| {
+                    let br = self.tabs[i].scene.document.block_records.get(bn)?;
+                    if br.xref_path.is_empty() {
+                        None
+                    } else {
+                        Some(br.xref_path.clone())
+                    }
+                });
+                match path {
+                    Some(p) => {
+                        return Some(Task::done(Message::OpenRecent(std::path::PathBuf::from(p))))
+                    }
+                    None => self
+                        .command_line
+                        .push_error("XOPEN: select an external reference (xref) to open."),
+                }
+            }
+
             // NCOPY — copy the nested objects of the selected block reference(s)
             // into model space, keeping the block (a non-destructive extraction;
             // every nested object is copied — the block is not exploded).

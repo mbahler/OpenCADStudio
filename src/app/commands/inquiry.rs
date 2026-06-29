@@ -45,10 +45,16 @@ impl OpenCADStudio {
                 return Some(Task::done(Message::QSelectOpen));
             }
 
-            // CAL <expression> — evaluate an arithmetic expression
+            // CAL / QUICKCALC <expression> — evaluate an arithmetic expression
             //   (+ - * /, parentheses, unary minus, decimals).
-            cmd if cmd == "CAL" || cmd.starts_with("CAL ") => {
-                let expr = cmd.trim_start_matches("CAL").trim();
+            cmd if cmd == "CAL"
+                || cmd == "QUICKCALC"
+                || cmd == "QC"
+                || cmd.starts_with("CAL ")
+                || cmd.starts_with("QUICKCALC ")
+                || cmd.starts_with("QC ") =>
+            {
+                let expr = cmd.splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim();
                 if expr.is_empty() {
                     self.command_line
                         .push_info("Usage: CAL <expression>   e.g. CAL (2+3)*4");

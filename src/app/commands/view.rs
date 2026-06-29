@@ -988,6 +988,36 @@ impl OpenCADStudio {
                 ));
             }
 
+            // HIDE — hidden-line view of the active viewport.
+            "HIDE" | "HI" => {
+                return Some(Task::done(Message::SetRenderMode(
+                    acadrust::entities::ViewportRenderMode::HiddenLine,
+                )));
+            }
+
+            // VISUALSTYLES <name> — apply a built-in visual style to the active
+            // viewport via its render mode (the style-definition manager dialog
+            // is not modelled; this applies the standard styles).
+            cmd if cmd == "VISUALSTYLES" || cmd.starts_with("VISUALSTYLES ") => {
+                use acadrust::entities::ViewportRenderMode as VRM;
+                let name = cmd.strip_prefix("VISUALSTYLES").unwrap_or("").trim().to_uppercase();
+                let mode = match name.as_str() {
+                    "2DWIREFRAME" | "2D" => Some(VRM::Wireframe2D),
+                    "3DWIREFRAME" | "WIREFRAME" | "3D" => Some(VRM::Wireframe3D),
+                    "HIDDEN" | "HIDDENLINE" => Some(VRM::HiddenLine),
+                    "FLAT" | "FLATSHADED" => Some(VRM::FlatShaded),
+                    "REALISTIC" | "SHADED" | "GOURAUD" => Some(VRM::GouraudShaded),
+                    "CONCEPTUAL" | "SHADEDWITHEDGES" => Some(VRM::GouraudShadedWithEdges),
+                    _ => None,
+                };
+                match mode {
+                    Some(m) => return Some(Task::done(Message::SetRenderMode(m))),
+                    None => self.command_line.push_info(
+                        "VISUALSTYLES <2DWIREFRAME|3DWIREFRAME|HIDDEN|REALISTIC|CONCEPTUAL|SHADED>",
+                    ),
+                }
+            }
+
             _ => return None,
         }
         Some(self.finish_dispatch(cmd))

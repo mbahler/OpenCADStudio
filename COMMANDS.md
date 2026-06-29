@@ -22,6 +22,7 @@ Status of every standard CAD command in Open CAD Studio:
 | `XLINE` | XL | Infinite construction line | ✅ |
 | `RAY` | — | One-way infinite line | ✅ |
 | `SPLINE` | SPL | NURBS spline | ✅ |
+| `SPLINEFIT` | FITSPLINE | Fit a spline through a polyline's points | ✅ |
 | `MLINE` | ML | Multiline | ✅ |
 | `POINT` | PO | Point | ✅ |
 | `DONUT` | DO | Filled ring | ✅ |
@@ -35,13 +36,13 @@ Status of every standard CAD command in Open CAD Studio:
 | `TABLE` | — | Table entity | ✅ |
 | `DIVIDE` | DIV | Divide entity into equal parts | ✅ |
 | `MEASURE` | ME | Divide entity at measured intervals | ✅ |
-| `3DPOLY` | — | 3D polyline | ❌ |
-| `HELIX` | — | 3D helix | ❌ |
+| `3DPOLY` | — | 3D polyline | ✅ |
+| `HELIX` | — | 3D helix | ✅ |
+| `TRACE` | — | Thick 2D line (legacy) | ✅ |
+| `SKETCH` | — | Freehand sketch | ✅ |
+| `SOLID` | SO | Filled 2D shape (legacy) | ✅ |
+| `MINSERT` | — | Matrix block insert | ✅ |
 | `REGION` | REG | 2D closed region | ❌ |
-| `TRACE` | — | Thick 2D line (legacy) | ❌ |
-| `SKETCH` | — | Freehand sketch | ❌ |
-| `SOLID` | SO | Filled 2D shape (legacy) | ❌ |
-| `MINSERT` | — | Matrix block insert | ❌ |
 | `FIELD` | — | Auto-updating text field | ❌ |
 
 ---
@@ -81,12 +82,12 @@ Status of every standard CAD command in Open CAD Studio:
 | `GROUP` | G | Group | ✅ |
 | `UNGROUP` | UG | Ungroup | ✅ |
 | `OVERKILL` | — | Remove duplicate geometry | 🔶 |
-| `3DALIGN` | — | 3D align | ❌ |
-| `3DMIRROR` | — | 3D mirror | ❌ |
-| `3DMOVE` | — | 3D move | ❌ |
-| `3DROTATE` | — | 3D rotate | ❌ |
+| `3DMOVE` | — | 3D move | ✅ |
+| `3DROTATE` | ROTATE3D | 3D rotate (cached solid) | ✅ |
+| `3DMIRROR` | MIRROR3D | 3D mirror (cached solid) | ✅ |
+| `3DALIGN` | ALIGN3D | 3D align (cached solid) | ✅ |
 | `3DARRAY` | ARRAY3D | 3D array | ✅ |
-| `SLICE` | SL | Slice solid | ❌ |
+| `SLICE` | SL | Slice solid with plane | ✅ |
 | `SUBTRACT` | SU | Subtract solids | ✅ |
 | `UNION` | UNI | Union solids | ✅ |
 | `INTERSECT` | IN | Intersect solids | ✅ |
@@ -120,11 +121,11 @@ Status of every standard CAD command in Open CAD Studio:
 | `MLEADERREMOVE` | MLR | Remove leader segment | ✅ |
 | `MLEADERALIGN` | MLAL | Align multileaders | ✅ |
 | `MLEADERCOLLECT` | MLC | Collect multileaders | ✅ |
-| `DIMJOGGED` | DJO | Jogged radius dimension | ❌ |
-| `DIMCENTER` | DCE | Center mark | ❌ |
-| `CENTERLINE` | — | Center line | ❌ |
-| `CENTERMARK` | — | Center mark on arc/circle | ❌ |
-| `QLEADER` | QL | Quick leader (legacy) | ❌ |
+| `DIMJOGGED` | DJO | Jogged radius dimension | ✅ |
+| `DIMCENTER` | DCE | Center mark | ✅ |
+| `CENTERLINE` | — | Center line | ✅ |
+| `CENTERMARK` | — | Center mark on arc/circle | ✅ |
+| `QLEADER` | QL | Quick leader (legacy) | ✅ |
 
 ---
 
@@ -136,12 +137,12 @@ Status of every standard CAD command in Open CAD Studio:
 | `DDEDIT` | ED | Edit text | ✅ |
 | `FIND` | — | Find and replace text | ✅ |
 | `TABLESTYLE` | TS | Table style manager | ✅ |
+| `DATALINK` | — | Link table to external spreadsheet (CSV) | ✅ |
+| `ARCTEXT` | — | Text along an arc | ✅ |
+| `TORIENT` | — | Orient text for readability | ✅ |
 | `DATAEXTRACTION` | — | Data extraction wizard | 🔶 |
-| `DATALINK` | — | Link table to external spreadsheet | 🔶 |
 | `FIELD` | — | Auto-updating text field | ❌ |
 | `SPELL` | SP | Spell check | ❌ |
-| `ARCTEXT` | — | Text along an arc | ❌ |
-| `TORIENT` | — | Orient text for readability | ✅ |
 
 ---
 
@@ -163,10 +164,10 @@ Status of every standard CAD command in Open CAD Studio:
 | `LTSCALE` | — | Global linetype scale | ✅ |
 | `LAYISO` | — | Isolate layer | ✅ |
 | `LAYUNISO` | — | End layer isolation | ✅ |
+| `LAYDEL` | — | Delete layer | ✅ |
+| `LAYMRG` | — | Merge layers | ✅ |
+| `LAYERSTATE` | LAS | Save / restore layer states | ✅ |
 | `LAYWALK` | — | Walk through layers | ❌ |
-| `LAYDEL` | — | Delete layer | ❌ |
-| `LAYMRG` | — | Merge layers | ❌ |
-| `LAYERSTATE` | — | Save / restore layer states | ❌ |
 | `LAYLOCKFADECTL` | — | Locked layer fading control | ❌ |
 
 ---
@@ -177,24 +178,25 @@ Status of every standard CAD command in Open CAD Studio:
 |---|---|---|---|
 | `BLOCK` | B | Define block | ✅ |
 | `INSERT` | I | Insert block | ✅ |
+| `MINSERT` | — | Matrix block insert | ✅ |
 | `WBLOCK` | W | Write block to file | ✅ |
 | `XATTACH` | XA | Attach external reference | ✅ |
 | `XREF` | XR | External reference manager | ✅ |
 | `XRELOAD` | — | Reload external reference | ✅ |
+| `XCLIP` | XC | Clip external reference | ✅ |
 | `REFEDIT` | — | Edit reference in-place | ✅ |
 | `REFCLOSE` | — | Close reference edit | ✅ |
+| `BEDIT` | BE | Block editor | ✅ |
+| `BASE` | — | Set drawing base point | ✅ |
+| `NCOPY` | — | Copy nested objects out of a block | ✅ |
 | `ATTDEF` | ATT | Define attribute | ✅ |
 | `ATTEDIT` | ATE | Edit attribute | ✅ |
 | `ATTEXT` | — | Extract attributes (legacy) | ✅ |
-| `XCLIP` | XC | Clip external reference | 🔶 |
-| `BASE` | — | Set drawing base point | 🔶 |
-| `BEDIT` | BE | Block editor | 🔶 |
-| `BLOCKPALETTE` | — | Multi-view block palette | 🔶 |
-| `ATTMAN` | — | Attribute manager | 🔶 |
-| `ATTSYNC` | — | Synchronize attribute definitions | 🔶 |
-| `MINSERT` | — | Matrix block insert | ❌ |
+| `ATTSYNC` | — | Synchronize attribute definitions | ✅ |
+| `BLOCKPALETTE` | — | Multi-view block palette (command-line list) | 🔶 |
+| `ATTMAN` | — | Attribute manager (command-line list) | 🔶 |
 | `XBIND` | XB | Bind xref elements to drawing | ❌ |
-| `XOPEN` | — | Open xref for editing | ❌ |
+| `XOPEN` | — | Open xref for editing | ✅ |
 | `BSAVE` | — | Save block in editor | ❌ |
 | `BCLOSE` | — | Close block editor | ❌ |
 
@@ -207,31 +209,30 @@ Status of every standard CAD command in Open CAD Studio:
 | `BOX` | — | Box solid | ✅ |
 | `SPHERE` | — | Sphere solid | ✅ |
 | `CYLINDER` | — | Cylinder solid | ✅ |
+| `CONE` | — | Cone solid | ✅ |
+| `WEDGE` | — | Wedge solid | ✅ |
+| `TORUS` | — | Torus solid | ✅ |
+| `PYRAMID` | PYR | Pyramid solid | ✅ |
+| `POLYSOLID` | — | Wall-like solid | ✅ |
 | `EXTRUDE` | EXT | Extrude profile | ✅ |
+| `PRESSPULL` | — | Push / pull a closed boundary | ✅ |
+| `THICKEN` | — | Thicken a closed profile to a solid | ✅ |
 | `REVOLVE` | REV | Revolve profile around axis | ✅ |
 | `SWEEP` | — | Sweep profile along path | ✅ |
 | `LOFT` | — | Loft between profiles | ✅ |
 | `MASSPROP` | — | Mass properties | ✅ |
 | `EXPORTSTEP` | — | Export to STEP | ✅ |
 | `EXPORTSTL` | — | Export to STL | ✅ |
-| `CONE` | — | Cone solid | ✅ |
-| `PYRAMID` | — | Pyramid solid | ❌ |
-| `WEDGE` | — | Wedge solid | ✅ |
-| `TORUS` | — | Torus solid | ✅ |
-| `HELIX` | — | 3D helix | ❌ |
-| `POLYSOLID` | — | Wall-like solid | ❌ |
-| `PRESSPULL` | — | Push / pull a face | ❌ |
-| `THICKEN` | — | Thicken surface to solid | ❌ |
-| `CONVTOSOLID` | — | Convert to solid | ❌ |
-| `CONVTOSURFACE` | — | Convert to surface | ❌ |
-| `SLICE` | SL | Slice solid with plane | ❌ |
+| `SLICE` | SL | Slice solid with plane | ✅ |
 | `SUBTRACT` | SU | Subtract solids | ✅ |
 | `UNION` | UNI | Union solids | ✅ |
 | `INTERSECT` | IN | Intersect solids | ✅ |
-| `SECTION` | SEC | Section plane | ❌ |
+| `INTERFERE` | INF | Interference solid from overlap | ✅ |
+| `SECTION` | — | Cross-section outline of a solid | ✅ |
+| `CONVTOSOLID` | — | Convert to solid | ❌ |
+| `CONVTOSURFACE` | — | Convert to surface | ❌ |
 | `SECTIONPLANE` | — | Section plane object | ❌ |
 | `FLATSHOT` | — | 2D view from 3D | ❌ |
-| `INTERFERE` | INF | Interference check | ❌ |
 
 ---
 
@@ -245,19 +246,21 @@ Status of every standard CAD command in Open CAD Studio:
 | `REGEN` | RE | Regenerate drawing | ✅ |
 | `REDRAW` | R | Redraw viewport | ✅ |
 | `VPORTS` | — | Viewport configuration | ✅ |
+| `VPJOIN` | — | Join viewports | ✅ |
+| `SYNCPVIEWPORTS` | VPSYNC | Sync viewport display settings | ✅ |
 | `MSPACE` | MS | Switch to model space | ✅ |
 | `PSPACE` | PS | Switch to paper space | ✅ |
 | `MVIEW` | MV | Model view in layout | ✅ |
 | `UCSICON` | — | Toggle UCS icon | ✅ |
+| `VIEW` | V | Named views manager | ✅ |
+| `PLAN` | — | Switch to plan view | ✅ |
 | `NAVVCUBE` | — | Toggle ViewCube | 🔶 |
 | `NAVBAR` | — | Toggle navigation bar | 🔶 |
-| `VPJOIN` | — | Join viewports | 🔶 |
 | `TOOLPALETTES` | — | Tool palettes panel | 🔶 |
 | `PROPERTIES` | PR | Properties palette | 🔶 |
 | `SHEETSET` | SSM | Sheet set manager | 🔶 |
 | `FILETAB` | — | Toggle file tabs | 🔶 |
 | `LAYOUTTAB` | — | Toggle layout tabs | 🔶 |
-| `VIEW` | V | Named views manager | ✅ |
 | `DVIEW` | DV | Dynamic view (legacy) | ❌ |
 | `NAVSWHEEL` | — | Steering wheel | ❌ |
 | `RENDER` | RR | Render | ❌ |
@@ -265,9 +268,8 @@ Status of every standard CAD command in Open CAD Studio:
 | `LIGHT` | — | Add scene light | ❌ |
 | `SUNPROPERTIES` | — | Sun light settings | ❌ |
 | `MATERIALS` | MAT | Material editor | ❌ |
-| `VISUALSTYLES` | — | Visual style manager | ❌ |
-| `HIDE` | HI | Hidden-line regeneration | ❌ |
-| `PLAN` | — | Switch to plan view | ❌ |
+| `VISUALSTYLES` | — | Apply a built-in visual style (no custom-style manager) | 🔶 |
+| `HIDE` | HI | Hidden-line regeneration | ✅ |
 | `VPMAX` | — | Maximize viewport | ❌ |
 | `VPMIN` | — | Restore viewport | ❌ |
 
@@ -285,10 +287,10 @@ Status of every standard CAD command in Open CAD Studio:
 | `DIST` | DI | Distance between two points | ✅ |
 | `ID` | — | Point coordinate | ✅ |
 | `LIST` | LI | List object data | ✅ |
-| `DBLIST` | — | List all objects | ❌ |
-| `MEASUREGEOM` | — | Measure distance / angle / area | ❌ |
-| `QUICKCALC` | QC | Quick calculator | ❌ |
-| `CAL` | — | Command-line calculator | ❌ |
+| `DBLIST` | — | List all objects | ✅ |
+| `MEASUREGEOM` | — | Measure distance / angle / area | ✅ |
+| `CAL` | — | Command-line calculator | ✅ |
+| `QUICKCALC` | QC | Quick calculator | ✅ |
 
 ---
 
@@ -301,15 +303,16 @@ Status of every standard CAD command in Open CAD Studio:
 | `SAVE` | — | Save | ✅ |
 | `SAVEAS` | — | Save as | ✅ |
 | `QSAVE` | — | Quick save | ✅ |
+| `SAVEALL` | — | Save all open drawings | ✅ |
 | `PLOT` | — | Print / plot | ✅ |
 | `EXPORT` | — | Export | ✅ |
+| `EXPORTPDF` | — | Export to PDF | ✅ |
 | `PAGESETUP` | — | Page setup | ✅ |
 | `PLOTSTYLE` | — | Plot style | ✅ |
 | `PURGE` | PU | Purge unused items | ✅ |
-| `EXPORTPDF` | — | Export to PDF | ❌ |
-| `RECOVER` | — | Recover damaged drawing | ❌ |
-| `CLOSE` | — | Close drawing | ❌ |
 | `QUIT` | — | Exit application | ✅ |
+| `RECOVER` | — | Recover damaged drawing | ❌ |
+| `CLOSE` | — | Close drawing | ✅ |
 | `ARCHIVE` | — | Archive drawing set | ❌ |
 | `ETRANSMIT` | — | Transmit drawing package | ❌ |
 
@@ -324,18 +327,19 @@ Status of every standard CAD command in Open CAD Studio:
 | `PLOTSTYLEEDITOR` | — | Plot style editor | ✅ |
 | `MLEADERSTYLE` | — | Multileader style manager | ✅ |
 | `DIMSTYLE` | D | Dimension style manager | ✅ |
+| `CUI` | — | Customize user interface | ✅ |
+| `CUIIMPORT` | — | Import customization file | ✅ |
+| `CUIEXPORT` | — | Export customization file | ✅ |
+| `ALIASEDIT` | — | Edit command aliases | ✅ |
+| `OPTIONS` | OP | Application settings (drafting) | ✅ |
+| `OBJECTSCALE` | — | Mark objects annotative | ✅ |
+| `SCRIPT` | SCR | Run script file | ✅ |
 | `AUDIT` | — | Audit drawing integrity | 🔶 |
 | `OVERKILL` | — | Remove duplicate geometry | 🔶 |
-| `CUI` | — | Customize user interface | 🔶 |
-| `CUIIMPORT` | — | Import customization file | 🔶 |
-| `CUIEXPORT` | — | Export customization file | 🔶 |
-| `ALIASEDIT` | — | Edit command aliases | 🔶 |
 | `FINDNONPURGEABLE` | — | Find non-purgeable items | 🔶 |
-| `OPTIONS` | OP | Application settings | 🔶 |
 | `XBIND` | — | Bind xref elements | ❌ |
-| `HYPERLINK` | — | Insert hyperlink | ❌ |
+| `HYPERLINK` | — | Insert hyperlink | ✅ |
 | `DBCONNECT` | — | Connect to external database | ❌ |
-| `SCRIPT` | SCR | Run script file | ❌ |
 | `APPLOAD` | — | Load application (LISP / ARX) | ❌ |
 | `NETLOAD` | — | Load .NET plug-in | ❌ |
 | `ACTRECORD` | — | Record action macro | ❌ |
@@ -347,15 +351,22 @@ Status of every standard CAD command in Open CAD Studio:
 
 | Category | Total | ✅ Done | 🔶 Partial | ❌ Missing |
 |---|---|---|---|---|
-| Draw | 31 | 20 | 0 | 11 |
-| Modify | 42 | 34 | 1 | 7 |
-| Dimension | 25 | 22 | 0 | 3 |
-| Text & Table | 9 | 6 | 2 | 1 |
-| Layer | 19 | 14 | 0 | 5 |
-| Block & Reference | 22 | 11 | 6 | 5 |
-| 3D Modeling | 28 | 16 | 0 | 12 |
-| View & Navigation | 31 | 11 | 8 | 12 |
-| Inquiry | 12 | 8 | 0 | 4 |
-| File & Plot | 16 | 11 | 0 | 5 |
-| Manage & Customize | 21 | 5 | 7 | 9 |
-| **Total** | **256** | **158** | **24** | **74** |
+| Draw | 32 | 30 | 0 | 2 |
+| Modify | 42 | 39 | 1 | 2 |
+| Dimension | 26 | 26 | 0 | 0 |
+| Text & Table | 10 | 7 | 1 | 2 |
+| Layer | 19 | 17 | 0 | 2 |
+| Block & Reference | 23 | 18 | 2 | 3 |
+| 3D Modeling | 27 | 23 | 0 | 4 |
+| View & Navigation | 32 | 15 | 8 | 9 |
+| Inquiry | 12 | 12 | 0 | 0 |
+| File & Plot | 17 | 14 | 0 | 3 |
+| Manage & Customize | 22 | 13 | 3 | 6 |
+| **Total** | **262** | **214** | **15** | **33** |
+
+> Counts include commands listed under more than one category (e.g. `SLICE`, `HELIX`,
+> `MINSERT`, `SUBTRACT`/`UNION`/`INTERSECT` appear in both their 2D and 3D groups).
+>
+> Still out of scope: `POINTCLOUDATTACH`/`RECAP` (proprietary binary point-cloud parser
+> plus a GPU point renderer) and `UNDERLAYLAYERS`/`UOSNAP` (PDF/DWF internal-layer
+> parsing) — each needs an external dependency and real test files.

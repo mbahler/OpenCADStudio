@@ -137,6 +137,12 @@ impl OpenCADStudio {
                     .push_output(&format!("Visual style: {label}."));
                 return Some(Task::done(Message::SetWireframe(wireframe)));
             }
+            // CLOSE — close the active drawing tab (with the unsaved-changes
+            // prompt the tab-close handler already runs).
+            "CLOSE" => {
+                return Some(Task::done(Message::TabClose(self.active_tab)));
+            }
+
             "EXIT" | "QUIT" => {
                 // Funnel through the OS close path so the unsaved-changes
                 // dialog runs before `iced::exit()`. Falls back to a hard

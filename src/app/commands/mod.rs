@@ -333,6 +333,15 @@ inventory::submit!(crate::command::CommandRegistration {
         // Copy nested objects out of a block.
         "NCOPY",
         "NCOPYALL",
+        // Close tab, hidden-line / visual styles, calculator, hyperlink.
+        "CLOSE",
+        "HIDE",
+        "HI",
+        "VISUALSTYLES",
+        "QUICKCALC",
+        "QC",
+        "HYPERLINK",
+        "XOPEN",
         // Slice/section + interference + press-pull/thicken + 3D transforms + wall/pyramid.
         "SLICE",
         "SL",
