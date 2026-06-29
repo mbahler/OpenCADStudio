@@ -704,6 +704,16 @@ impl OpenCADStudio {
                 return Some(self.solid_interfere());
             }
 
+            // FLATSHOT — flatten the selected solid's edges to 2D lines at Z=0.
+            "FLATSHOT" => {
+                return Some(self.solid_flatshot());
+            }
+
+            // CONVTOSURFACE — convert the selected solid(s) to surface entities.
+            "CONVTOSURFACE" => {
+                return Some(self.solid_convtosurface());
+            }
+
             // POLYSOLID <width> <height> — extrude a selected polyline into a
             // wall-like solid.
             cmd if cmd == "POLYSOLID" || cmd.starts_with("POLYSOLID ") => {

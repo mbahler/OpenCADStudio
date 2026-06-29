@@ -748,4 +748,96 @@ impl super::OpenCADStudio {
             .push_output(&format!("SPLINEFIT: fit a spline through {n} points."));
         Task::none()
     }
+
+    /// FLATSHOT — project the selected solid's edges onto the XY plane (Z=0) as
+    /// Line entities, giving a flattened 2D shot of the model. Reuses the cached
+    /// solid's edge wires (the same source SECTION uses).
+    pub(super) fn solid_flatshot(&mut self) -> Task<Message> {
+        use acadrust::types::Vector3;
+        use acadrust::Line;
+        let i = self.active_tab;
+        let handles: Vec<Handle> = self.tabs[i]
+            .scene
+            .selected
+            .iter()
+            .copied()
+            .filter(|h| self.tabs[i].scene.solid_models.contains_key(h))
+            .collect();
+        if handles.is_empty() {
+            self.command_line
+                .push_error("FLATSHOT: select a solid created this session.");
+            return Task::none();
+        }
+        self.push_undo_snapshot(i, "FLATSHOT");
+        let mut n = 0usize;
+        for h in &handles {
+            let solid = self.tabs[i].scene.solid_models[h].clone();
+            for w in solid_model::edge_wires(&solid) {
+                for seg in w.points.windows(2) {
+                    let line = Line::from_points(
+                        Vector3::new(seg[0].x, seg[0].y, 0.0),
+                        Vector3::new(seg[1].x, seg[1].y, 0.0),
+                    );
+                    self.tabs[i].scene.add_entity(EntityType::Line(line));
+                    n += 1;
+                }
+            }
+        }
+        self.tabs[i].dirty = true;
+        self.refresh_properties();
+        self.command_line
+            .push_output(&format!("FLATSHOT: created {n} projected edge(s) at Z=0."));
+        Task::none()
+    }
+
+    /// CONVTOSURFACE — convert the selected solid(s) into Surface entities,
+    /// carrying the solid's edge wires (reuses the cached B-rep's edge wires).
+    pub(super) fn solid_convtosurface(&mut self) -> Task<Message> {
+        use acadrust::entities::{Surface, SurfaceKind, Wire as AWire};
+        use acadrust::types::Vector3;
+        let i = self.active_tab;
+        let handles: Vec<Handle> = self.tabs[i]
+            .scene
+            .selected
+            .iter()
+            .copied()
+            .filter(|h| self.tabs[i].scene.solid_models.contains_key(h))
+            .collect();
+        if handles.is_empty() {
+            self.command_line
+                .push_error("CONVTOSURFACE: select a solid created this session.");
+            return Task::none();
+        }
+        let mut surfaces: Vec<Surface> = Vec::new();
+        for h in &handles {
+            let solid = self.tabs[i].scene.solid_models[h].clone();
+            let awires: Vec<AWire> = solid_model::edge_wires(&solid)
+                .into_iter()
+                .map(|w| {
+                    let mut aw = AWire::new();
+                    aw.points = w
+                        .points
+                        .iter()
+                        .map(|p| Vector3::new(p.x, p.y, p.z))
+                        .collect();
+                    aw
+                })
+                .collect();
+            let mut surf = Surface::new(SurfaceKind::Generic);
+            surf.wires = awires;
+            surf.common.layer = self.tabs[i].active_layer.clone();
+            surfaces.push(surf);
+        }
+        self.push_undo_snapshot(i, "CONVTOSURFACE");
+        self.tabs[i].scene.erase_entities(&handles);
+        let n = surfaces.len();
+        for surf in surfaces {
+            self.tabs[i].scene.add_entity(EntityType::Surface(surf));
+        }
+        self.tabs[i].dirty = true;
+        self.refresh_properties();
+        self.command_line
+            .push_output(&format!("CONVTOSURFACE: converted {n} solid(s) to surface(s)."));
+        Task::none()
+    }
 }

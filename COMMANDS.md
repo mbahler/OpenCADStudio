@@ -230,9 +230,9 @@ Status of every standard CAD command in Open CAD Studio:
 | `INTERFERE` | INF | Interference solid from overlap | ✅ |
 | `SECTION` | — | Cross-section outline of a solid | ✅ |
 | `CONVTOSOLID` | — | Convert to solid | ❌ |
-| `CONVTOSURFACE` | — | Convert to surface | ❌ |
+| `CONVTOSURFACE` | — | Convert to surface | ✅ |
 | `SECTIONPLANE` | — | Section plane object | ❌ |
-| `FLATSHOT` | — | 2D view from 3D | ❌ |
+| `FLATSHOT` | — | 2D view from 3D | ✅ |
 
 ---
 
@@ -357,12 +357,12 @@ Status of every standard CAD command in Open CAD Studio:
 | Text & Table | 10 | 7 | 1 | 2 |
 | Layer | 19 | 17 | 0 | 2 |
 | Block & Reference | 23 | 18 | 2 | 3 |
-| 3D Modeling | 27 | 23 | 0 | 4 |
+| 3D Modeling | 27 | 25 | 0 | 2 |
 | View & Navigation | 32 | 15 | 8 | 9 |
 | Inquiry | 12 | 12 | 0 | 0 |
 | File & Plot | 17 | 16 | 0 | 1 |
 | Manage & Customize | 22 | 13 | 3 | 6 |
-| **Total** | **262** | **217** | **15** | **30** |
+| **Total** | **262** | **219** | **15** | **28** |
 
 > Counts include commands listed under more than one category (e.g. `SLICE`, `HELIX`,
 > `MINSERT`, `SUBTRACT`/`UNION`/`INTERSECT` appear in both their 2D and 3D groups).
