@@ -1501,6 +1501,27 @@ impl OpenCADStudio {
                     _ => self.command_line.push_error("Requires 0 or 1"),
                 }
             }
+            "SAVETIME" => {
+                self.command_line
+                    .push_output(&format!("SAVETIME = {}", self.savetime_min));
+            }
+            cmd if cmd.starts_with("SAVETIME ") => {
+                match cmd.trim_start_matches("SAVETIME").trim().parse::<i32>() {
+                    Ok(v) if v >= 0 => {
+                        self.savetime_min = v;
+                        self.persist_settings_if_changed();
+                        let msg = if v == 0 {
+                            "SAVETIME set to 0 (autosave off)".to_string()
+                        } else {
+                            format!("SAVETIME set to {v} minute(s)")
+                        };
+                        self.command_line.push_output(&msg);
+                    }
+                    _ => self
+                        .command_line
+                        .push_error("Requires a non-negative number of minutes (0 = off)"),
+                }
+            }
             "PDSIZE" => {
                 use crate::command::ValuePromptCommand;
                 let c = ValuePromptCommand::new(

@@ -38,10 +38,10 @@ const PHASE_FINALIZING: u8 = 3;
 pub async fn pick_open_path() -> Option<(PathBuf, u64)> {
     let handle = rfd::AsyncFileDialog::new()
         .set_title("Open CAD file")
-        .add_filter("CAD Files", &["dwg", "dxf", "bak", "DWG", "DXF", "BAK"])
+        .add_filter("CAD Files", &["dwg", "dxf", "bak", "sv$", "DWG", "DXF", "BAK"])
         .add_filter("DWG Files", &["dwg", "DWG"])
         .add_filter("DXF Files", &["dxf", "DXF"])
-        .add_filter("Backup Files", &["bak", "BAK"])
+        .add_filter("Backup / Autosave", &["bak", "sv$", "BAK"])
         .add_filter("All Files", &["*"])
         .pick_file()
         .await?;
@@ -169,9 +169,9 @@ pub fn load_file(path: &Path) -> Result<CadDocument, String> {
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
-    // A `.bak` backup holds a verbatim DWG or DXF copy — detect the real format
-    // from the file's leading bytes rather than the `.bak` extension.
-    let effective = if ext == "bak" {
+    // A `.bak` backup or `.sv$` autosave holds a verbatim DWG/DXF copy — detect
+    // the real format from the file's leading bytes, not the extension.
+    let effective = if ext == "bak" || ext == "sv$" {
         sniff_dwg_or_dxf(path)
     } else {
         ext.clone()

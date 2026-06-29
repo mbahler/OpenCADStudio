@@ -253,6 +253,9 @@ pub(super) struct OpenCADStudio {
     /// When true (default), the app registers itself as a .dwg/.dxf/.bak file
     /// handler on each launch. Toggle with the FILEASSOC command.
     pub file_assoc_enabled: bool,
+    /// Minutes between autosaves to a `.sv$` recovery file (SAVETIME command);
+    /// 0 disables autosave.
+    pub savetime_min: i32,
     /// Persisted default viewport background, restored from settings and applied
     /// to every drawing tab (new and opened) so a chosen background survives
     /// restarts (#188). `None` = the built-in dark-grey / off-white defaults.
@@ -1120,6 +1123,8 @@ pub enum Message {
     OverwriteConfirm,
     /// Go back to the Save dialog from the overwrite warning.
     OverwriteCancel,
+    /// Periodic autosave tick — write `.sv$` recovery files for dirty tabs.
+    AutoSave,
     /// Save-as path picked for the unsaved-changes → save → close flow.
     UnsavedPickedSavePath(Option<std::path::PathBuf>),
     // ─────────────────────────────────────────────────────────────────────
@@ -1870,6 +1875,7 @@ impl OpenCADStudio {
             texteditmode: false,
             backup_on_save: true,
             file_assoc_enabled: true,
+            savetime_min: 10,
             default_bg_color: None,
             default_paper_bg_color: None,
             awaiting_vports: false,

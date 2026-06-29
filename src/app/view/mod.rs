@@ -1423,6 +1423,17 @@ impl OpenCADStudio {
             iced::time::every(std::time::Duration::from_millis(300)).map(|_| Message::PollWebFonts);
         #[cfg(not(target_arch = "wasm32"))]
         let web_fonts = Subscription::none();
+        // Periodic autosave to a `.sv$` recovery file (native only). SAVETIME is
+        // the interval in minutes; 0 disables it.
+        #[cfg(not(target_arch = "wasm32"))]
+        let autosave = if self.savetime_min > 0 {
+            iced::time::every(std::time::Duration::from_secs(self.savetime_min as u64 * 60))
+                .map(|_| Message::AutoSave)
+        } else {
+            Subscription::none()
+        };
+        #[cfg(target_arch = "wasm32")]
+        let autosave = Subscription::none();
         iced::Subscription::batch([
             frames,
             history_tick,
@@ -1430,6 +1441,7 @@ impl OpenCADStudio {
             hover_dwell,
             caret_blink,
             web_fonts,
+            autosave,
             event::listen_with(|ev, status, win_id| {
                 use iced::event::Status;
                 match ev {

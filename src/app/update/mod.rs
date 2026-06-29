@@ -2540,6 +2540,7 @@ impl OpenCADStudio {
                 self.active_modal = Some(crate::app::ModalKind::SaveDialog);
                 Task::none()
             }
+            Message::AutoSave => self.on_autosave(),
 
             Message::UnsavedPickedSavePath(Some(path)) => {
                 self.on_unsaved_picked_save_path_some(path)

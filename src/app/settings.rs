@@ -109,6 +109,9 @@ pub struct UserSettings {
     /// When true (default), the app (re)registers itself as a .dwg/.dxf/.bak
     /// handler on every launch. Toggle with the FILEASSOC command.
     pub file_assoc_enabled: bool,
+    /// Minutes between autosaves to a `.sv$` recovery file (SAVETIME command).
+    /// 0 disables autosave.
+    pub savetime_min: i32,
     /// Persisted viewport background colours (0–255 RGB); `None` = app default
     /// (dark grey model / off-white paper). Applied to every drawing tab on
     /// launch and to tabs opened later, so a chosen background survives restarts
@@ -141,6 +144,7 @@ impl Default for UserSettings {
             texteditmode: false,
             backup_on_save: true,
             file_assoc_enabled: true,
+            savetime_min: 10,
             bg_color: None,
             paper_bg_color: None,
         }
@@ -187,6 +191,11 @@ impl UserSettings {
                 }
                 "backup_on_save" => s.backup_on_save = val == "1",
                 "file_assoc_enabled" => s.file_assoc_enabled = val == "1",
+                "savetime_min" => {
+                    if let Ok(v) = val.parse::<i32>() {
+                        s.savetime_min = v.max(0);
+                    }
+                }
                 "disabled_plugins" => {
                     s.disabled_plugins = val
                         .split(',')
@@ -228,7 +237,7 @@ impl UserSettings {
             .collect::<Vec<_>>()
             .join(",");
         let body = format!(
-            "dyn={}\northo={}\npolar={}\npolar_increment_deg={}\nosnap={}\notrack={}\ndefault_assoc_prompted={}\nsnap_modes={}\ndisabled_plugins={}\nplugin_repos={}\ntexteditmode={}\nbackup_on_save={}\nfile_assoc_enabled={}\nbg_color={}\npaper_bg_color={}\n",
+            "dyn={}\northo={}\npolar={}\npolar_increment_deg={}\nosnap={}\notrack={}\ndefault_assoc_prompted={}\nsnap_modes={}\ndisabled_plugins={}\nplugin_repos={}\ntexteditmode={}\nbackup_on_save={}\nfile_assoc_enabled={}\nsavetime_min={}\nbg_color={}\npaper_bg_color={}\n",
             b(self.dyn_input),
             b(self.ortho),
             b(self.polar),
@@ -242,6 +251,7 @@ impl UserSettings {
             self.texteditmode,
             b(self.backup_on_save),
             b(self.file_assoc_enabled),
+            self.savetime_min,
             rgb_to_str(self.bg_color),
             rgb_to_str(self.paper_bg_color),
         );

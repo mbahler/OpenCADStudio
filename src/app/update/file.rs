@@ -42,6 +42,7 @@ impl OpenCADStudio {
             texteditmode: self.texteditmode,
             backup_on_save: self.backup_on_save,
             file_assoc_enabled: self.file_assoc_enabled,
+            savetime_min: self.savetime_min,
             bg_color: self.default_bg_color.map(f4_to_u3),
             paper_bg_color: self.default_paper_bg_color.map(f4_to_u3),
         }
@@ -62,6 +63,7 @@ impl OpenCADStudio {
         self.texteditmode = s.texteditmode;
         self.backup_on_save = s.backup_on_save;
         self.file_assoc_enabled = s.file_assoc_enabled;
+        self.savetime_min = s.savetime_min;
         self.default_bg_color = s.bg_color.map(u3_to_f4);
         self.default_paper_bg_color = s.paper_bg_color.map(u3_to_f4);
         // Push the restored background onto every drawing tab that exists now
@@ -673,6 +675,41 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         self.overwrite_acknowledged = true;
         self.active_modal = Some(crate::app::ModalKind::SaveDialog);
         self.on_save_dialog_confirm()
+    }
+
+    /// Periodic autosave (SAVETIME): write a `.sv$` recovery copy for every
+    /// dirty tab that has a path, at the document's own DWG version. Best-effort
+    /// and non-destructive — it never touches the original file or the dirty
+    /// flag, and skips unsaved (path-less) tabs.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn on_autosave(&mut self) -> Task<Message> {
+        let mut n = 0;
+        for i in 0..self.tabs.len() {
+            if !self.tabs[i].dirty {
+                continue;
+            }
+            let Some(path) = self.tabs[i].current_path.clone() else {
+                continue;
+            };
+            let version = self.tabs[i].scene.document.version;
+            if let Ok(bytes) =
+                crate::io::save_to_bytes(&self.tabs[i].scene.document, "dwg", version)
+            {
+                if std::fs::write(path.with_extension("sv$"), bytes).is_ok() {
+                    n += 1;
+                }
+            }
+        }
+        if n > 0 {
+            self.command_line
+                .push_output(&format!("Autosaved {n} drawing(s) to .sv$"));
+        }
+        Task::none()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn on_autosave(&mut self) -> Task<Message> {
+        Task::none()
     }
 
     pub(super) fn on_page_setup_commit(&mut self) -> Task<Message> {
