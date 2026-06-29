@@ -2,8 +2,10 @@
 
 use crate::app::Message;
 use crate::app::StyleKind;
-use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input, Space};
-use iced::{Background, Border, Color, Element, Fill, Theme};
+use iced::widget::{
+    button, canvas, checkbox, column, container, row, scrollable, text, text_input, Space,
+};
+use iced::{mouse, Background, Border, Color, Element, Fill, Length, Point, Rectangle, Theme};
 
 /// View-model for the Text Style editor window.
 pub struct TextStyleView<'a> {
@@ -118,6 +120,90 @@ fn vsep<'a>() -> Element<'a, Message> {
         .into()
 }
 
+/// Live sample-text preview. Tessellates a fixed sample string through the same
+/// stroke path the text entities use (`lff::tessellate_text_ex`), so the chosen
+/// font, width factor, oblique angle and backward/upside-down flags all show up,
+/// then scales the result to fit the preview box (Y flipped: glyph space is
+/// Y-up, screen is Y-down). Height is not bound — it only scales uniformly and
+/// the fit cancels it.
+struct TextPreviewCanvas {
+    font: String,
+    /// Negative mirrors left-right (backward).
+    width_factor: f32,
+    /// Radians.
+    oblique: f32,
+    /// 0 or π (upside-down rotates 180° about the origin).
+    rotation: f32,
+}
+
+impl canvas::Program<Message> for TextPreviewCanvas {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let (strokes, _) = crate::scene::text::lff::tessellate_text_ex(
+            [0.0, 0.0],
+            9.0,
+            self.rotation,
+            self.width_factor,
+            self.oblique,
+            &self.font,
+            "AaBbCc 0123",
+        );
+        let mut min = [f32::MAX; 2];
+        let mut max = [f32::MIN; 2];
+        for s in &strokes {
+            for &[x, y] in s {
+                min[0] = min[0].min(x);
+                min[1] = min[1].min(y);
+                max[0] = max[0].max(x);
+                max[1] = max[1].max(y);
+            }
+        }
+        if min[0] > max[0] {
+            return vec![frame.into_geometry()];
+        }
+        let pad = 10.0;
+        let span = [(max[0] - min[0]).max(1e-3), (max[1] - min[1]).max(1e-3)];
+        let scale = ((bounds.width - 2.0 * pad) / span[0])
+            .min((bounds.height - 2.0 * pad) / span[1])
+            .max(0.0);
+        let mid = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
+        let center = [bounds.width * 0.5, bounds.height * 0.5];
+        let map = |x: f32, y: f32| {
+            Point::new(
+                center[0] + (x - mid[0]) * scale,
+                center[1] - (y - mid[1]) * scale,
+            )
+        };
+        let stroke = canvas::Stroke {
+            width: 1.4,
+            style: canvas::Style::Solid(TEXT),
+            ..Default::default()
+        };
+        for s in &strokes {
+            if s.len() < 2 {
+                continue;
+            }
+            let path = canvas::Path::new(|p| {
+                p.move_to(map(s[0][0], s[0][1]));
+                for &[x, y] in &s[1..] {
+                    p.line_to(map(x, y));
+                }
+            });
+            frame.stroke(&path, stroke.clone());
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
 pub fn view_window<'a>(v: TextStyleView<'a>) -> Element<'a, Message> {
     let TextStyleView {
         styles,
@@ -201,6 +287,28 @@ pub fn view_window<'a>(v: TextStyleView<'a>) -> Element<'a, Message> {
         .into()
     }
 
+    // Live preview reflecting the in-progress edits. Effective font follows the
+    // entity rule: TrueType name wins when set, else the stroke font file.
+    let eff_font = if !ttf_buf.trim().is_empty() {
+        ttf_buf
+    } else {
+        font_buf
+    };
+    let prev_base_wf = width_buf
+        .trim()
+        .parse::<f32>()
+        .unwrap_or(1.0)
+        .abs()
+        .clamp(0.01, 100.0);
+    let preview = canvas(TextPreviewCanvas {
+        font: eff_font.to_string(),
+        width_factor: if backward { -prev_base_wf } else { prev_base_wf },
+        oblique: oblique_buf.trim().parse::<f32>().unwrap_or(0.0).to_radians(),
+        rotation: if upside_down { std::f32::consts::PI } else { 0.0 },
+    })
+    .width(Fill)
+    .height(Length::Fixed(56.0));
+
     // ── Right: Properties ─────────────────────────────────────────────────
     let props_panel = container(
         column![
@@ -230,7 +338,7 @@ pub fn view_window<'a>(v: TextStyleView<'a>) -> Element<'a, Message> {
                 .text_size(11),
             Space::new().height(8),
             text("Preview").size(10).color(DIM),
-            container(text("AaBbCc 0123").size(20))
+            container(preview)
                 .style(|_: &Theme| container::Style {
                     background: Some(Background::Color(FIELD)),
                     border: Border {
@@ -240,7 +348,7 @@ pub fn view_window<'a>(v: TextStyleView<'a>) -> Element<'a, Message> {
                     },
                     ..Default::default()
                 })
-                .padding(12)
+                .padding(8)
                 .width(Fill),
         ]
         .spacing(10)
