@@ -37,7 +37,6 @@ const APP_ID: &str = "io.github.HakanSeven12.OpenCadStudio";
 /// Idempotent and best-effort; safe to call on every launch. Runs synchronously
 /// (registry / small file writes), so callers should invoke it off the UI
 /// thread.
-#[cfg(not(target_arch = "wasm32"))]
 pub fn register_as_handler() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {

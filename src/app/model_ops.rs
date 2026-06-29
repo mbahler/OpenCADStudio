@@ -469,6 +469,7 @@ impl super::OpenCADStudio {
     /// SECTION — draw the cross-section outline where an axis-aligned plane
     /// (X/Y/Z = `axis` at `value`) cuts the one selected solid, as Line entities.
     /// Reuses the mesh-interference analyzer to find the cut segments.
+    #[cfg(feature = "solid3d")]
     pub(super) fn solid_section(&mut self, axis: usize, value: f64) -> Task<Message> {
         use acadrust::types::Vector3;
         use acadrust::Line;
@@ -573,6 +574,14 @@ impl super::OpenCADStudio {
             segs.len(),
             ["X", "Y", "Z"][axis]
         ));
+        Task::none()
+    }
+
+    /// Without `solid3d` (e.g. wasm) there is no mesh-interference kernel.
+    #[cfg(not(feature = "solid3d"))]
+    pub(super) fn solid_section(&mut self, _axis: usize, _value: f64) -> Task<Message> {
+        self.command_line
+            .push_error("SECTION: solid modelling is unavailable in this build.");
         Task::none()
     }
 
