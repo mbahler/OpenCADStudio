@@ -181,8 +181,7 @@ fn tessellate_sat_lods(
     if lods.is_empty() {
         return None;
     }
-    let world_aabb = mesh_aabb(&lods[0]);
-    Some(MeshLodSet { lods, world_aabb })
+    Some(MeshLodSet::from_lods(lods))
 }
 
 /// Extract the body's placement transform from the SAT document: a row-major
@@ -243,6 +242,7 @@ fn scale_lod(base: LodConfig, facet_res: f64) -> LodConfig {
 
 /// World-XY AABB of the mesh — used by the render-pipeline LOD selector
 /// to pick a level based on projected pixel diagonal.
+#[allow(dead_code)] // superseded by mesh_model::compute_mesh_aabb (3D); kept for reference
 pub(crate) fn mesh_aabb(mesh: &MeshModel) -> [f32; 4] {
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;

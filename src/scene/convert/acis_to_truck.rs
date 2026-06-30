@@ -28,15 +28,21 @@ use acadrust::entities::acis::{
 
 use crate::scene::model::mesh_model::{MeshLodSet, MeshModel};
 use crate::scene::convert::solid3d_tess::{
-    apply_body_transform, body_transform, collect_face_loops, cone_axis_span, mesh_aabb,
+    apply_body_transform, body_transform, collect_face_loops, cone_axis_span,
 };
 
 /// Slightly over 2π so revolution builders close the loop.
 const FULL: f64 = std::f64::consts::TAU + 0.2;
 /// Boundary sampling density for planar faces with curved (circular) edges.
 const BOUNDARY_SEGS: usize = 64;
-/// Triangle mesh chord tolerance (world units).
+/// Triangle mesh chord tolerance (world units) for planar faces, where the
+/// surface itself adds no curvature.
 const MESH_TOL: f64 = 0.01;
+/// Chord tolerance for curved faces, as a fraction of the surface radius, so
+/// the facet count is radius-independent instead of exploding on large radii.
+/// `0.1` = 10% chord error (~7 facets per full circle) — a deliberately coarse
+/// setting that keeps the solid triangle budget low.
+const CURVE_REL_TOL: f64 = 0.1;
 
 /// Analytic outward-normal rule for a face, used to orient triangles and
 /// supply smooth per-vertex normals (truck's face orientation is unreliable
@@ -121,14 +127,14 @@ pub fn tessellate_sat_truck(
         let Some(surf_rec) = sat.resolve(face.surface()) else {
             continue;
         };
-        let Some((faces, outward)) = build_face_group(sat, &face, surf_rec) else {
+        let Some((faces, outward, tol)) = build_face_group(sat, &face, surf_rec) else {
             continue;
         };
         if faces.is_empty() {
             continue;
         }
         let shell: Shell = faces.into();
-        let poly = shell.triangulation(MESH_TOL).to_polygon();
+        let poly = shell.triangulation(tol).to_polygon();
         append_group(&mut mesh, &poly, &outward);
     }
 
@@ -143,11 +149,7 @@ pub fn tessellate_sat_truck(
     if let Some((m, tr, scale)) = body_transform(sat) {
         apply_body_transform(&mut mesh, &m, &tr, scale);
     }
-    let world_aabb = mesh_aabb(&mesh);
-    Some(MeshLodSet {
-        lods: vec![mesh],
-        world_aabb,
-    })
+    Some(MeshLodSet::from_lods(vec![mesh]))
 }
 
 /// Build the truck face(s) + outward rule for one analytic ACIS face.
@@ -155,7 +157,11 @@ fn build_face_group(
     sat: &SatDocument,
     face: &SatFace,
     surf_rec: &acadrust::entities::acis::SatRecord,
-) -> Option<(Vec<Face>, Outward)> {
+) -> Option<(Vec<Face>, Outward, f64)> {
+    // Chord tolerance scaled to a curved surface's radius, so the facet count
+    // is radius-independent (matching the circle/arc wire tessellation) rather
+    // than exploding on large radii.
+    let curve_tol = |radius: f64| (radius.abs() * CURVE_REL_TOL).max(1e-6);
     match surf_rec.entity_type.as_str() {
         "plane-surface" => {
             let plane = SatPlaneSurface::from_record(surf_rec)?;
@@ -166,28 +172,37 @@ fn build_face_group(
             } else {
                 [nx, ny, nz]
             };
-            Some((vec![f], Outward::Const(vnorm(n))))
+            Some((vec![f], Outward::Const(vnorm(n)), MESH_TOL))
         }
         "cone-surface" => {
             let cone = SatConeSurface::from_record(surf_rec)?;
+            let tol = curve_tol(cone.radius());
             let (faces, out) = cone_faces(sat, &cone)?;
-            Some((faces, out))
+            Some((faces, out, tol))
         }
         "sphere-surface" => {
             let sphere = SatSphereSurface::from_record(surf_rec)?;
             let (cx, cy, cz) = sphere.center();
-            Some((sphere_faces(&sphere), Outward::Sphere { center: [cx, cy, cz] }))
+            let tol = curve_tol(sphere.radius());
+            Some((
+                sphere_faces(&sphere),
+                Outward::Sphere { center: [cx, cy, cz] },
+                tol,
+            ))
         }
         "torus-surface" => {
             let torus = SatTorusSurface::from_record(surf_rec)?;
             let (cx, cy, cz) = torus.center();
             let (nx, ny, nz) = torus.normal();
+            // Tube (minor) curvature is the tighter of the two, so sampling it
+            // to the circle tolerance keeps the whole torus at least that smooth.
+            let tol = curve_tol(torus.minor_radius());
             let out = Outward::Torus {
                 center: [cx, cy, cz],
                 axis: vnorm([nx, ny, nz]),
                 major: torus.major_radius(),
             };
-            Some((torus_faces(&torus), out))
+            Some((torus_faces(&torus), out, tol))
         }
         _ => None,
     }

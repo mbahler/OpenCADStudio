@@ -65,7 +65,9 @@ pub struct MeshGpu {
     /// `(a,b)(b,c)(c,a)`. Used by the wireframe-mode render path so 3D
     /// solids draw as their triangle edges without needing the
     /// `POLYGON_MODE_LINE` device feature.
+    #[allow(dead_code)] // only the highlight overlay builds MeshGpu now (fill only)
     pub wire_index_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
     pub wire_index_count: u32,
 }
 
@@ -79,6 +81,7 @@ pub struct MeshLodGpu {
 /// How a solid mesh is highlighted this frame.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum Highlight {
+    #[allow(dead_code)] // the highlight overlay only builds Selected / Hover
     None,
     /// Hovered — light orange wash.
     Hover,
@@ -97,7 +100,104 @@ impl Highlight {
     }
 }
 
+// ── Batched mesh buffers ──────────────────────────────────────────────────
+//
+// One MeshGpu per solid means one vertex/index bind + draw call per solid —
+// ~10k draw calls a frame on a heavy 3D model, which strangles the GPU front
+// end. The batch concatenates every solid's LOD0 geometry into a handful of
+// large buffers (split only to stay under the 256 MB per-buffer cap), so the
+// whole mesh set draws in a few calls. Vertices already carry their own colour,
+// so no per-mesh state is needed between draws. Built once per geometry epoch —
+// selection/hover no longer rebuild it (that tint is dropped in the batch path).
+
+/// Cap on vertices per batch buffer: 40 B/vertex × 6 M ≈ 240 MB, under the
+/// default 256 MB `max_buffer_size`. Solids beyond the cap spill into the next
+/// chunk.
+const BATCH_MAX_VERTS: usize = 6_000_000;
+
+pub struct MeshBatchChunk {
+    pub vertex_buffer: wgpu::Buffer,
+    pub index_buffer: wgpu::Buffer,
+    pub index_count: u32,
+    pub wire_index_buffer: wgpu::Buffer,
+    pub wire_index_count: u32,
+}
+
+fn make_chunk(
+    device: &wgpu::Device,
+    verts: &[MeshVertex],
+    indices: &[u32],
+    wire_indices: &[u32],
+) -> MeshBatchChunk {
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("mesh.batch.vbuf"),
+        contents: bytemuck::cast_slice(verts),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("mesh.batch.ibuf"),
+        contents: bytemuck::cast_slice(indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    let wire_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("mesh.batch.wire_ibuf"),
+        contents: bytemuck::cast_slice(wire_indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    MeshBatchChunk {
+        vertex_buffer,
+        index_buffer,
+        index_count: indices.len() as u32,
+        wire_index_buffer,
+        wire_index_count: wire_indices.len() as u32,
+    }
+}
+
+/// Concatenate every set's first non-empty LOD into a few large GPU buffers.
+/// Returns the chunks plus the total triangle count drawn (for diagnostics).
+pub fn build_mesh_batch(device: &wgpu::Device, sets: &[MeshLodSet]) -> (Vec<MeshBatchChunk>, u64) {
+    let mut chunks = Vec::new();
+    let mut verts: Vec<MeshVertex> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut wire_indices: Vec<u32> = Vec::new();
+    let mut total_tris = 0u64;
+    for set in sets {
+        let Some(mesh) = set.lods.iter().find(|m| !m.indices.is_empty()) else {
+            continue;
+        };
+        if !verts.is_empty() && verts.len() + mesh.verts.len() > BATCH_MAX_VERTS {
+            chunks.push(make_chunk(device, &verts, &indices, &wire_indices));
+            verts.clear();
+            indices.clear();
+            wire_indices.clear();
+        }
+        let base = verts.len() as u32;
+        let has_normals = mesh.normals.len() == mesh.verts.len();
+        for (i, &pos) in mesh.verts.iter().enumerate() {
+            verts.push(MeshVertex {
+                position: pos,
+                normal: if has_normals { mesh.normals[i] } else { [0.0, 1.0, 0.0] },
+                color: mesh.color,
+                position_low: mesh.verts_low.get(i).copied().unwrap_or([0.0; 3]),
+            });
+        }
+        for &idx in &mesh.indices {
+            indices.push(base + idx);
+        }
+        for tri in mesh.indices.chunks_exact(3) {
+            let (a, b, c) = (base + tri[0], base + tri[1], base + tri[2]);
+            wire_indices.extend_from_slice(&[a, b, b, c, c, a]);
+        }
+        total_tris += (mesh.indices.len() / 3) as u64;
+    }
+    if !indices.is_empty() {
+        chunks.push(make_chunk(device, &verts, &indices, &wire_indices));
+    }
+    (chunks, total_tris)
+}
+
 impl MeshLodGpu {
+    #[allow(dead_code)] // built by the bypassed per-mesh upload_meshes path
     pub fn new(device: &wgpu::Device, set: &MeshLodSet, highlight: Highlight) -> Self {
         Self {
             lods: set

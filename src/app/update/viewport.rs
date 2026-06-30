@@ -2255,7 +2255,7 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
                                             // parent Insert (AutoCAD behaviour).
                                             scene::pick::hit_test::click_hit_insert_hatch(
                                                 p,
-                                                &self.tabs[i].scene.insert_hatches_for_click(),
+                                                &self.tabs[i].scene.insert_hatches_for_click()[..],
                                                 view_rot,
                                                 eye,
                                                 bounds,
@@ -2781,7 +2781,7 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
                     .or_else(|| {
                         scene::pick::hit_test::click_hit_insert_hatch(
                             p,
-                            &self.tabs[i].scene.insert_hatches_for_click(),
+                            &self.tabs[i].scene.insert_hatches_for_click()[..],
                             view_rot,
                             eye,
                             bounds,

@@ -138,6 +138,51 @@ pub fn click_hits_all<'a>(
 /// mesh triangle to screen space and test whether the cursor lands inside it.
 /// Returns the front-most hit (smallest projected depth). Lets meshed solids
 /// (whose only wire geometry is thin edges) be selected on their faces.
+/// Conservative broad-phase: does the solid's 3D AABB project to a screen rect
+/// that the cursor falls within (± `CLICK_THRESHOLD_PX`)? Lets the caller skip
+/// ray-testing the triangles of solids whose footprint isn't under the cursor —
+/// O(solids) cheap projections instead of O(triangles) per hover. Returns
+/// `true` (don't cull) whenever any corner is at/behind the camera, where the
+/// projected rect can't be trusted.
+///
+/// `world_aabb` is `[min_x, min_y, max_x, max_y]`, `z_aabb` is `[min_z, max_z]`,
+/// and `view_proj` is the same matrix `mesh_click_hit` projects vertices with.
+pub fn aabb_under_cursor(
+    world_aabb: [f32; 4],
+    z_aabb: [f32; 2],
+    cursor: Point,
+    view_proj: Mat4,
+    eye: glam::DVec3,
+    bounds: Rectangle,
+) -> bool {
+    let [min_x, min_y, max_x, max_y] = world_aabb;
+    let [min_z, max_z] = z_aabb;
+    if !min_x.is_finite() || !min_z.is_finite() {
+        return true; // degenerate bound — don't cull
+    }
+    let (mut sx0, mut sy0, mut sx1, mut sy1) =
+        (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for &z in &[min_z, max_z] {
+        for &(x, y) in &[(min_x, min_y), (max_x, min_y), (min_x, max_y), (max_x, max_y)] {
+            let rel = glam::DVec3::new(x as f64 - eye.x, y as f64 - eye.y, z as f64 - eye.z)
+                .as_vec3();
+            let clip = view_proj * rel.extend(1.0);
+            if clip.w <= 1e-6 {
+                return true; // corner at/behind the camera — can't bound; keep it
+            }
+            let ndc = clip.truncate() / clip.w;
+            let px = (ndc.x + 1.0) * 0.5 * bounds.width;
+            let py = (1.0 - ndc.y) * 0.5 * bounds.height;
+            sx0 = sx0.min(px);
+            sy0 = sy0.min(py);
+            sx1 = sx1.max(px);
+            sy1 = sy1.max(py);
+        }
+    }
+    let m = CLICK_THRESHOLD_PX;
+    cursor.x >= sx0 - m && cursor.x <= sx1 + m && cursor.y >= sy0 - m && cursor.y <= sy1 + m
+}
+
 pub fn mesh_click_hit<'a>(
     cursor: Point,
     meshes: impl Iterator<Item = (Handle, &'a MeshModel)>,

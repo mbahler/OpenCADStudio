@@ -570,6 +570,7 @@ fn offset_mesh_lod_set(mut set: MeshLodSet) -> MeshLodSet {
     if min_x.is_finite() {
         set.world_aabb = [min_x, min_y, max_x, max_y];
     }
+    set.recompute_aabb();
     set
 }
 
@@ -626,6 +627,7 @@ fn transform_block_mesh_lod_set(
     if min_x.is_finite() {
         out.world_aabb = [min_x, min_y, max_x, max_y];
     }
+    out.recompute_aabb();
     out
 }
 
@@ -762,6 +764,12 @@ pub struct Scene {
     image_cache: RefCell<Option<(u64, Arc<Vec<ImageModel>>)>>,
     /// Cached mesh models, keyed by geometry_epoch.
     mesh_cache: RefCell<Option<(u64, Arc<Vec<MeshLodSet>>)>>,
+    /// Cached block-INSERT hatches for hit-testing, keyed by geometry_epoch.
+    /// Building this explodes every model-space INSERT, so without the cache a
+    /// heavy block-instanced drawing re-explodes thousands of inserts on every
+    /// hover. The set is geometry-derived, so a camera move / hover never
+    /// invalidates it.
+    insert_hatch_cache: RefCell<Option<(u64, Arc<Vec<(Handle, HatchModel)>>)>>,
     /// Per-viewport wire cache for paper-space rendering.
     /// Maps vp_handle → (geometry_epoch, Arc<Vec<WireModel>>).
     viewport_wire_cache: RefCell<HashMap<Handle, ((u64, u32, u64), Arc<Vec<WireModel>>)>>,
@@ -935,6 +943,7 @@ impl Scene {
             wipeout_cache: RefCell::new(None),
             image_cache: RefCell::new(None),
             mesh_cache: RefCell::new(None),
+            insert_hatch_cache: RefCell::new(None),
             viewport_wire_cache: RefCell::new(HashMap::default()),
             paper_sheet_cache: RefCell::new(None),
             paper_projected_cache: RefCell::new(HashMap::default()),
@@ -2528,7 +2537,43 @@ impl Scene {
     /// handle so a click on a block-internal hatch can select the parent
     /// Insert (AutoCAD behaviour: sub-entities of a block aren't directly
     /// selectable; the click resolves to the Insert).
-    pub fn insert_hatches_for_click(&self) -> Vec<(Handle, HatchModel)> {
+    /// Whether a block definition (recursively) contains any Hatch. Memoised in
+    /// `memo` across calls; lets the pick path skip exploding solid-only blocks.
+    fn block_has_hatch(
+        &self,
+        block_name: &str,
+        memo: &mut std::collections::HashMap<String, bool>,
+    ) -> bool {
+        if let Some(&v) = memo.get(block_name) {
+            return v;
+        }
+        // Seed `false` first so a cyclic block reference terminates.
+        memo.insert(block_name.to_string(), false);
+        let result = self
+            .document
+            .block_records
+            .get(block_name)
+            .map(|br| {
+                br.entity_handles.iter().any(|&h| match self.document.get_entity(h) {
+                    Some(EntityType::Hatch(_)) => true,
+                    Some(EntityType::Insert(ins)) => self.block_has_hatch(&ins.block_name, memo),
+                    _ => false,
+                })
+            })
+            .unwrap_or(false);
+        memo.insert(block_name.to_string(), result);
+        result
+    }
+
+    pub fn insert_hatches_for_click(&self) -> Arc<Vec<(Handle, HatchModel)>> {
+        {
+            let c = self.insert_hatch_cache.borrow();
+            if let Some((epoch, ref arc)) = *c {
+                if epoch == self.geometry_epoch {
+                    return Arc::clone(arc);
+                }
+            }
+        }
         let layout_block = self.current_layout_block_handle();
         let layer_hidden = |layer: &str| {
             self.document
@@ -2538,6 +2583,10 @@ impl Scene {
                 .unwrap_or(false)
         };
         let mut out: Vec<(Handle, HatchModel)> = Vec::new();
+        // Exploding an INSERT to find block-internal hatches is expensive, so
+        // skip blocks that contain no hatch at all (the common case for solid-
+        // only blocks). The hatch-presence test is memoised across inserts.
+        let mut hatch_memo: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
         for entity in self.document.entities() {
             let EntityType::Insert(ins) = entity else {
                 continue;
@@ -2550,6 +2599,9 @@ impl Scene {
                 ins.common.owner_handle,
                 layout_block,
             ) {
+                continue;
+            }
+            if !self.block_has_hatch(&ins.block_name, &mut hatch_memo) {
                 continue;
             }
             for sub in ins
@@ -2569,7 +2621,9 @@ impl Scene {
                 }
             }
         }
-        out
+        let arc = Arc::new(out);
+        *self.insert_hatch_cache.borrow_mut() = Some((self.geometry_epoch, Arc::clone(&arc)));
+        arc
     }
 
     /// Wires that should participate in hit-testing, snapping, and selection.
@@ -2672,35 +2726,30 @@ impl Scene {
         eye: glam::DVec3,
         bounds: iced::Rectangle,
     ) -> Option<Handle> {
-        // Block-internal instances must be owned (transformed copies); keep
-        // them in a Vec and chain references alongside the top-level meshes so
-        // neither set is cloned wholesale.
-        let mut block_owned: Vec<(Handle, crate::scene::model::mesh_model::MeshModel)> = Vec::new();
-        if !self.block_meshes.is_empty() {
-            let layout_block = self.current_layout_block_handle();
-            for e in self.document.entities() {
-                if e.common().owner_handle != layout_block {
-                    continue;
-                }
-                let EntityType::Insert(ins) = e else { continue };
-                if !self.mesh_entity_visible(ins.common.handle) {
-                    continue;
-                }
-                let mut sets = Vec::new();
-                self.expand_block_meshes(&ins.block_name, &ins.get_transform(), 0, None, &mut sets);
-                for set in sets {
-                    if let Some(m) = set.lods.into_iter().next() {
-                        block_owned.push((ins.common.handle, m));
-                    }
-                }
+        // Reuse the renderer's expanded mesh set (top-level solids + per-INSERT
+        // block instances), cached per geometry epoch — so hover no longer
+        // re-expands every block instance on each move. Every `MeshLodSet`
+        // carries its handle (in `mesh.name`) and a 3D AABB.
+        let meshes = self.meshes_arc();
+        // Broad-phase: project each solid's 3D AABB and skip the per-triangle
+        // ray test for those whose footprint isn't under the cursor — O(solids)
+        // cheap projections instead of O(total triangles) on every hover.
+        let candidates = meshes.iter().filter_map(|set| {
+            let m = set.lods.first()?;
+            if !pick::hit_test::aabb_under_cursor(
+                set.world_aabb,
+                set.z_aabb,
+                cursor,
+                view_rot,
+                eye,
+                bounds,
+            ) {
+                return None;
             }
-        }
-        let top = self
-            .meshes
-            .iter()
-            .filter_map(|(h, set)| set.lods.first().map(|m| (*h, m)));
-        let blk = block_owned.iter().map(|(h, m)| (*h, m));
-        pick::hit_test::mesh_click_hit(cursor, top.chain(blk), view_rot, eye, bounds)
+            let handle = Handle::new(m.name.parse::<u64>().ok()?);
+            Some((handle, m))
+        });
+        pick::hit_test::mesh_click_hit(cursor, candidates, view_rot, eye, bounds)
     }
 
     /// Parent INSERT handles whose block-internal solid meshes fall in a

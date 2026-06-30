@@ -43,30 +43,55 @@ pub struct MeshLodSet {
     /// by the per-frame LOD selector to compute the projected pixel
     /// diagonal.
     pub world_aabb: [f32; 4],
+    /// World Z extent `[min_z, max_z]`. With `world_aabb` this is the full 3D
+    /// box, which the pick path projects to a screen rect to skip solids whose
+    /// footprint isn't under the cursor (O(solids) instead of ray-testing every
+    /// triangle). `verts` carry only the high half of the double-single
+    /// position, so the bound is f32-precise — fine for a conservative cull.
+    pub z_aabb: [f32; 2],
+}
+
+/// 3D bounds of every LOD's vertices: `([min_x, min_y, max_x, max_y], [min_z, max_z])`.
+pub fn compute_mesh_aabb(lods: &[MeshModel]) -> ([f32; 4], [f32; 2]) {
+    let (mut min_x, mut min_y, mut min_z) = (f32::INFINITY, f32::INFINITY, f32::INFINITY);
+    let (mut max_x, mut max_y, mut max_z) =
+        (f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for lod in lods {
+        for &[x, y, z] in &lod.verts {
+            if !x.is_finite() || !y.is_finite() || !z.is_finite() {
+                continue;
+            }
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            min_z = min_z.min(z);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+            max_z = max_z.max(z);
+        }
+    }
+    ([min_x, min_y, max_x, max_y], [min_z, max_z])
 }
 
 impl MeshLodSet {
+    /// Build a set from its LODs, computing the 3D AABB.
+    pub fn from_lods(lods: Vec<MeshModel>) -> Self {
+        let (world_aabb, z_aabb) = compute_mesh_aabb(&lods);
+        Self { lods, world_aabb, z_aabb }
+    }
+
     /// Wrap a single MeshModel as a one-LOD set. Used by interactive
     /// commands that only produce one tessellation (e.g. truck-based
     /// BOX/CYLINDER creation). The LOD selector will pick slot 0 for
     /// every zoom level.
     pub fn from_single(mesh: MeshModel) -> Self {
-        let mut min_x = f32::INFINITY;
-        let mut min_y = f32::INFINITY;
-        let mut max_x = f32::NEG_INFINITY;
-        let mut max_y = f32::NEG_INFINITY;
-        for &[x, y, _] in &mesh.verts {
-            if !x.is_finite() || !y.is_finite() {
-                continue;
-            }
-            if x < min_x { min_x = x; }
-            if y < min_y { min_y = y; }
-            if x > max_x { max_x = x; }
-            if y > max_y { max_y = y; }
-        }
-        Self {
-            lods: vec![mesh],
-            world_aabb: [min_x, min_y, max_x, max_y],
-        }
+        Self::from_lods(vec![mesh])
+    }
+
+    /// Recompute `world_aabb` / `z_aabb` after the LODs' vertices were rewritten
+    /// (relative-to-eye re-split, INSERT transform).
+    pub fn recompute_aabb(&mut self) {
+        let (xy, z) = compute_mesh_aabb(&self.lods);
+        self.world_aabb = xy;
+        self.z_aabb = z;
     }
 }

@@ -263,6 +263,16 @@ impl shader::Primitive for Primitive {
                 if geo_changed {
                     inner.upload_images(device, queue, &vp.images[..]);
                 }
+                inner.cached_epoch = cur_key;
+            }
+            // Face3D edge/fill buffers are world-space and selection-independent
+            // (upload_face3d takes no selection input), so they only change with
+            // the geometry or the 3D-fill toggle — never on a pan/orbit. Gating
+            // here on `(geometry_epoch, face3d_fill_active)` instead of inside the
+            // `cur_key` block (which carries `camera_generation`) stops a camera
+            // move from re-walking every wire to rebuild the Face3D fill buffer.
+            let face3d_key = (vp.geometry_epoch, face3d_fill_active);
+            if face3d_key != inner.cached_face3d_key {
                 inner.upload_face3d(
                     device,
                     &vp.face3d_wires[..],
@@ -270,7 +280,7 @@ impl shader::Primitive for Primitive {
                     !face3d_fill_active,
                     &vp.draw_depths,
                 );
-                inner.cached_epoch = cur_key;
+                inner.cached_face3d_key = face3d_key;
             }
             // Wire buffers are world-space, so a camera move alone doesn't
             // change them — only the view_proj uniform (uploaded every frame).
@@ -298,18 +308,25 @@ impl shader::Primitive for Primitive {
                 );
                 inner.cached_selection = sel_key;
             }
-            // Solid meshes carry their selection/hover tint baked into the
-            // vertex colours, so re-upload them when the geometry OR the
-            // highlight set changes.
-            let mesh_key = (vp.geometry_epoch, vp.selection_generation);
-            if mesh_key != inner.cached_mesh_key {
-                inner.upload_meshes(
+            // Batched solid meshes — geometry-only, so they ride the geometry
+            // epoch alone and stay resident across camera moves and selection /
+            // hover changes (no per-pick rebuild of the whole solid set).
+            if vp.geometry_epoch != inner.cached_mesh_batch_epoch {
+                inner.upload_mesh_batch(device, &vp.meshes[..]);
+                inner.cached_mesh_batch_epoch = vp.geometry_epoch;
+            }
+            // Selection / hover highlight overlay — tinted copies of just the
+            // picked solids, rebuilt only when the highlight set (or geometry)
+            // changes. Drawn over the static batch so the base never re-packs.
+            let hl_key = (vp.geometry_epoch, vp.selection_generation);
+            if hl_key != inner.cached_highlight_key {
+                inner.upload_mesh_highlight(
                     device,
                     &vp.meshes[..],
                     &vp.selected_handles,
                     vp.hover_handle,
                 );
-                inner.cached_mesh_key = mesh_key;
+                inner.cached_highlight_key = hl_key;
             }
             // Live overlay (command preview / interim / grip drag) — small and
             // refreshed every frame it's present, so a drag never re-uploads
