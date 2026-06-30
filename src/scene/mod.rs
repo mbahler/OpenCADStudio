@@ -212,7 +212,7 @@ pub fn build_derived_caches(doc: &CadDocument) -> DerivedCaches {
     // bg is only relevant after the user enters a paper layout, and
     // `synced_hatch_models` re-runs `render_style` per-frame anyway so
     // the per-layout adaptation kicks in later regardless).
-    const LOAD_BG: [f32; 4] = [0.11, 0.11, 0.11, 1.0];
+    const LOAD_BG: [f32; 4] = [33.0 / 255.0, 40.0 / 255.0, 48.0 / 255.0, 1.0];
 
     // hatches
     let hatches: HashMap<Handle, HatchModel> = hatch_handles
@@ -946,7 +946,7 @@ impl Scene {
             solid_models: HashMap::default(),
             images: HashMap::default(),
             active_viewport: None,
-            bg_color: [0.11, 0.11, 0.11, 1.0],
+            bg_color: [33.0 / 255.0, 40.0 / 255.0, 48.0 / 255.0, 1.0],
             paper_bg_color: [1.0, 1.0, 1.0, 1.0],
             local_extent_max: 1e9,
             local_center: [0.0, 0.0],

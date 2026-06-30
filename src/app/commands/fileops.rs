@@ -228,17 +228,30 @@ impl OpenCADStudio {
 
             // ── Background color ───────────────────────────────────────────
             // Usage:  BACKGROUND <r> <g> <b>      (0–255 each)
-            //         BACKGROUND WHITE|BLACK|GRAY|DARKGRAY|LTGRAY   (preset)
-            //         BACKGROUND RESET            (restore default)
+            //         BACKGROUND DEFAULT|BLACK|DARKGRAY|GRAY|LIGHTGRAY|WHITE  (preset)
+            //         BACKGROUND DEFAULT          (restore the app default, rgb 33,40,48)
             // The chosen colour is also stored as the persisted default
             // (`default_bg_color` / `default_paper_bg_color`) so it survives
             // restarts and applies to new drawings (#188).
-            cmd if cmd == "BACKGROUND" || cmd.starts_with("BACKGROUND ") => {
+            // Bare BACKGROUND enters an interactive prompt for the colour, so
+            // the command works both as a one-shot (`BACKGROUND BLACK`) and as a
+            // type-then-choose flow (`BACKGROUND` ⏎, then `BLACK`). The prompt
+            // delegates back to the inline handler below via `Dispatch`.
+            "BACKGROUND" => {
+                use crate::command::ValuePromptCommand;
+                let c = ValuePromptCommand::new(
+                    "BACKGROUND",
+                    "BACKGROUND  colour [Default/Black/DarkGray/Gray/LightGray/White] or R G B (0–255):",
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("BACKGROUND ") => {
                 let args = cmd.split_whitespace().skip(1).collect::<Vec<_>>();
                 let is_paper = self.tabs[i].scene.current_layout != "Model";
                 if args
                     .first()
-                    .map(|s| s.eq_ignore_ascii_case("RESET"))
+                    .map(|s| s.eq_ignore_ascii_case("DEFAULT") || s.eq_ignore_ascii_case("RESET"))
                     .unwrap_or(false)
                 {
                     if is_paper {
@@ -247,7 +260,7 @@ impl OpenCADStudio {
                         self.default_paper_bg_color = None;
                     } else {
                         self.tabs[i].bg_color = None;
-                        self.tabs[i].scene.bg_color = [0.11, 0.11, 0.11, 1.0];
+                        self.tabs[i].scene.bg_color = [33.0 / 255.0, 40.0 / 255.0, 48.0 / 255.0, 1.0];
                         self.default_bg_color = None;
                     }
                     // Wire colour adaptation (`adapt_to_bg`) reads the bg
@@ -285,7 +298,7 @@ impl OpenCADStudio {
                     // `persist_settings_if_changed()`.
                 } else {
                     self.command_line.push_info(
-                        "Usage: BACKGROUND <r> <g> <b> (0–255) | WHITE|BLACK|GRAY|DARKGRAY|LTGRAY | RESET",
+                        "Usage: BACKGROUND <r> <g> <b> (0–255) | DEFAULT|BLACK|DARKGRAY|GRAY|LIGHTGRAY|WHITE",
                     );
                 }
             }

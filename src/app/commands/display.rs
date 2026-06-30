@@ -821,7 +821,7 @@ impl OpenCADStudio {
             }
 
             "POINTCLOUDATTACH" | "RECAP" | "SYNCPVIEWPORTS" | "UNDERLAYLAYERS" | "OBJECTSCALE"
-            | "UOSNAP" | "OPTIONS" => {
+            | "UOSNAP" => {
                 self.command_line
                     .push_info(&format!("{cmd}: not yet implemented."));
             }
