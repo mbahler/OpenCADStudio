@@ -1105,7 +1105,11 @@ impl OpenCADStudio {
                 || self.mtext_editor.as_ref().is_some_and(|e| e.show_preview)
                 || self.text_inline.is_some();
         let command_line_overlay =
-            iced::widget::container(self.command_line.view(allow_autocomplete, dyn_capturing))
+            iced::widget::container(self.command_line.view(
+                allow_autocomplete,
+                dyn_capturing,
+                &self.history_content,
+            ))
                 .width(Fill)
                 .height(Fill)
                 .align_x(iced::alignment::Horizontal::Center)
@@ -1583,9 +1587,21 @@ impl OpenCADStudio {
                                 "z" if !shift => Some(Message::Undo),
                                 "z" if shift => Some(Message::Redo),
                                 "y" => Some(Message::Redo),
-                                "c" => Some(Message::Command("COPYCLIP".to_string())),
-                                "x" => Some(Message::Command("CUTCLIP".to_string())),
-                                "v" => Some(Message::PasteShortcut),
+                                // Clipboard accelerators defer to a focused
+                                // text widget: when the command-line history
+                                // editor (or any text field) captures Ctrl+C/
+                                // X/V it copies/cuts/pastes its own text and
+                                // marks the event Captured, so we must NOT also
+                                // fire the drawing's COPYCLIP/CUTCLIP/paste.
+                                // Only when nothing captured (the drawing has
+                                // focus, status Ignored) do these run. (#232)
+                                "c" if status == Status::Ignored => {
+                                    Some(Message::Command("COPYCLIP".to_string()))
+                                }
+                                "x" if status == Status::Ignored => {
+                                    Some(Message::Command("CUTCLIP".to_string()))
+                                }
+                                "v" if status == Status::Ignored => Some(Message::PasteShortcut),
                                 _ => None,
                             },
                             // Printable glyphs are already handled by the

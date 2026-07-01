@@ -194,6 +194,10 @@ pub(super) struct OpenCADStudio {
     ribbon: Ribbon,
     app_menu: AppMenu,
     command_line: CommandLine,
+    /// Read-only editor buffer backing the command-line history dropdown, so
+    /// the log can be drag-selected across lines and copied (issue #232).
+    /// Rebuilt from the history each time the dropdown is opened.
+    history_content: iced::widget::text_editor::Content,
     status_bar: StatusBar,
     cursor_pos: Point,
     vp_size: (f32, f32),
@@ -1176,6 +1180,16 @@ pub enum Message {
     CommandHistoryNext,
     /// Toggle the dropdown listing the full command-line history.
     CommandHistoryToggle,
+    /// Copy the full command-line history (every line) to the system
+    /// clipboard as plain text — issue #232, so output can be pasted for
+    /// debugging instead of screenshotted.
+    CommandHistoryCopy,
+    /// Clear every line from the command-line history.
+    CommandHistoryClear,
+    /// Text-editor action from the read-only history dropdown. Only
+    /// non-editing actions (cursor moves, selection, scroll) are applied so
+    /// the log stays read-only while remaining drag-selectable and copyable.
+    CommandHistoryEdit(iced::widget::text_editor::Action),
     /// User clicked an autocomplete suggestion — fill the input with
     /// the chosen command name and dispatch it.
     CommandSuggestionPick(String),
@@ -1906,6 +1920,7 @@ impl OpenCADStudio {
             ribbon: Ribbon::new(),
             app_menu,
             command_line: CommandLine::new(),
+            history_content: iced::widget::text_editor::Content::new(),
             status_bar: StatusBar::new(),
             cursor_pos: Point::ORIGIN,
             vp_size: (1280.0, 720.0),

@@ -3,7 +3,9 @@
 use iced::time::Instant;
 
 use crate::app::Message;
-use iced::widget::{button, column, container, opaque, row, scrollable, text, text_input};
+use iced::widget::{
+    button, column, container, opaque, row, text, text_editor, text_input, Space,
+};
 use iced::{Background, Border, Color, Element, Length, Theme};
 
 pub const CMD_INPUT_ID: &str = "cmd_input";
@@ -224,6 +226,25 @@ impl CommandLine {
         self.history_open = false;
     }
 
+    /// The whole history flattened to plain text, one entry per line, for the
+    /// clipboard-copy button (issue #232). Entries carry no per-line prefix
+    /// beyond what `push_*` already baked into `text` (e.g. "Command: "), so
+    /// the pasted block reads the same as the on-screen log.
+    pub fn history_plain_text(&self) -> String {
+        self.history
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Drop every history line. The step-prompt mirror is reset too so a
+    /// later step still repins correctly.
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+        self.step_prompt = None;
+    }
+
     /// Move the autocomplete highlight up one entry. Wraps to the last
     /// match. Returns `true` when there was a list to navigate.
     pub fn autocomplete_prev(&mut self) -> bool {
@@ -268,7 +289,12 @@ impl CommandLine {
         ranked_matches(self.input.trim())
     }
 
-    pub fn view(&self, show_autocomplete: bool, dyn_capturing: bool) -> Element<'_, Message> {
+    pub fn view<'a>(
+        &'a self,
+        show_autocomplete: bool,
+        dyn_capturing: bool,
+        history_content: &'a text_editor::Content,
+    ) -> Element<'a, Message> {
         // Only the most recent entries pushed within the last few
         // seconds show on the overlay. The dropdown button keeps the
         // full backlog reachable when the user actually wants it.
@@ -420,30 +446,63 @@ impl CommandLine {
             .spacing(4)
             .align_y(iced::Center);
 
-        // Full backlog dropdown — appears ABOVE the input pill when
-        // open. The history `Vec` already contains every line pushed
-        // since startup; render them all (newest at the bottom) in a
-        // scrollable. `opaque` wraps the panel so mouse-wheel events
-        // inside the dropdown don't bubble through to the viewport
-        // shader behind it (otherwise scrolling the history zoomed
-        // the drawing). `anchor_bottom` keeps the newest line in view
-        // when the dropdown first opens.
-        let dropdown: Element<'_, Message> = if self.history_open {
-            let mut col = column![].spacing(0).width(Length::Fill);
-            for entry in &self.history {
-                let color = match entry.kind {
-                    EntryKind::Command => CMD_COLOR,
-                    EntryKind::Output => OUT_COLOR,
-                    EntryKind::Error => ERR_COLOR,
-                    EntryKind::Info => INFO_COLOR,
-                };
-                col = col.push(
-                    container(text(&entry.text).size(11).color(color)).padding([1, 8]),
-                );
-            }
-            let panel = container(
-                scrollable(col).anchor_bottom().width(Length::Fill),
+        // Full backlog dropdown — appears ABOVE the input pill when open. The
+        // whole log is rendered in ONE read-only `text_editor` (backed by
+        // `history_content`) rather than per-line labels, so a single mouse
+        // drag selects across lines and Ctrl+C copies the lot — issue #232.
+        // Edits are dropped in the update handler, keeping it read-only. The
+        // editor scrolls internally past `max_height`; `opaque` stops its
+        // mouse-wheel events bubbling to the viewport shader behind it (else
+        // scrolling the history zoomed the drawing).
+        let dropdown: Element<'a, Message> = if self.history_open {
+            let log = text_editor(history_content)
+                .on_action(Message::CommandHistoryEdit)
+                .size(11)
+                .padding([2, 8])
+                .max_height(180.0)
+                .style(|_: &Theme, _status| text_editor::Style {
+                    background: Background::Color(PANEL_BG),
+                    border: Border::default(),
+                    placeholder: OUT_COLOR,
+                    value: CMD_COLOR,
+                    selection: Color {
+                        r: 0.20,
+                        g: 0.44,
+                        b: 0.72,
+                        a: 0.5,
+                    },
+                });
+            // Header strip: a Copy-all and a Clear button pinned above the log.
+            let copy_btn = button(
+                row![
+                    crate::ui::icons::tinted(crate::ui::icons::COPY, 11.0, PROMPT_COLOR),
+                    text("Copy").size(11).color(CMD_COLOR),
+                ]
+                .spacing(4)
+                .align_y(iced::Center),
             )
+            .on_press(Message::CommandHistoryCopy)
+            .style(header_btn_style)
+            .padding([2, 6]);
+            let clear_btn = button(
+                row![
+                    crate::ui::icons::tinted(crate::ui::icons::TRASH, 11.0, ERR_COLOR),
+                    text("Clear").size(11).color(CMD_COLOR),
+                ]
+                .spacing(4)
+                .align_y(iced::Center),
+            )
+            .on_press(Message::CommandHistoryClear)
+            .style(header_btn_style)
+            .padding([2, 6]);
+            let header = container(
+                row![Space::new().width(Length::Fill), copy_btn, clear_btn]
+                    .spacing(6)
+                    .align_y(iced::Center),
+            )
+            .width(Length::Fill)
+            .padding([2, 6]);
+            let panel = container(column![header, log])
                 .style(|_: &Theme| container::Style {
                     background: Some(Background::Color(PANEL_BG)),
                     border: Border {
@@ -454,7 +513,6 @@ impl CommandLine {
                     ..Default::default()
                 })
                 .width(Length::Fill)
-                .max_height(200.0)
                 .padding([4, 0]);
             opaque(panel).into()
         } else {
@@ -525,6 +583,31 @@ pub fn ranked_matches(needle: &str) -> Vec<&'static str> {
     matches.sort_by_key(|cmd| (!cmd.starts_with(&needle), *cmd));
     matches.truncate(AUTOCOMPLETE_LIMIT);
     matches
+}
+
+/// Flat button style for the history dropdown's Copy / Clear strip: a subtle
+/// filled pill that brightens on hover.
+fn header_btn_style(_: &Theme, status: button::Status) -> button::Style {
+    let bg = if matches!(status, button::Status::Hovered) {
+        Color {
+            r: 0.24,
+            g: 0.24,
+            b: 0.24,
+            a: 1.0,
+        }
+    } else {
+        INPUT_ROW_BG
+    };
+    button::Style {
+        background: Some(Background::Color(bg)),
+        text_color: Color::WHITE,
+        border: Border {
+            color: BORDER_COLOR,
+            width: 1.0,
+            radius: 3.0.into(),
+        },
+        ..Default::default()
+    }
 }
 
 const PANEL_BG: Color = Color {

@@ -49,6 +49,7 @@ pub const CHECK: &[u8] = include_bytes!("../../assets/icons/ui/check.svg");
 pub const CLOSE: &[u8] = include_bytes!("../../assets/icons/ui/close.svg");
 pub const PLUS: &[u8] = include_bytes!("../../assets/icons/ui/plus.svg");
 pub const TRASH: &[u8] = include_bytes!("../../assets/icons/ui/trash.svg");
+pub const COPY: &[u8] = include_bytes!("../../assets/icons/ui/copy.svg");
 pub const MENU: &[u8] = include_bytes!("../../assets/icons/ui/menu.svg");
 pub const MOVE: &[u8] = include_bytes!("../../assets/icons/ui/move.svg");
 pub const SPLIT_V: &[u8] = include_bytes!("../../assets/icons/ui/split_v.svg");

@@ -774,6 +774,41 @@ impl OpenCADStudio {
 
             Message::CommandHistoryToggle => {
                 self.command_line.toggle_history();
+                // On open, snapshot the current log into the read-only editor
+                // buffer so it can be drag-selected across lines and copied.
+                if self.command_line.history_open {
+                    use iced::widget::text_editor::{Action, Motion};
+                    self.history_content = iced::widget::text_editor::Content::with_text(
+                        &self.command_line.history_plain_text(),
+                    );
+                    // Scroll to the newest line (bottom), the most useful when
+                    // opening the log to grab a recent error.
+                    self.history_content.perform(Action::Move(Motion::DocumentEnd));
+                }
+                Task::none()
+            }
+
+            Message::CommandHistoryCopy => {
+                let text = self.command_line.history_plain_text();
+                if text.is_empty() {
+                    Task::none()
+                } else {
+                    iced::clipboard::write(text)
+                }
+            }
+
+            Message::CommandHistoryClear => {
+                self.command_line.clear_history();
+                self.history_content = iced::widget::text_editor::Content::new();
+                Task::none()
+            }
+
+            Message::CommandHistoryEdit(action) => {
+                // Read-only: drop edits, keep selection / cursor / scroll so
+                // the user can still highlight and Ctrl+C the log.
+                if !action.is_edit() {
+                    self.history_content.perform(action);
+                }
                 Task::none()
             }
 
