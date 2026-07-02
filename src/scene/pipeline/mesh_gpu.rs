@@ -110,11 +110,6 @@ impl Highlight {
 // so no per-mesh state is needed between draws. Built once per geometry epoch —
 // selection/hover no longer rebuild it (that tint is dropped in the batch path).
 
-/// Cap on vertices per batch buffer: 40 B/vertex × 6 M ≈ 240 MB, under the
-/// default 256 MB `max_buffer_size`. Solids beyond the cap spill into the next
-/// chunk.
-const BATCH_MAX_VERTS: usize = 6_000_000;
-
 pub struct MeshBatchChunk {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
@@ -155,7 +150,21 @@ fn make_chunk(
 
 /// Concatenate every set's first non-empty LOD into a few large GPU buffers.
 /// Returns the chunks plus the total triangle count drawn (for diagnostics).
+///
+/// Every emitted buffer stays under the device's `max_buffer_size` (default
+/// 256 MB). Both the vertex buffer (`size_of::<MeshVertex>()` B/vert) and the
+/// wire-index buffer (6 u32 = 24 B/triangle — the fattest index buffer) are
+/// bounded; a single mesh too large for one chunk is split into triangle-soup
+/// sub-chunks so an XREF-heavy model can never overflow a single buffer (#203).
 pub fn build_mesh_batch(device: &wgpu::Device, sets: &[MeshLodSet]) -> (Vec<MeshBatchChunk>, u64) {
+    // Derive the caps from the real device limit and vertex size. The previous
+    // fixed 6 M-vertex cap assumed 40 B/vertex, but `position_low` (RTE) grew
+    // MeshVertex to 52 B, so 6 M × 52 B = 312 MB blew past the 256 MB cap.
+    let budget = (device.limits().max_buffer_size as usize / 10) * 9; // 10% headroom
+    let vsize = std::mem::size_of::<MeshVertex>();
+    let max_verts = (budget / vsize).max(3);
+    let max_tris = (budget / (6 * 4)).max(1); // wire-index buffer: 6 u32 per tri
+
     let mut chunks = Vec::new();
     let mut verts: Vec<MeshVertex> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
@@ -165,21 +174,59 @@ pub fn build_mesh_batch(device: &wgpu::Device, sets: &[MeshLodSet]) -> (Vec<Mesh
         let Some(mesh) = set.lods.iter().find(|m| !m.indices.is_empty()) else {
             continue;
         };
-        if !verts.is_empty() && verts.len() + mesh.verts.len() > BATCH_MAX_VERTS {
+        let has_normals = mesh.normals.len() == mesh.verts.len();
+        let vtx = |vi: usize| MeshVertex {
+            position: mesh.verts[vi],
+            normal: if has_normals { mesh.normals[vi] } else { [0.0, 1.0, 0.0] },
+            color: mesh.color,
+            position_low: mesh.verts_low.get(vi).copied().unwrap_or([0.0; 3]),
+        };
+        let mesh_tris = mesh.indices.len() / 3;
+        total_tris += mesh_tris as u64;
+
+        // A single mesh larger than a whole chunk: emit as triangle-soup
+        // sub-chunks (corners expanded, no vertex sharing) so each buffer fits.
+        if mesh.verts.len() > max_verts || mesh_tris > max_tris {
+            if !verts.is_empty() {
+                chunks.push(make_chunk(device, &verts, &indices, &wire_indices));
+                verts.clear();
+                indices.clear();
+                wire_indices.clear();
+            }
+            let tris_per = (max_verts / 3).min(max_tris).max(1);
+            let mut t = 0;
+            while t < mesh_tris {
+                let end = (t + tris_per).min(mesh_tris);
+                let (mut sv, mut si, mut swi) = (Vec::new(), Vec::new(), Vec::new());
+                for tri in t..end {
+                    let ix = &mesh.indices[tri * 3..tri * 3 + 3];
+                    let b = sv.len() as u32;
+                    sv.push(vtx(ix[0] as usize));
+                    sv.push(vtx(ix[1] as usize));
+                    sv.push(vtx(ix[2] as usize));
+                    si.extend_from_slice(&[b, b + 1, b + 2]);
+                    swi.extend_from_slice(&[b, b + 1, b + 1, b + 2, b + 2, b]);
+                }
+                chunks.push(make_chunk(device, &sv, &si, &swi));
+                t = end;
+            }
+            continue;
+        }
+
+        // Flush when adding this mesh would overflow either the vertex buffer
+        // or the wire-index buffer.
+        if !verts.is_empty()
+            && (verts.len() + mesh.verts.len() > max_verts
+                || wire_indices.len() / 6 + mesh_tris > max_tris)
+        {
             chunks.push(make_chunk(device, &verts, &indices, &wire_indices));
             verts.clear();
             indices.clear();
             wire_indices.clear();
         }
         let base = verts.len() as u32;
-        let has_normals = mesh.normals.len() == mesh.verts.len();
-        for (i, &pos) in mesh.verts.iter().enumerate() {
-            verts.push(MeshVertex {
-                position: pos,
-                normal: if has_normals { mesh.normals[i] } else { [0.0, 1.0, 0.0] },
-                color: mesh.color,
-                position_low: mesh.verts_low.get(i).copied().unwrap_or([0.0; 3]),
-            });
+        for i in 0..mesh.verts.len() {
+            verts.push(vtx(i));
         }
         for &idx in &mesh.indices {
             indices.push(base + idx);
@@ -188,7 +235,6 @@ pub fn build_mesh_batch(device: &wgpu::Device, sets: &[MeshLodSet]) -> (Vec<Mesh
             let (a, b, c) = (base + tri[0], base + tri[1], base + tri[2]);
             wire_indices.extend_from_slice(&[a, b, b, c, c, a]);
         }
-        total_tris += (mesh.indices.len() / 3) as u64;
     }
     if !indices.is_empty() {
         chunks.push(make_chunk(device, &verts, &indices, &wire_indices));
