@@ -5,6 +5,7 @@ pub mod common;
 pub mod dimension;
 pub mod ellipse;
 pub mod hatch;
+pub mod helix;
 pub mod insert;
 pub mod leader;
 pub mod line;
