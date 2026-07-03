@@ -178,6 +178,17 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                     };
                     return self.dispatch_command(&format!("VPORTS {cfg}"));
                 }
+                // Interactive system-variable value: after a bare `MIRRTEXT`
+                // (etc.) the next entry is the new value; empty Enter keeps the
+                // current setting.
+                if let Some(name) = self.pending_setvar.take() {
+                    let val = self.command_line.input.trim().to_string();
+                    self.command_line.input.clear();
+                    if val.is_empty() {
+                        return Task::none();
+                    }
+                    return self.dispatch_command(&format!("SETVAR {name} {val}"));
+                }
                 // If the user navigated the autocomplete list with the
                 // arrow keys, Enter dispatches the highlighted command
                 // rather than the partial text actually in the buffer.
@@ -412,6 +423,11 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 }
                 // Esc cancels an armed pane move.
                 if self.pane_move_from.take().is_some() {
+                    return Task::none();
+                }
+                // Esc cancels a pending system-variable value prompt.
+                if self.pending_setvar.take().is_some() {
+                    self.command_line.push_info("*Cancel*");
                     return Task::none();
                 }
                 // UCS icon: Esc ends any grip drag and clears the selection

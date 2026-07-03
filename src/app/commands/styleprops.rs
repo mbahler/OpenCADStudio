@@ -1213,8 +1213,17 @@ impl OpenCADStudio {
                         Ok((msg, changed)) => {
                             if changed {
                                 self.tabs[i].dirty = true;
+                                self.command_line.push_output(&msg);
+                            } else {
+                                // Queried with no value (`changed == false`):
+                                // prompt for a new value on the next line instead
+                                // of only echoing the current one. Enter keeps it.
+                                let current = msg.split('=').nth(1).map(str::trim).unwrap_or("");
+                                self.command_line.push_output(&format!(
+                                    "Enter new value for {name} <{current}>:"
+                                ));
+                                self.pending_setvar = Some(name.clone());
                             }
-                            self.command_line.push_output(&msg);
                         }
                         Err(e) => self.command_line.push_error(&e),
                     }

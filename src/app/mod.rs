@@ -274,6 +274,10 @@ pub(super) struct OpenCADStudio {
     /// `true` after a bare `VPORTS` in model space — the next command-line
     /// entry is treated as the tiled-config option (SIngle/2H/2V/4).
     awaiting_vports: bool,
+    /// Set to the variable name after a bare system-variable query (e.g. a lone
+    /// `MIRRTEXT`) — the next command-line entry is its new value, empty keeps
+    /// the current one.
+    pending_setvar: Option<String>,
     /// Cursor is hovering over the UCS icon body — drives the hover highlight.
     ucs_icon_hover: bool,
     /// UCS icon is selected (clicked): its grips are shown and draggable.
@@ -1958,6 +1962,7 @@ impl OpenCADStudio {
             default_bg_color: None,
             default_paper_bg_color: None,
             awaiting_vports: false,
+            pending_setvar: None,
             ucs_icon_hover: false,
             ucs_icon_selected: false,
             ucs_grip_drag: None,
