@@ -33,7 +33,7 @@ fn text_valign_str(a: &acadrust::entities::TextVerticalAlignment) -> &'static st
     }
 }
 
-fn sync_text_alignment_point(t: &mut Text) {
+pub(crate) fn sync_text_alignment_point(t: &mut Text) {
     let needs_alignment_point = !matches!(
         (t.horizontal_alignment, t.vertical_alignment),
         (HA::Left, VA::Baseline)

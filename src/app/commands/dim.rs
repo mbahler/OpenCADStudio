@@ -75,7 +75,10 @@ impl OpenCADStudio {
                     );
                     return Some(Task::none());
                 }
-                use acadrust::entities::{AttachmentPoint as AP, TextHorizontalAlignment as TH};
+                use acadrust::entities::{
+                    AttachmentPoint as AP, TextHorizontalAlignment as TH,
+                    TextVerticalAlignment as TV,
+                };
                 let text_align = match opt.as_str() {
                     "L" | "LEFT" | "TL" | "ML" | "BL" => Some(TH::Left),
                     "C" | "CENTER" | "TC" | "BC" => Some(TH::Center),
@@ -83,6 +86,15 @@ impl OpenCADStudio {
                     "M" | "MIDDLE" | "MC" => Some(TH::Middle),
                     "A" | "ALIGN" | "ALIGNED" => Some(TH::Aligned),
                     "F" | "FIT" => Some(TH::Fit),
+                    _ => None,
+                };
+                // Vertical band for single-line TEXT. Bare L/C/R (and Aligned/Fit
+                // and the special Middle) keep the baseline; the T*/M*/B* codes
+                // pin the top/middle/bottom of the text box.
+                let text_valign = match opt.as_str() {
+                    "TL" | "TC" | "TR" => Some(TV::Top),
+                    "ML" | "MC" | "MR" => Some(TV::Middle),
+                    "BL" | "BC" | "BR" => Some(TV::Bottom),
                     _ => None,
                 };
                 let mtext_ap = match opt.as_str() {
@@ -113,8 +125,17 @@ impl OpenCADStudio {
                     {
                         match e {
                             acadrust::EntityType::Text(t) => {
+                                let mut changed = false;
                                 if let Some(a) = text_align {
                                     t.horizontal_alignment = a;
+                                    changed = true;
+                                }
+                                if let Some(v) = text_valign {
+                                    t.vertical_alignment = v;
+                                    changed = true;
+                                }
+                                if changed {
+                                    crate::entities::text::sync_text_alignment_point(t);
                                     n += 1;
                                 }
                             }
