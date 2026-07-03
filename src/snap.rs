@@ -68,6 +68,11 @@ pub struct SnapResult {
     /// overlay can draw the dashed extension guide line back to it. `None` for
     /// every other snap type. (#238)
     pub extension_base: Option<Point>,
+    /// Second extension-guide base, set only for an extended intersection
+    /// (`snap_type == Intersection` where two extension lines cross): the
+    /// overlay draws a dashed guide from each base to the crossing so both
+    /// contributing extensions stay visible. `None` otherwise. (#247, #259)
+    pub extension_base2: Option<Point>,
 }
 
 /// Object-snap-tracking alignment: the cursor projected onto a ray from an
@@ -528,6 +533,7 @@ impl Snapper {
                         snap_type: SnapType::Grid,
                         tangent_obj: None,
                         extension_base: None,
+                        extension_base2: None,
                     });
                     best_rank = snap_priority(SnapType::Grid);
                     best_d2 = d2;
@@ -602,6 +608,7 @@ impl Snapper {
                     snap_type,
                     tangent_obj: None,
                     extension_base: None,
+                    extension_base2: None,
                 });
             }
         };
@@ -746,20 +753,39 @@ impl Snapper {
         }
 
         // ── Extension — along the extension of a segment beyond endpoints ──
+        // Every segment's line can be extended past either endpoint, so a
+        // polyline offers an extension off each of its vertices, not just the
+        // first and last (#259).
         if self.is_on(SnapType::Extension) {
             for wire in wires {
                 let n = wire.points.len();
                 if n < 2 {
                     continue;
                 }
-                // Extend beyond the first point.
-                {
-                    let p0 = wp_f64(wire, 0);
-                    let p1 = wp_f64(wire, 1);
+                for i in 0..n - 1 {
+                    let a = wp_f64(wire, i);
+                    let b = wp_f64(wire, i + 1);
+                    // NaN sentinels separate sub-paths — skip a segment spanning one.
+                    if !a.x.is_finite() || !b.x.is_finite() || (a - b).length_squared() < 1e-18 {
+                        continue;
+                    }
+                    // Beyond `a`, away from `b`.
                     if let Some(ext) = extension_snap(
                         cursor_world,
-                        p0,
-                        p0 - p1,
+                        a,
+                        a - b,
+                        view_rot,
+                        eye,
+                        bounds,
+                        self.osnap_radius_px,
+                    ) {
+                        try_pt(ext, SnapType::Extension);
+                    }
+                    // Beyond `b`, away from `a`.
+                    if let Some(ext) = extension_snap(
+                        cursor_world,
+                        b,
+                        b - a,
                         view_rot,
                         eye,
                         bounds,
@@ -768,21 +794,58 @@ impl Snapper {
                         try_pt(ext, SnapType::Extension);
                     }
                 }
-                // Extend beyond the last point.
-                {
-                    let p_last = wp_f64(wire, n - 1);
-                    let p_prev = wp_f64(wire, n - 2);
-                    if let Some(ext) = extension_snap(
-                        cursor_world,
-                        p_last,
-                        p_last - p_prev,
-                        view_rot,
-                        eye,
-                        bounds,
-                        self.osnap_radius_px,
-                    ) {
-                        try_pt(ext, SnapType::Extension);
+            }
+
+            // Extended intersection: where two segments would cross if their
+            // lines were extended. That crossing can be far from both segments,
+            // so `wire_in_range` (near-cursor segment) is the wrong gate — gather
+            // segments whose *infinite line* passes near the cursor instead, then
+            // pair them. A crossing inside both segments is a real Intersection,
+            // so skip it here (#247).
+            let filter2 = (self.osnap_radius_px * 2.0).powi(2);
+            let mut cand: Vec<(glam::DVec3, glam::DVec3)> = Vec::new();
+            for wire in wires {
+                for k in 0..wire.points.len().saturating_sub(1) {
+                    let a0 = wp_f64(wire, k);
+                    let a1 = wp_f64(wire, k + 1);
+                    if !a0.x.is_finite() || !a1.x.is_finite() {
+                        continue;
                     }
+                    let s0 = world_to_screen(a0, view_rot, eye, bounds);
+                    let s1 = world_to_screen(a1, view_rot, eye, bounds);
+                    let ex = s1.x - s0.x;
+                    let ey = s1.y - s0.y;
+                    let l2 = ex * ex + ey * ey;
+                    if l2 < 1e-6 {
+                        continue;
+                    }
+                    // Perpendicular screen distance² from the cursor to the line.
+                    let cross = ex * (cursor_screen.y - s0.y) - ey * (cursor_screen.x - s0.x);
+                    if cross * cross / l2 <= filter2 {
+                        cand.push((a0, a1));
+                    }
+                }
+            }
+            for i in 0..cand.len() {
+                let (a0, a1) = cand[i];
+                let d1 = a1 - a0;
+                for &(b0, b1) in cand.iter().skip(i + 1) {
+                    let d2 = b1 - b0;
+                    let denom = d1.x * d2.y - d1.y * d2.x;
+                    if denom.abs() < 1e-12 {
+                        continue; // parallel
+                    }
+                    let t1 = ((b0.x - a0.x) * d2.y - (b0.y - a0.y) * d2.x) / denom;
+                    let t2 = ((b0.x - a0.x) * d1.y - (b0.y - a0.y) * d1.x) / denom;
+                    if (0.0..=1.0).contains(&t1) && (0.0..=1.0).contains(&t2) {
+                        continue; // real crossing — handled by Intersection
+                    }
+                    // Emit as an Intersection, not an Extension: the crossing is
+                    // a distinct point and must outrank the per-segment extension
+                    // feet (which sit closer to the cursor on their own lines),
+                    // or the cursor would snap to a line instead of the crossing.
+                    let pt = glam::DVec3::new(a0.x + t1 * d1.x, a0.y + t1 * d1.y, a0.z);
+                    try_pt(pt, SnapType::Intersection);
                 }
             }
         }
@@ -893,6 +956,7 @@ impl Snapper {
                             snap_type: SnapType::Tangent,
                             tangent_obj: Some(tangent_obj),
                             extension_base: None,
+                            extension_base2: None,
                         });
                     }
                 }
@@ -944,18 +1008,22 @@ impl Snapper {
                         snap_type: SnapType::Center,
                         tangent_obj: None,
                         extension_base: None,
+                        extension_base2: None,
                     });
                 }
             }
         }
 
-        // If an Extension snap won, re-find the endpoint whose ray it lies on
-        // so the overlay can draw the dashed extension guide line back to it.
-        // The snapped point is on some endpoint's extension by construction, so
-        // this just identifies which one. (#238)
+        // If an Extension snap or an extended intersection won, re-find the
+        // endpoint(s) whose ray(s) it lies on so the overlay can draw the dashed
+        // guide line(s) back to them. An Extension yields one base; an extended
+        // intersection yields both crossing extensions. A genuine on-segment
+        // intersection yields none, so its guides simply don't draw. (#238, #247, #259)
         if let Some(b) = best.as_mut() {
-            if b.snap_type == SnapType::Extension {
-                b.extension_base = extension_base_screen(b.world, wires, view_rot, eye, bounds);
+            if matches!(b.snap_type, SnapType::Extension | SnapType::Intersection) {
+                let (b1, b2) = extension_bases_screen(b.world, wires, view_rot, eye, bounds);
+                b.extension_base = b1;
+                b.extension_base2 = b2;
             }
         }
 
@@ -1117,47 +1185,75 @@ fn extension_snap(
     Some(world_pt)
 }
 
-/// Given a finalized Extension snap point, return the screen position of the
-/// endpoint whose extension ray it lies on — for the dashed guide line (#238).
-/// Mirrors [`extension_snap`]'s endpoint/direction choice (beyond the first or
-/// last vertex); the nearest exactly-on-ray endpoint wins on the rare tie.
-fn extension_base_screen(
+/// Find the endpoint(s) whose outward extension the snapped point lies on, and
+/// return their screen positions so the overlay can draw a dashed guide from
+/// each back to the snap point. A lone Extension snap yields one base; an
+/// extended intersection (two extension lines crossing) yields both — so both
+/// contributing extensions stay drawn when the crossing is caught. A genuine
+/// on-segment intersection yields none: its crossing is between the endpoints,
+/// never past them (`t < 0.05`). (#238, #247, #259)
+fn extension_bases_screen(
     snapped: glam::DVec3,
     wires: &[WireModel],
     view_rot: Mat4,
     eye: glam::DVec3,
     bounds: Rectangle,
-) -> Option<Point> {
-    let mut best: Option<(f64, glam::DVec3)> = None;
+) -> (Option<Point>, Option<Point>) {
+    let snapped_screen = world_to_screen(snapped, view_rot, eye, bounds);
+    // Collect qualifying endpoints, off-ray distance measured in screen space so
+    // the tolerance stays scale-independent at UTM coordinates (a world² test
+    // would reject the crossing base once coordinates reach ~1e7).
+    let mut found: Vec<(f32, glam::DVec3, Point)> = Vec::new();
     for wire in wires {
         let n = wire.points.len();
         if n < 2 {
             continue;
         }
-        for (origin, prev) in [
-            (wp_f64(wire, 0), wp_f64(wire, 1)),
-            (wp_f64(wire, n - 1), wp_f64(wire, n - 2)),
-        ] {
-            let dir = origin - prev;
-            let len2 = dir.x * dir.x + dir.y * dir.y;
-            if len2 < 1e-12 {
+        // Match the extension snap: every segment can be extended past either
+        // endpoint, so scan them all to find the base(s) the snapped point sits on.
+        for i in 0..n - 1 {
+            let a = wp_f64(wire, i);
+            let b = wp_f64(wire, i + 1);
+            if !a.x.is_finite() || !b.x.is_finite() {
                 continue;
             }
-            let t = ((snapped.x - origin.x) * dir.x + (snapped.y - origin.y) * dir.y) / len2;
-            if t < 0.05 {
-                continue; // must be beyond the endpoint, matching extension_snap
-            }
-            // Off-ray distance²: ~0 means the snapped point genuinely lies on
-            // this endpoint's extension.
-            let on_x = origin.x + t * dir.x;
-            let on_y = origin.y + t * dir.y;
-            let off = (on_x - snapped.x).powi(2) + (on_y - snapped.y).powi(2);
-            if off < 1e-9 && best.map_or(true, |(bo, _)| off < bo) {
-                best = Some((off, origin));
+            for (origin, other) in [(a, b), (b, a)] {
+                let dir = origin - other;
+                let len2 = dir.x * dir.x + dir.y * dir.y;
+                if len2 < 1e-12 {
+                    continue;
+                }
+                let t = ((snapped.x - origin.x) * dir.x + (snapped.y - origin.y) * dir.y) / len2;
+                if t < 0.05 {
+                    continue; // must be beyond the endpoint, matching extension_snap
+                }
+                let on = glam::DVec3::new(origin.x + t * dir.x, origin.y + t * dir.y, origin.z);
+                let off = dist2(world_to_screen(on, view_rot, eye, bounds), snapped_screen);
+                if off <= 4.0 {
+                    let base = world_to_screen(origin, view_rot, eye, bounds);
+                    found.push((off, origin, base));
+                }
             }
         }
     }
-    best.map(|(_, origin)| world_to_screen(origin, view_rot, eye, bounds))
+    // Nearest-fit first, then keep up to two with distinct origins (collinear
+    // segments sharing an endpoint must not draw the same guide twice).
+    found.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut bases: [Option<Point>; 2] = [None, None];
+    let mut origins: Vec<glam::DVec3> = Vec::new();
+    for (_, origin, base) in found {
+        if origins.iter().any(|o| (*o - origin).length_squared() < 1e-12) {
+            continue;
+        }
+        origins.push(origin);
+        if bases[0].is_none() {
+            bases[0] = Some(base);
+        } else {
+            bases[1] = Some(base);
+            break;
+        }
+    }
+    (bases[0], bases[1])
 }
 
 // ── Projection helpers ────────────────────────────────────────────────────

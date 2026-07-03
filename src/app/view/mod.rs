@@ -194,6 +194,7 @@ impl OpenCADStudio {
             let sel = tab.scene.selection.borrow().clone();
             let snap_info = tab.snap_result.map(|s| (s.screen, s.snap_type));
             let snap_ext_base = tab.snap_result.and_then(|s| s.extension_base);
+            let snap_ext_base2 = tab.snap_result.and_then(|s| s.extension_base2);
 
             let grips: Vec<crate::ui::overlay::GripMarker> =
                 if tab.active_cmd.is_none() && !tab.selected_grips.is_empty() {
@@ -399,6 +400,7 @@ impl OpenCADStudio {
                 sel,
                 snap_info,
                 snap_ext_base,
+                snap_ext_base2,
                 grips,
                 ucs_icons,
                 ost_points,

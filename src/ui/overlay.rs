@@ -181,6 +181,7 @@ pub fn selection_overlay<'a>(
     selection: SelectionState,
     snap: Option<(Point, SnapType)>,
     snap_ext_base: Option<Point>,
+    snap_ext_base2: Option<Point>,
     grips: Vec<GripMarker>,
     ucs_icons: Vec<UcsIconParams>,
     ost_points: Vec<OstTrackPoint>,
@@ -197,6 +198,7 @@ pub fn selection_overlay<'a>(
         selection,
         snap,
         snap_ext_base,
+        snap_ext_base2,
         grips,
         ucs_icons,
         ost_points,
@@ -220,6 +222,9 @@ struct SelectionCanvas {
     /// Screen position of the endpoint an active Extension snap extends from,
     /// so the dashed extension guide line can be drawn back to it. (#238)
     snap_ext_base: Option<Point>,
+    /// Second extension-guide base, present only for an extended intersection so
+    /// both crossing extensions stay drawn when the crossing is caught. (#247, #259)
+    snap_ext_base2: Option<Point>,
     grips: Vec<GripMarker>,
     /// One UCS icon per Model pane (each viewport shows its own at its origin);
     /// a single entry for paper / floating-viewport. Only the active pane's
@@ -706,6 +711,33 @@ impl canvas::Program<Message> for SelectionCanvas {
                     frame.stroke(&path, stroke);
                 }
                 SnapType::Intersection => {
+                    // An extended intersection sets one or two extension bases;
+                    // draw a dashed guide from each endpoint through the crossing
+                    // so both contributing extension paths stay visible. A real
+                    // on-segment crossing carries no bases, so nothing draws here.
+                    // (#247, #259)
+                    for base in [self.snap_ext_base, self.snap_ext_base2]
+                        .into_iter()
+                        .flatten()
+                    {
+                        let dx = sp.x - base.x;
+                        let dy = sp.y - base.y;
+                        let len = (dx * dx + dy * dy).sqrt();
+                        if len > 1e-3 {
+                            let dash = canvas::Stroke {
+                                line_dash: canvas::LineDash {
+                                    segments: &[4.0, 4.0],
+                                    offset: 0,
+                                },
+                                ..canvas::Stroke::default().with_color(marker).with_width(1.0)
+                            };
+                            let tip = Point::new(
+                                sp.x + dx / len * 18.0,
+                                sp.y + dy / len * 18.0,
+                            );
+                            frame.stroke(&canvas::Path::line(base, tip), dash);
+                        }
+                    }
                     let r = 5.0_f32;
                     let p1 = canvas::Path::new(|b| {
                         b.move_to(Point::new(sp.x - r, sp.y - r));
