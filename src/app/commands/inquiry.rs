@@ -813,9 +813,16 @@ impl OpenCADStudio {
                 c.linetype.clone(),
                 c.linetype_scale,
                 c.line_weight,
+                // A dimension template also carries its dimension style, adopted
+                // as the current DIMSTYLE so the cloned dimension matches (#239).
+                match e {
+                    acadrust::EntityType::Dimension(d) => Some(d.base().style_name.clone()),
+                    _ => None,
+                },
             )
         });
-        let Some((verb, kind, layer, color, linetype, lt_scale, lw)) = info else {
+        let Some((verb, kind, layer, color, linetype, lt_scale, lw, template_dimstyle)) = info
+        else {
             self.command_line
                 .push_error("ADDSELECTED: selected object not found.");
             return Task::none();
@@ -829,6 +836,29 @@ impl OpenCADStudio {
         // Clear the selection so adopting the properties as defaults doesn't
         // rewrite the template, and so the draw starts on a clean slate.
         self.tabs[i].scene.deselect_all();
+
+        // Snapshot the current drawing defaults so the override below reverts
+        // once the launched draw command ends — ADDSELECTED must adopt the
+        // template's properties for the new object without permanently changing
+        // CLAYER / CECOLOR / CELTYPE / CELWEIGHT (issue #239).
+        let restore = crate::app::AddSelectedRestore {
+            layer_name: self.tabs[i].scene.document.header.current_layer_name.clone(),
+            layer_handle: self.tabs[i].scene.document.header.current_layer_handle,
+            color: self.tabs[i].scene.document.header.current_entity_color,
+            linetype_name: self.tabs[i].scene.document.header.current_linetype_name.clone(),
+            linetype_handle: self.tabs[i].scene.document.header.current_linetype_handle,
+            line_weight: self.tabs[i].scene.document.header.current_line_weight,
+            lt_scale: self.tabs[i].scene.document.header.current_entity_linetype_scale,
+            dimstyle_name: self.tabs[i].scene.document.header.current_dimstyle_name.clone(),
+            dimstyle_handle: self.tabs[i].scene.document.header.current_dimstyle_handle,
+            tab_active_layer: self.tabs[i].active_layer.clone(),
+            tab_layers_current: self.tabs[i].layers.current_layer.clone(),
+            ribbon_layer: self.ribbon.active_layer.clone(),
+            ribbon_color: self.ribbon.active_color,
+            ribbon_linetype: self.ribbon.active_linetype.clone(),
+            ribbon_lineweight: self.ribbon.active_lineweight,
+        };
+        self.add_selected_restore = Some(restore);
 
         // Adopt the template's general properties as the current defaults. The
         // entity-creation path stamps new objects from the tab's active layer
@@ -860,6 +890,21 @@ impl OpenCADStudio {
             header.current_line_weight = lw.value();
             header.current_entity_linetype_scale = lt_scale;
         }
+        // A dimension template also sets the current DIMSTYLE so the cloned
+        // dimension inherits the template's dimension style (#239).
+        if let Some(ds) = &template_dimstyle {
+            let ds_handle = self.tabs[i]
+                .scene
+                .document
+                .dim_styles
+                .iter()
+                .find(|s| s.name.eq_ignore_ascii_case(ds))
+                .map(|s| s.handle)
+                .unwrap_or(acadrust::types::Handle::NULL);
+            let header = &mut self.tabs[i].scene.document.header;
+            header.current_dimstyle_name = ds.clone();
+            header.current_dimstyle_handle = ds_handle;
+        }
         self.tabs[i].active_layer = layer.clone();
         self.tabs[i].layers.current_layer = layer.clone();
         self.tabs[i].dirty = true;
@@ -874,6 +919,35 @@ impl OpenCADStudio {
         ));
         // Launch the matching draw command (installs its interactive step).
         self.dispatch_command(verb)
+    }
+
+    /// Restore the drawing defaults ADDSELECTED overrode, once the draw command
+    /// it launched ends (commit / cancel / interrupt). No-op unless an
+    /// ADDSELECTED override is pending. Issue #239.
+    pub(crate) fn restore_add_selected_defaults(&mut self) {
+        let Some(r) = self.add_selected_restore.take() else {
+            return;
+        };
+        let i = self.active_tab;
+        {
+            let h = &mut self.tabs[i].scene.document.header;
+            h.current_layer_name = r.layer_name;
+            h.current_layer_handle = r.layer_handle;
+            h.current_entity_color = r.color;
+            h.current_linetype_name = r.linetype_name;
+            h.current_linetype_handle = r.linetype_handle;
+            h.current_line_weight = r.line_weight;
+            h.current_entity_linetype_scale = r.lt_scale;
+            h.current_dimstyle_name = r.dimstyle_name;
+            h.current_dimstyle_handle = r.dimstyle_handle;
+        }
+        self.tabs[i].active_layer = r.tab_active_layer;
+        self.tabs[i].layers.current_layer = r.tab_layers_current;
+        self.ribbon.active_layer = r.ribbon_layer;
+        self.ribbon.active_color = r.ribbon_color;
+        self.ribbon.active_linetype = r.ribbon_linetype;
+        self.ribbon.active_lineweight = r.ribbon_lineweight;
+        self.refresh_properties();
     }
 }
 
@@ -899,6 +973,19 @@ fn add_selected_verb(entity: &acadrust::EntityType) -> Option<&'static str> {
         EntityType::Solid(_) => "SOLID",
         EntityType::Ray(_) => "RAY",
         EntityType::XLine(_) => "XLINE",
+        // Dimensions launch the matching dimension command by their stored type
+        // (issue #239). Angular 2-line and 3-point both use DIMANGULAR.
+        EntityType::Dimension(d) => {
+            use acadrust::entities::DimensionType;
+            match d.base().dimension_type {
+                DimensionType::Linear => "DIMLINEAR",
+                DimensionType::Aligned => "DIMALIGNED",
+                DimensionType::Angular | DimensionType::Angular3Point => "DIMANGULAR",
+                DimensionType::Diameter => "DIMDIAMETER",
+                DimensionType::Radius => "DIMRADIUS",
+                DimensionType::Ordinate => "DIMORDINATE",
+            }
+        }
         _ => return None,
     })
 }

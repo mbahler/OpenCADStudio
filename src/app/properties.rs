@@ -667,6 +667,22 @@ impl OpenCADStudio {
             entity.as_entity_mut().set_layer(layer.clone());
         }
 
+        // A new dimension adopts the current dimension style (DIMSTYLE), like
+        // AutoCAD — the DIM commands leave the default "Standard" on the entity,
+        // so stamp the header's current style here. ADDSELECTED sets DIMSTYLE to
+        // the template's first, so a cloned dimension keeps its style (#239).
+        if let acadrust::EntityType::Dimension(ref mut d) = entity {
+            let cur = self.tabs[i]
+                .scene
+                .document
+                .header
+                .current_dimstyle_name
+                .clone();
+            if !cur.trim().is_empty() {
+                d.base_mut().style_name = cur;
+            }
+        }
+
         // INSUNITS: when inserting a block whose BlockRecord.units differ
         // from the host's header.insertion_units, scale the new INSERT so
         // 1 source-unit equals the matching host length. When either side

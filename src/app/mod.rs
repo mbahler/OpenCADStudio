@@ -187,6 +187,27 @@ pub struct OpenProgress {
 
 // ── Application state ──────────────────────────────────────────────────────
 
+/// Drawing defaults ADDSELECTED overrides while it draws a new object matching a
+/// template, then restores so the current layer/colour/linetype/lineweight are
+/// left unchanged (issue #239).
+struct AddSelectedRestore {
+    layer_name: String,
+    layer_handle: acadrust::types::Handle,
+    color: AcadColor,
+    linetype_name: String,
+    linetype_handle: acadrust::types::Handle,
+    line_weight: i16,
+    lt_scale: f64,
+    dimstyle_name: String,
+    dimstyle_handle: acadrust::types::Handle,
+    tab_active_layer: String,
+    tab_layers_current: String,
+    ribbon_layer: String,
+    ribbon_color: AcadColor,
+    ribbon_linetype: String,
+    ribbon_lineweight: LineWeight,
+}
+
 pub(super) struct OpenCADStudio {
     start: Instant,
     tabs: Vec<DocumentTab>,
@@ -242,6 +263,10 @@ pub(super) struct OpenCADStudio {
     otrack_active: Option<(glam::Vec3, glam::Vec3)>,
     /// Whether Tangent snap was enabled before a tangent-pick command started.
     pre_cmd_tangent: Option<bool>,
+    /// Drawing defaults captured by ADDSELECTED before it adopts the template
+    /// object's properties, restored when the launched draw command ends so
+    /// ADDSELECTED doesn't permanently change CLAYER / CECOLOR / … (issue #239).
+    add_selected_restore: Option<AddSelectedRestore>,
     /// Whether Ortho mode was temporarily suppressed by a command (e.g. RECTANG).
     rect_suppressed_ortho: bool,
     /// Orthogonal drawing constraint (F8): constrains picks to 0°/90°/180°/270°.
@@ -1949,6 +1974,7 @@ impl OpenCADStudio {
             perf_hud: false,
             cycle_candidates: None,
             pre_cmd_tangent: None,
+            add_selected_restore: None,
             rect_suppressed_ortho: false,
             ortho_mode: false,
             polar_mode: false,

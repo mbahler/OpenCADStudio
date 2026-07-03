@@ -165,6 +165,12 @@ impl OpenCADStudio {
             self.tabs[i].scene.deselect_all();
             self.refresh_properties();
         }
+        // A command just ended (any terminal result) — if it was the draw
+        // command an ADDSELECTED launched, revert the template-property override
+        // so CLAYER / CECOLOR / … are left unchanged (#239). No-op otherwise.
+        if was_active && self.tabs[i].active_cmd.is_none() {
+            self.restore_add_selected_defaults();
+        }
         task
     }
 
@@ -1385,7 +1391,7 @@ impl OpenCADStudio {
                                         verts_low,
                                         normals,
                                         indices,
-                                    } => Some(crate::scene::model::mesh_model::MeshModel {
+                                    } => Some((crate::scene::model::mesh_model::MeshModel {
                                         name: String::new(),
                                         verts,
                                         verts_low,
@@ -1393,19 +1399,22 @@ impl OpenCADStudio {
                                         indices,
                                         color,
                                         selected: false,
-                                    }),
+                                    }, solid)),
                                     _ => None,
                                 }
                             }
                             _ => None,
                         }
                     });
-                    if let Some(mut mesh) = result {
+                    if let Some((mut mesh, solid)) = result {
                         self.push_undo_snapshot(i, "EXTRUDE");
                         let new_entity = empty_solid3d();
                         let new_handle = self.tabs[i].scene.add_entity(new_entity);
                         mesh.name = format!("{}", new_handle.value());
                         self.tabs[i].scene.meshes.insert(new_handle, crate::scene::MeshLodSet::from_single(mesh));
+                        // Keep the truck B-rep so the save path can export exact
+                        // ACIS geometry (else the solid is dropped by other CAD apps).
+                        self.tabs[i].scene.solid_models.insert(new_handle, solid);
                         self.tabs[i].dirty = true;
                         self.command_line.push_output("EXTRUDE: solid created.");
                     } else {

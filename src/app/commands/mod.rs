@@ -66,6 +66,9 @@ impl OpenCADStudio {
         if self.tabs[i].active_cmd.is_some() {
             self.tabs[i].scene.clear_preview_wire();
             self.tabs[i].active_cmd = None;
+            // Interrupting an ADDSELECTED draw with another command reverts its
+            // template-property override too (#239).
+            self.restore_add_selected_defaults();
         }
         // Starting any command leaves interactive PAN mode (the PAN arm below
         // re-enables it).
