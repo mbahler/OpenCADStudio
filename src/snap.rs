@@ -253,6 +253,13 @@ impl Snapper {
             self.dwell_acquired = false;
             return;
         }
+        // With OTRACK off, acquisition is Extension-driven, and Extension tracks
+        // a line only from a real segment endpoint — so acquire endpoints only.
+        // This stops a paused cursor on an extension foot (or a midpoint/centre)
+        // from being acquired and evicting, through the 4-point cap, the very
+        // endpoint the user acquired — the reason the marker vanished after a
+        // few pauses (#262). OTRACK keeps acquiring any snap point.
+        let endpoints_only = !self.otrack_enabled;
         // The cursor must rest near a snap point for this long before it is
         // acquired, so that brushing past snap points while moving the mouse
         // does not create accidental tracking points.
@@ -263,7 +270,7 @@ impl Snapper {
             None => {
                 // Leaving all geometry: capture the point we were dwelling on if
                 // it qualified, before the reset loses it.
-                self.acquire_on_leave(now, DWELL_MS, wires);
+                self.acquire_on_leave(now, DWELL_MS, wires, endpoints_only);
                 self.last_snap_world = None;
                 self.dwell_since = None;
                 self.dwell_acquired = false;
@@ -298,14 +305,14 @@ impl Snapper {
                                     self.tracking_dirs.remove(idx);
                                 }
                             }
-                            None => self.acquire_tracking_point(p, wires),
+                            None => self.acquire_tracking_point(p, wires, endpoints_only),
                         }
                     }
                 } else {
                     // Moved to a different snap point: capture the previous one
                     // first if it was dwelt on long enough, so a pause-then-drag
                     // gesture reliably acquires it even without in-place events.
-                    self.acquire_on_leave(now, DWELL_MS, wires);
+                    self.acquire_on_leave(now, DWELL_MS, wires, endpoints_only);
                     self.last_snap_world = Some(p);
                     self.dwell_since = Some(now);
                     self.dwell_acquired = false;
@@ -318,12 +325,19 @@ impl Snapper {
     /// it is already tracked; drops the oldest when the 4-point cap is reached.
     /// Edge directions are scanned once here, at acquisition, so OTRACK can align
     /// to a segment's extension without rescanning geometry per move (#219).
-    fn acquire_tracking_point(&mut self, p: Vec3, wires: &[WireModel]) {
+    fn acquire_tracking_point(&mut self, p: Vec3, wires: &[WireModel], endpoints_only: bool) {
         if self
             .tracking_points
             .iter()
             .any(|t| (*t - p).length() < self.grid_spacing * 0.1)
         {
+            return;
+        }
+        // Edge directions double as an endpoint test: a point with no incident
+        // segment — a midpoint, centre, intersection or extension foot — has
+        // none. Extension-driven acquisition (#262) keeps only endpoints.
+        let dirs = edge_dirs_at(p, wires);
+        if endpoints_only && dirs.is_empty() {
             return;
         }
         if self.tracking_points.len() >= 4 {
@@ -333,7 +347,7 @@ impl Snapper {
             }
         }
         self.tracking_points.push(p);
-        self.tracking_dirs.push(edge_dirs_at(p, wires));
+        self.tracking_dirs.push(dirs);
     }
 
     /// If the cursor dwelt on a snap point long enough but the in-place check
@@ -341,7 +355,13 @@ impl Snapper {
     /// is only re-examined once the cursor moves off), acquire it now as the
     /// cursor leaves. This makes "pause on a corner, then drag along its edge"
     /// reliably capture the corner (#219).
-    fn acquire_on_leave(&mut self, now: Instant, dwell_ms: u128, wires: &[WireModel]) {
+    fn acquire_on_leave(
+        &mut self,
+        now: Instant,
+        dwell_ms: u128,
+        wires: &[WireModel],
+        endpoints_only: bool,
+    ) {
         if self.dwell_acquired {
             return; // already handled by the in-place branch
         }
@@ -352,7 +372,7 @@ impl Snapper {
             .dwell_since
             .map_or(0, |t| now.duration_since(t).as_millis());
         if elapsed >= dwell_ms {
-            self.acquire_tracking_point(prev, wires);
+            self.acquire_tracking_point(prev, wires, endpoints_only);
         }
     }
 
@@ -1546,5 +1566,29 @@ mod ext_tests {
         let big = 1_234_567.0_f64;
         s.tracking_points.push(Vec3::new(big as f32, 0.0, 0.0));
         assert!(s.is_tracked_endpoint(glam::DVec3::new(big, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn extension_acquisition_keeps_only_endpoints() {
+        let mut s = Snapper::default();
+        // A single line segment (0,0)-(10,0): its endpoints are vertices, its
+        // midpoint and any extension foot are not.
+        let wire = WireModel {
+            points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+            ..Default::default()
+        };
+        let wires = [wire];
+
+        // Extension-driven acquisition (endpoints_only): a midpoint — like an
+        // extension foot the cursor paused on — is ignored, so it can't fill the
+        // buffer and evict the real endpoint (#262).
+        s.acquire_tracking_point(Vec3::new(5.0, 0.0, 0.0), &wires, true);
+        assert!(s.tracking_points.is_empty());
+        // The genuine endpoint is acquired.
+        s.acquire_tracking_point(Vec3::new(10.0, 0.0, 0.0), &wires, true);
+        assert_eq!(s.tracking_points.len(), 1);
+        // OTRACK (endpoints_only = false) still acquires any snap point.
+        s.acquire_tracking_point(Vec3::new(5.0, 0.0, 0.0), &wires, false);
+        assert_eq!(s.tracking_points.len(), 2);
     }
 }
