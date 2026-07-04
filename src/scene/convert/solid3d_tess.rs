@@ -683,7 +683,7 @@ fn tess_cone_face(
     let v_dir = cross3(axis, u_dir);
 
     // Determine height and angle range from boundary vertices.
-    let (mut h_min, mut h_max, mut theta_min, mut theta_max, mut full_circle) =
+    let (mut h_min, mut h_max, mut theta_min, mut theta_max, full_circle) =
         angular_range(cx, cy, cz, axis, u_dir, v_dir, &poly);
 
     // A full cylinder/cone face is bounded by a single closed rim, so the
