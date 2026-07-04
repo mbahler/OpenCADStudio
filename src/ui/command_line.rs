@@ -44,6 +44,11 @@ pub struct CommandLine {
     /// `None` when the user hasn't yet started navigating with the
     /// arrow keys. Reset on every keystroke.
     pub autocomplete_cursor: Option<usize>,
+    /// Command names contributed by loaded plugins, refreshed whenever the
+    /// enabled-plugin set changes. Merged into autocomplete alongside the
+    /// compile-time command registry, so runtime plugin commands are typeable
+    /// and discoverable — not only reachable via ribbon buttons (#272).
+    pub dynamic_commands: Vec<String>,
     /// The active command step's prompt, mirrored here so a step change
     /// can be detected and the pinned (non-fading) history line updated.
     step_prompt: Option<String>,
@@ -277,16 +282,16 @@ impl CommandLine {
 
     /// The command name the user has currently highlighted in the
     /// autocomplete popup, if any.
-    pub fn selected_suggestion(&self) -> Option<&'static str> {
+    pub fn selected_suggestion(&self) -> Option<String> {
         let matches = self.autocomplete_matches();
         self.autocomplete_cursor
-            .and_then(|i| matches.get(i).copied())
+            .and_then(|i| matches.get(i).cloned())
     }
 
     /// Autocomplete suggestions for the current input — see
-    /// [`ranked_matches`].
-    pub fn autocomplete_matches(&self) -> Vec<&'static str> {
-        ranked_matches(self.input.trim())
+    /// [`ranked_matches`]. Includes loaded plugins' commands (#272).
+    pub fn autocomplete_matches(&self) -> Vec<String> {
+        ranked_matches(self.input.trim(), &self.dynamic_commands)
     }
 
     pub fn view<'a>(
@@ -372,8 +377,8 @@ impl CommandLine {
                 let mut col = column![].spacing(0).width(Length::Fill);
                 for (idx, cmd) in matches.iter().enumerate() {
                     let is_selected = cursor == idx;
-                    let row = button(text(*cmd).size(11).color(CMD_COLOR))
-                        .on_press(Message::CommandSuggestionPick(cmd.to_string()))
+                    let row = button(text(cmd.clone()).size(11).color(CMD_COLOR))
+                        .on_press(Message::CommandSuggestionPick(cmd.clone()))
                         .width(Length::Fill)
                         .padding([2, 8])
                         .style(move |_: &Theme, status| {
@@ -564,23 +569,32 @@ impl CommandLine {
 /// Shared by the suggestion popup and the Enter-key closest-match fallback so
 /// both agree on the top suggestion.
 ///
-/// Names come from `crate::command::all_registered_command_names()` which
-/// collects every `inventory::submit!` block placed next to a `CadCommand`
-/// impl — no central list to maintain.
-pub fn ranked_matches(needle: &str) -> Vec<&'static str> {
+/// Names come from `crate::command::all_registered_command_names()` — the
+/// compile-time `inventory` registry — merged with `dynamic`, the command names
+/// contributed by loaded plugins (runtime, so they can't be `&'static`; see
+/// #272). Returns owned strings to carry both sources.
+pub fn ranked_matches(needle: &str, dynamic: &[String]) -> Vec<String> {
     let needle = needle.trim().to_uppercase();
     if needle.is_empty() {
         return Vec::new();
     }
-    let mut matches: Vec<&'static str> = crate::command::all_registered_command_names()
+    let mut matches: Vec<String> = crate::command::all_registered_command_names()
         .into_iter()
+        .map(|cmd| cmd.to_string())
+        // Plugin names are uppercased to match the built-ins and the needle,
+        // so ranking and display stay consistent across both sources.
+        .chain(dynamic.iter().map(|cmd| cmd.to_uppercase()))
         .filter(|cmd| cmd.contains(&needle))
         .collect();
     matches.sort();
     matches.dedup();
     // Prefix matches rank above mid-string ones, then alphabetical so the
     // order is stable as the user keeps typing.
-    matches.sort_by_key(|cmd| (!cmd.starts_with(&needle), *cmd));
+    matches.sort_by(|a, b| {
+        (!a.starts_with(&needle))
+            .cmp(&!b.starts_with(&needle))
+            .then_with(|| a.cmp(b))
+    });
     matches.truncate(AUTOCOMPLETE_LIMIT);
     matches
 }
@@ -670,4 +684,28 @@ const INFO_COLOR: Color = Color {
     b: 0.90,
     a: 1.0,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::ranked_matches;
+
+    #[test]
+    fn dynamic_plugin_commands_surface_in_autocomplete() {
+        // No built-in command contains the plugin prefix, so an empty pool
+        // yields nothing — reproducing the #272 bug's blind autocomplete.
+        assert!(ranked_matches("LS_", &[]).is_empty());
+        // A loaded plugin's commands become typeable, case-insensitively, and
+        // the prefix substring surfaces every one of them.
+        let pool = vec!["LS_LABEL".to_string(), "ls_autolabel".to_string()];
+        let m = ranked_matches("LS_", &pool);
+        assert!(m.contains(&"LS_LABEL".to_string()), "got {m:?}");
+        assert!(m.contains(&"LS_AUTOLABEL".to_string()), "got {m:?}");
+    }
+
+    #[test]
+    fn builtin_commands_still_match_with_an_empty_pool() {
+        let m = ranked_matches("LINE", &[]);
+        assert!(m.iter().any(|c| c == "LINE"), "got {m:?}");
+    }
+}
 

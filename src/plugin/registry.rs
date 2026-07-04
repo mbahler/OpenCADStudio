@@ -31,6 +31,24 @@ pub fn ribbon_modules_enabled(
     core
 }
 
+/// Command names contributed by loaded external plugins whose id is **not** in
+/// `disabled` — every ribbon tool's command id plus manifest command prefixes.
+/// The host merges these into command-line autocomplete so plugin commands are
+/// discoverable by typing, not only via ribbon buttons (#272).
+pub fn plugin_command_names(disabled: &rustc_hash::FxHashSet<String>) -> Vec<String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        return crate::plugin::external::with_manager(|manager| {
+            manager.command_names(|id| disabled.contains(id))
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = disabled;
+        Vec::new()
+    }
+}
+
 /// Dispatch `cmd` to a loaded external plugin (skipping disabled ones).
 /// Returns true if one handled it.
 pub(crate) fn try_dispatch(app: &mut OpenCADStudio, tab: usize, cmd: &str) -> bool {

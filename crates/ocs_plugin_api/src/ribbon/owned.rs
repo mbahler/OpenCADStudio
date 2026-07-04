@@ -58,6 +58,49 @@ pub struct OwnedRibbonGroup {
     pub tools: Vec<OwnedRibbonItem>,
 }
 
+impl OwnedRibbonGroup {
+    /// Every command id a user could invoke from this group's tools. The host
+    /// feeds these into the command-line autocomplete so a loaded plugin's
+    /// commands are discoverable by typing, not just via ribbon buttons (#272).
+    pub fn command_ids(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for item in &self.tools {
+            collect_item_command_ids(item, &mut out);
+        }
+        out
+    }
+}
+
+fn push_tool_command(tool: &OwnedToolDef, out: &mut Vec<String>) {
+    if let ModuleEvent::Command(cmd) = &tool.event {
+        out.push(cmd.clone());
+    }
+}
+
+fn collect_item_command_ids(item: &OwnedRibbonItem, out: &mut Vec<String>) {
+    match item {
+        OwnedRibbonItem::Tool(t) | OwnedRibbonItem::LargeTool(t) => push_tool_command(t, out),
+        OwnedRibbonItem::Dropdown { items, .. } | OwnedRibbonItem::LargeDropdown { items, .. } => {
+            // Each entry is (command id, label, icon).
+            out.extend(items.iter().map(|(id, _, _)| id.clone()));
+        }
+        OwnedRibbonItem::LayerComboGroup { row2, row3 } => {
+            for t in row2.iter().chain(row3.iter()) {
+                push_tool_command(t, out);
+            }
+        }
+        OwnedRibbonItem::PropertiesGroup { match_prop } => push_tool_command(match_prop, out),
+        OwnedRibbonItem::StyleComboGroup { rows, manager_cmd, .. } => {
+            for t in rows.iter().flatten() {
+                push_tool_command(t, out);
+            }
+            if let Some(cmd) = manager_cmd {
+                out.push(cmd.clone());
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OwnedPluginManifest {
     pub id: String,
@@ -445,5 +488,34 @@ mod tests {
         assert_eq!(shared.id(), "opencad.demo");
         assert_eq!(cloned.title(), shared.title());
         assert_eq!(shared.ribbon_groups().len(), cloned.ribbon_groups().len());
+    }
+
+    #[test]
+    fn command_ids_covers_tools_and_dropdown_items() {
+        let group = OwnedRibbonGroup {
+            title: "Labels".to_string(),
+            tools: vec![
+                OwnedRibbonItem::Tool(OwnedToolDef {
+                    id: "ls_label".to_string(),
+                    label: "Label".to_string(),
+                    icon: OwnedIconKind::Glyph("L".to_string()),
+                    event: ModuleEvent::Command("LS_LABEL".to_string()),
+                }),
+                OwnedRibbonItem::LargeDropdown {
+                    id: "ls_menu".to_string(),
+                    label: "More".to_string(),
+                    icon: OwnedIconKind::Glyph("M".to_string()),
+                    items: vec![(
+                        "LS_AUTOLABEL".to_string(),
+                        "Auto".to_string(),
+                        OwnedIconKind::Glyph("A".to_string()),
+                    )],
+                    default: "LS_AUTOLABEL".to_string(),
+                },
+            ],
+        };
+        let ids = group.command_ids();
+        assert!(ids.contains(&"LS_LABEL".to_string()), "got {ids:?}");
+        assert!(ids.contains(&"LS_AUTOLABEL".to_string()), "got {ids:?}");
     }
 }

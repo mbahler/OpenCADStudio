@@ -194,8 +194,7 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 // rather than the partial text actually in the buffer.
                 let i_tab = self.active_tab;
                 if self.tabs[i_tab].active_cmd.is_none() {
-                    if let Some(picked) = self.command_line.selected_suggestion() {
-                        let cmd = picked.to_string();
+                    if let Some(cmd) = self.command_line.selected_suggestion() {
                         self.command_line.input.clear();
                         self.command_line.autocomplete_cursor = None;
                         return self.dispatch_command(&cmd);

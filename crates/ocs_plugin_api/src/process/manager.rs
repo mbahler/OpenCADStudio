@@ -122,6 +122,24 @@ impl PluginManager {
             .collect()
     }
 
+    /// Command names advertised by every alive, non-disabled plugin: each
+    /// ribbon tool's command id plus the manifest's `command_prefixes`. The
+    /// host merges these into command-line autocomplete so plugin commands are
+    /// discoverable by typing (#272).
+    pub fn command_names<F: Fn(&str) -> bool>(&self, is_disabled: F) -> Vec<String> {
+        let mut out = Vec::new();
+        for p in &self.plugins {
+            if is_disabled(p.process.id()) || !p.process.is_alive() {
+                continue;
+            }
+            for group in p.process.ribbon() {
+                out.append(&mut group.command_ids());
+            }
+            out.extend(p.process.manifest().command_prefixes.iter().cloned());
+        }
+        out
+    }
+
     /// Begin asynchronous shutdown of every plugin process.
     ///
     /// Kills every child synchronously on the calling thread and moves the

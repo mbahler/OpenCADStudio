@@ -148,12 +148,15 @@ impl OpenCADStudio {
         // command completes on Enter (`BAC` → `BACKGROUND`). The verb's own
         // input was already cleared, so rank against `cmd` directly.
         if allow_suggest {
-            if let Some(top) = crate::ui::command_line::ranked_matches(cmd)
-                .first()
-                .copied()
+            if let Some(top) = crate::ui::command_line::ranked_matches(
+                cmd,
+                &self.command_line.dynamic_commands,
+            )
+            .into_iter()
+            .next()
             {
                 if !top.eq_ignore_ascii_case(cmd) {
-                    return self.dispatch_command_inner(top, false);
+                    return self.dispatch_command_inner(&top, false);
                 }
             }
         }

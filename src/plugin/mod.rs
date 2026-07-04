@@ -7,7 +7,7 @@ pub mod host;
 pub mod marketplace;
 pub mod registry;
 
-pub use registry::{all_ribbon_modules, ribbon_modules_enabled};
+pub use registry::{all_ribbon_modules, plugin_command_names, ribbon_modules_enabled};
 pub(crate) use registry::try_dispatch;
 
 /// Run a plugin entry point under a panic guard so a buggy external plugin
