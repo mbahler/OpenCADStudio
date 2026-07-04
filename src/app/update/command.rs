@@ -635,7 +635,23 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                     self.tabs[i].layers.edit_buf = new_name.clone();
                 }
                 self.sync_ribbon_layers();
-                Task::none()
+                // With alphabetical ordering (#270) the new layer can land
+                // anywhere in a long list; scroll its row into view so the
+                // rename prompt is visible (#271). Offset is layout-independent
+                // (idx × fixed row height), so it holds even before the freshly
+                // added row is measured.
+                match new_idx {
+                    Some(idx) => iced::widget::operation::scroll_to(
+                        iced::advanced::widget::Id::new(
+                            crate::ui::window::layers::LAYER_TABLE_SCROLL_ID,
+                        ),
+                        iced::widget::scrollable::AbsoluteOffset {
+                            x: 0.0,
+                            y: idx as f32 * crate::ui::ROW_H,
+                        },
+                    ),
+                    None => Task::none(),
+                }
     }
 
     pub(super) fn on_layer_delete(&mut self) -> Task<Message> {

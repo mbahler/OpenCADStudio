@@ -43,6 +43,9 @@ const ICON_SZ: f32 = ROW_H * 0.62; // ≈16 px at ROW_H=26
 const FONT_SZ: f32 = ROW_H * 0.42; // ≈11 px at ROW_H=26
 /// Vertical padding for combo_box / text_input so their total height = ROW_H.
 const COMBO_PAD_V: f32 = (ROW_H - FONT_SZ * 1.3 - 2.0) / 2.0;
+/// Widget id for the layer-table scrollable, so a freshly created layer can be
+/// scrolled into view after it is added (#271).
+pub const LAYER_TABLE_SCROLL_ID: &str = "layer-manager-table-scroll";
 
 // ── Layer data ────────────────────────────────────────────────────────────
 
@@ -127,7 +130,10 @@ impl Default for LayerPanel {
             }]),
             lw_combo: combo_box::State::new(lw_options()),
             vp_cols: vec![],
-            sort_col: None,
+            // Default to alphabetical (Name) order in both the Layer Manager
+            // table and the ribbon's quick layer dropdown (#270). A header
+            // click still re-sorts by any other column.
+            sort_col: Some(LayerSortCol::Name),
             sort_asc: true,
         }
     }
@@ -384,7 +390,9 @@ impl LayerPanel {
 
         }
 
-        let table = scrollable(rows_col).height(Fill);
+        let table = scrollable(rows_col)
+            .id(iced::advanced::widget::Id::new(LAYER_TABLE_SCROLL_ID))
+            .height(Fill);
 
         // ── Full-window frame ─────────────────────────────────────────────
         container(column![toolbar, col_header, table].spacing(0))
