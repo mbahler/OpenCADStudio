@@ -1028,6 +1028,17 @@ impl Scene {
             return None;
         }
         let cam = self.camera.borrow();
+        // A world-XY rectangle only bounds the on-screen footprint in a plan
+        // (top-down) view. In a tilted / 3D view the visible area maps to a
+        // skewed world region, so an axis-aligned XY box would wrongly cull
+        // entities that are actually on screen — and because this box culls the
+        // pick wire set (while the render holds the full set), those entities
+        // render but become unselectable. Skip culling there, matching
+        // `view_cull_aabb`.
+        let fwd = cam.rotation * glam::Vec3::Z;
+        if fwd.z.abs() < 0.999 {
+            return None;
+        }
         let aspect = self.last_render_aspect.get().max(0.01);
         let h = cam.ortho_size();
         let w = h * aspect;
