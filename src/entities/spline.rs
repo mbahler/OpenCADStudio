@@ -13,6 +13,23 @@ use crate::scene::model::object::{GripApply, GripDef, PropSection};
 fn to_truck(spl: &Spline) -> TruckEntity {
     let n = spl.control_points.len();
     if n < 2 {
+        // A fit-point spline (DWG scenario 2 / R2013+) stores only the points
+        // the curve passes through — no control points or knots. Interpolate a
+        // smooth Catmull-Rom curve through them and hand it back as a dense
+        // polyline so it still draws.
+        if spl.fit_points.len() >= 2 {
+            let closed = spl.flags.closed || spl.flags.periodic;
+            let pts = catmull_rom_polyline(&spl.fit_points, closed);
+            let key_vertices: Vec<[f64; 3]> =
+                spl.fit_points.iter().map(|p| [p.x, p.y, p.z]).collect();
+            return TruckEntity {
+                object: TruckObject::Lines(pts),
+                snap_pts: vec![],
+                tangent_geoms: vec![],
+                key_vertices,
+                fill_tris: vec![],
+            };
+        }
         return TruckEntity {
             object: TruckObject::Point(builder::vertex(Point3::new(0.0, 0.0, 0.0))),
             snap_pts: vec![],
@@ -95,6 +112,60 @@ fn to_truck(spl: &Spline) -> TruckEntity {
         key_vertices,
         fill_tris: vec![],
     }
+}
+
+/// Sample a Catmull-Rom spline through `pts` into a dense polyline. The curve
+/// passes through every input point; open ends use reflected phantom points so
+/// they don't kink, closed curves wrap around.
+fn catmull_rom_polyline(pts: &[acadrust::types::Vector3], closed: bool) -> Vec<[f64; 3]> {
+    const STEPS: usize = 16;
+    let n = pts.len();
+    if n < 2 {
+        return pts.iter().map(|p| [p.x, p.y, p.z]).collect();
+    }
+    let get = |i: isize| -> [f64; 3] {
+        let j = if closed {
+            let m = n as isize;
+            (((i % m) + m) % m) as usize
+        } else {
+            i.clamp(0, n as isize - 1) as usize
+        };
+        [pts[j].x, pts[j].y, pts[j].z]
+    };
+    let seg_count = if closed { n } else { n - 1 };
+    let mut out: Vec<[f64; 3]> = Vec::with_capacity(seg_count * STEPS + 1);
+    for seg in 0..seg_count {
+        let p1 = get(seg as isize);
+        let p2 = get(seg as isize + 1);
+        // Reflect at open ends so the tangent isn't pulled toward a clamped dup.
+        let p0 = if !closed && seg == 0 {
+            [2.0 * p1[0] - p2[0], 2.0 * p1[1] - p2[1], 2.0 * p1[2] - p2[2]]
+        } else {
+            get(seg as isize - 1)
+        };
+        let p3 = if !closed && seg == seg_count - 1 {
+            [2.0 * p2[0] - p1[0], 2.0 * p2[1] - p1[1], 2.0 * p2[2] - p1[2]]
+        } else {
+            get(seg as isize + 2)
+        };
+        // Emit t in [0, 1); the final segment also emits t = 1 so the curve
+        // closes onto the last point (no duplicate shared vertices otherwise).
+        let last = if seg == seg_count - 1 { STEPS } else { STEPS - 1 };
+        for s in 0..=last {
+            let t = s as f64 / STEPS as f64;
+            let (t2, t3) = (t * t, t * t * t);
+            let mut q = [0.0f64; 3];
+            for k in 0..3 {
+                q[k] = 0.5
+                    * (2.0 * p1[k]
+                        + (-p0[k] + p2[k]) * t
+                        + (2.0 * p0[k] - 5.0 * p1[k] + 4.0 * p2[k] - p3[k]) * t2
+                        + (-p0[k] + 3.0 * p1[k] - 3.0 * p2[k] + p3[k]) * t3);
+            }
+            out.push(q);
+        }
+    }
+    out
 }
 
 fn grips(spline: &Spline) -> Vec<GripDef> {
@@ -424,3 +495,4 @@ impl crate::entities::traits::Transformable for Spline {
         apply_transform(self, t);
     }
 }
+
