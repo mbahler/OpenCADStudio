@@ -79,6 +79,11 @@ pub struct ViewportData {
     /// occluded by closer geometry are culled by the LessEqual depth
     /// test on the wire passes that follow.
     pub(in crate::scene) hidden_line: bool,
+    /// Interaction LOD: when true the (per-pixel, GPU-dominating) hatch pass is
+    /// skipped this frame because the view is actively being navigated. Folded
+    /// into the render signature so the settle frame re-renders hatches once and
+    /// the scene-render cache holds it. See [`Scene::navigating_lod`].
+    pub(in crate::scene) skip_hatch: bool,
     pub(in crate::scene) geometry_epoch: u64,
     /// Camera generation captured when this Primitive was assembled. Paired
     /// with `geometry_epoch` so the per-frame scissor / LOD recompute runs.
@@ -251,6 +256,8 @@ impl shader::Primitive for Primitive {
             let skip = inner.render_sig != u64::MAX && sig == inner.render_sig;
             inner.render_sig = sig;
             inner.skip_geometry = skip;
+            // Interaction LOD: skip the hatch draw this frame while navigating.
+            inner.skip_hatch_frame = vp.skip_hatch;
             if skip {
                 if vp.show_viewcube {
                     inner.viewcube.upload(
@@ -489,6 +496,9 @@ fn render_signature(vp: &ViewportData, clip_w: u32, clip_h: u32) -> u64 {
     vp.mesh_fill.hash(&mut h);
     vp.show_3d_edges.hash(&mut h);
     vp.hidden_line.hash(&mut h);
+    // Interaction-LOD hatch suppression: differs the signature so the settle
+    // frame (skip_hatch flips false) re-renders with hatches and re-caches.
+    vp.skip_hatch.hash(&mut h);
     clip_w.hash(&mut h);
     clip_h.hash(&mut h);
     // Live overlay (command preview / interim / grip drag). Small — a handful
@@ -1063,6 +1073,11 @@ impl Scene {
             mesh_fill: flags.mesh_fill,
             show_3d_edges: flags.show_3d_edges,
             hidden_line: flags.hidden_line,
+            // Interaction LOD: suppress the costly hatch pass while the view is
+            // actively moving; the scene-render cache holds the full-quality
+            // (hatched) frame once it settles. Only applied to the on-screen
+            // Model / paper content — the paper *sheet* keeps its fills.
+            skip_hatch: !inst.paper_sheet && self.navigating_lod(),
             geometry_epoch: self.geometry_epoch,
             camera_generation: self.camera_generation,
             wire_content_id,
