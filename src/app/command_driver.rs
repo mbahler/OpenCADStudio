@@ -1148,8 +1148,19 @@ impl OpenCADStudio {
                 use acadrust::objects::{ObjectType, PlotSettings};
                 let layout_name = self.tabs[i].scene.current_layout.clone();
                 if layout_name == "Model" {
-                    self.command_line
-                        .push_error("PLOTWINDOW: switch to a paper space layout first.");
+                    // Model space: remember the window (world X/Y) for the plot dialog.
+                    let x0 = p1.x.min(p2.x);
+                    let y0 = p1.y.min(p2.y);
+                    let x1 = p1.x.max(p2.x);
+                    let y1 = p1.y.max(p2.y);
+                    self.plot_window = Some((x0, y0, x1, y1));
+                    self.command_line.push_output(&format!(
+                        "Plot window: {x0:.2},{y0:.2} to {x1:.2},{y1:.2}"
+                    ));
+                    // Pick window closed Page Setup so the viewport could
+                    // receive the two clicks — bring it back for scale
+                    // review and the "Plot window → PDF" button.
+                    self.active_modal = Some(super::ModalKind::PageSetup);
                 } else {
                     let block_handle = self.tabs[i].scene.current_layout_block_handle_pub();
                     let doc = &mut self.tabs[i].scene.document;

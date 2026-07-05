@@ -33,7 +33,7 @@ mod zoom_in;
 mod zoom_out;
 pub mod zoom_window;
 
-use crate::modules::{CadModule, RibbonGroup, RibbonItem};
+use crate::modules::{CadModule, IconKind, ModuleEvent, RibbonGroup, RibbonItem, ToolDef};
 
 pub struct ViewModule;
 
@@ -136,6 +136,19 @@ impl CadModule for ViewModule {
                         RibbonItem::Tool(tile_vert::tool()),
                         RibbonItem::Tool(cascade::tool()),
                     ],
+                },
+                // ── Plot ──────────────────────────────────────────────────────────
+                // Model space has no paper-space side toolbar, so Page Setup
+                // (format/orientation/pick window for PLOTWINDOW) needs an
+                // entry here too.
+                RibbonGroup {
+                    title: "Plot",
+                    tools: vec![RibbonItem::Tool(ToolDef {
+                        id: "PAGESETUP",
+                        label: "Page Setup",
+                        icon: IconKind::Svg(include_bytes!("../../../assets/icons/pagesetup.svg")),
+                        event: ModuleEvent::Command("PAGESETUP".to_string()),
+                    })],
                 },
             ]
         })

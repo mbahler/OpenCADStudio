@@ -1026,6 +1026,8 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     draw_ox as f32,
                     draw_oy as f32,
                     rotation_deg,
+                    1.0,
+                    None,
                     &path,
                     self.active_plot_style.as_ref(),
                 ) {
@@ -1034,6 +1036,93 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                         path.file_name().unwrap_or_default().to_string_lossy()
                     )),
                     Err(e) => self.command_line.push_error(&format!("Export failed: {e}")),
+                }
+                Task::none()
+    }
+
+    /// Export the pending model-space plot window (set by PLOTWINDOW while on
+    /// the Model tab) to PDF, using the chosen paper size/orientation/scale.
+    pub(super) fn on_plot_window_export_path_some(&mut self, path: std::path::PathBuf) -> Task<Message> {
+                use crate::io::paper_sizes::{sheet_mm, window_to_sheet, PlotScale};
+                let i = self.active_tab;
+                if self.tabs[i].scene.current_layout != "Model" {
+                    self.command_line
+                        .push_error("Plot window export is for model space.");
+                    return Task::none();
+                }
+                let Some((x0, y0, x1, y1)) = self.plot_window else {
+                    self.command_line.push_error("No plot window. Pick one first.");
+                    return Task::none();
+                };
+                if (x1 - x0) < 1e-6 || (y1 - y0) < 1e-6 {
+                    self.command_line
+                        .push_error("Plot window is empty. Pick a larger window.");
+                    return Task::none();
+                }
+                let (sheet_w, sheet_h) = sheet_mm(self.plot_format, self.plot_orientation);
+                let win_w = (x1 - x0).max(1e-9);
+                let win_h = (y1 - y0).max(1e-9);
+                let scale_sel = if self.page_setup_scale.trim().eq_ignore_ascii_case("fit") {
+                    PlotScale::Fit
+                } else {
+                    let (num, den) = parse_plot_scale(&self.page_setup_scale);
+                    if num > 0.0 && den > 0.0 {
+                        PlotScale::Ratio(num / den)
+                    } else {
+                        PlotScale::Fit
+                    }
+                };
+                let (scale, ox, oy) =
+                    window_to_sheet((win_w, win_h), (x0, y0), (sheet_w, sheet_h), scale_sel);
+
+                let scene = &self.tabs[i].scene;
+                // Cull to the window so a small-area plot doesn't write the whole
+                // drawing into the PDF; the clip below trims the partial crossers.
+                // aabb is world X/Y [minx, miny, maxx, maxy].
+                let (wx0, wy0, wx1, wy1) = (x0 as f32, y0 as f32, x1 as f32, y1 as f32);
+                let wires: Vec<_> = scene
+                    .entity_wires()
+                    .into_iter()
+                    .filter(|w| {
+                        w.aabb[0] <= wx1 && w.aabb[2] >= wx0 && w.aabb[1] <= wy1 && w.aabb[3] >= wy0
+                    })
+                    .collect();
+                let hatches = scene.paper_canvas_hatches();
+                let wipeouts = scene.paper_canvas_wipeouts();
+
+                // build_pdf maps a wire coordinate to sheet mm as (coord + offset) *
+                // scale (rotation_deg == 0 adds no further CTM translation).
+                // window_to_sheet's (ox, oy) is the sheet-mm target for the window's
+                // min corner, so: scale * (x0 + offset_x) = ox  =>  offset_x = ox/scale - x0.
+                let offset_x = ((ox / scale) - x0) as f32;
+                let offset_y = ((oy / scale) - y0) as f32;
+                // Clip rect in pre-scale space (build_pdf's CTM applies `scale` to it,
+                // same as the wires) so the final sheet-mm rect lands at (ox, oy).
+                let clip = Some(((ox / scale) as f32, (oy / scale) as f32, win_w as f32, win_h as f32));
+
+                let res = crate::io::pdf_export::export_pdf(
+                    &wires,
+                    hatches.as_slice(),
+                    wipeouts.as_slice(),
+                    sheet_w,
+                    sheet_h,
+                    offset_x,
+                    offset_y,
+                    0,
+                    scale as f32,
+                    clip,
+                    &path,
+                    self.active_plot_style.as_ref(),
+                );
+                match res {
+                    Ok(()) => {
+                        self.command_line.push_info(&format!(
+                            "Plotted window to {}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                        self.close_active_modal();
+                    }
+                    Err(e) => self.command_line.push_error(&format!("Plot failed: {e}")),
                 }
                 Task::none()
     }

@@ -14,6 +14,7 @@ pub mod xref;
 pub mod linetypes;
 pub mod patterns;
 pub mod update_check;
+pub mod paper_sizes;
 
 use crate::scene::DerivedCaches;
 use acadrust::entities::EntityType;

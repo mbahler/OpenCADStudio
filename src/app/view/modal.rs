@@ -57,6 +57,8 @@ impl OpenCADStudio {
                     &self.page_setup_offset_y,
                     &self.page_setup_rotation,
                     &self.page_setup_scale,
+                    self.plot_format,
+                    self.plot_orientation,
                 ),
                 520,
                 460,

@@ -35,6 +35,8 @@ pub fn export_pdf(
     _offset_x: f32,
     _offset_y: f32,
     _rotation_deg: i32,
+    _scale: f32,
+    _clip: Option<(f32, f32, f32, f32)>,
     _path: &Path,
     _plot_style: Option<&PlotStyleTable>,
 ) -> Result<(), String> {
@@ -64,6 +66,8 @@ pub fn export_pdf(
     offset_x: f32,
     offset_y: f32,
     rotation_deg: i32,
+    scale: f32,
+    clip: Option<(f32, f32, f32, f32)>,
     path: &Path,
     plot_style: Option<&PlotStyleTable>,
 ) -> Result<(), String> {
@@ -76,6 +80,8 @@ pub fn export_pdf(
         offset_x,
         offset_y,
         rotation_deg,
+        scale,
+        clip,
         plot_style,
     );
     let mut file = std::fs::File::create(path).map_err(|e| e.to_string())?;
@@ -107,6 +113,8 @@ fn build_pdf(
     ox: f32,
     oy: f32,
     rotation_deg: i32,
+    scale: f32,
+    clip: Option<(f32, f32, f32, f32)>,
     plot_style: Option<&PlotStyleTable>,
 ) -> Vec<u8> {
     let mut doc = PdfDocument::new("Open CAD Studio Export");
@@ -133,32 +141,67 @@ fn build_pdf(
         join: LineJoinStyle::Round,
     });
 
-    // Apply rotation transform if needed.
+    // Apply rotation/scale/clip transform if needed.
     // PDF uses mm-based coordinate system with origin at bottom-left.
-    // We save state, apply a CTM, then restore it after drawing.
-    let needs_rotation = rotation_deg != 0;
-    if needs_rotation {
+    // We save state, apply a CTM (+ optional clip path), then restore after drawing.
+    let needs_state = rotation_deg != 0 || (scale - 1.0).abs() > 1e-6 || clip.is_some();
+    if needs_state {
         let (cos_a, sin_a, tx, ty) = match rotation_deg {
             90 => (0.0_f64, 1.0_f64, 0.0, paper_h as f64),
             180 => (-1.0_f64, 0.0_f64, paper_w as f64, paper_h as f64),
             270 => (0.0_f64, -1.0_f64, paper_w as f64, 0.0),
             _ => (1.0_f64, 0.0_f64, 0.0, 0.0),
         };
-        // PDF CTM: [a b c d e f] = [cos sin -sin cos tx ty]
+        let s = scale as f64;
+        // PDF CTM: [a b c d e f] = [cos*s sin*s -sin*s cos*s tx ty]
         ops.push(Op::SaveGraphicsState);
         // Convert mm translation to points (1 mm = 2.834645 pt).
         let tx_pt = (tx * 2.834645) as f32;
         let ty_pt = (ty * 2.834645) as f32;
         ops.push(Op::SetTransformationMatrix {
             matrix: printpdf::CurTransMat::Raw([
-                cos_a as f32,
-                sin_a as f32,
-                -(sin_a as f32),
-                cos_a as f32,
+                (cos_a * s) as f32,
+                (sin_a * s) as f32,
+                (-(sin_a) * s) as f32,
+                (cos_a * s) as f32,
                 tx_pt,
                 ty_pt,
             ]),
         });
+        // Clip rectangle (mm), applied in the pre-scale coordinate space so it
+        // matches the wires drawn under the same CTM.
+        if let Some((cx, cy, cw, ch)) = clip {
+            const MM_TO_PT: f32 = 2.834645;
+            ops.push(Op::DrawPolygon {
+                polygon: Polygon {
+                    rings: vec![PolygonRing {
+                        points: vec![
+                            LinePoint {
+                                p: Point { x: Pt(cx * MM_TO_PT), y: Pt(cy * MM_TO_PT) },
+                                bezier: false,
+                            },
+                            LinePoint {
+                                p: Point { x: Pt((cx + cw) * MM_TO_PT), y: Pt(cy * MM_TO_PT) },
+                                bezier: false,
+                            },
+                            LinePoint {
+                                p: Point {
+                                    x: Pt((cx + cw) * MM_TO_PT),
+                                    y: Pt((cy + ch) * MM_TO_PT),
+                                },
+                                bezier: false,
+                            },
+                            LinePoint {
+                                p: Point { x: Pt(cx * MM_TO_PT), y: Pt((cy + ch) * MM_TO_PT) },
+                                bezier: false,
+                            },
+                        ],
+                    }],
+                    mode: PaintMode::Clip,
+                    winding_order: WindingOrder::NonZero,
+                },
+            });
+        }
     }
 
     // mm to PDF points (1 mm = 2.834645 pt).
@@ -203,7 +246,7 @@ fn build_pdf(
                 }
                 lw_override = ctb
                     .resolve_lineweight(wire.aci)
-                    .map(|mm| (mm * MM_TO_PT).max(0.1));
+                    .map(|mm| (mm * MM_TO_PT).max(0.1) / scale.max(1e-6));
             }
         }
         // Near-white and near-yellow (viewport active border) → dark grey for print
@@ -239,8 +282,13 @@ fn build_pdf(
             last_color = Some([r, g, b]);
         }
 
-        // Line weight: CTB override (in pt) or screen px → points.
-        let lw_pt = lw_override.unwrap_or_else(|| (wire.line_weight_px * LW_PX_TO_PT).max(0.1));
+        // Line weight: CTB override (in pt) or screen px → points. Divided by
+        // `scale` in both branches so pen widths stay absolute under the
+        // scaled CTM above (AutoCAD keeps lineweights independent of plot
+        // scale) — without this a Fit plot of a large window renders
+        // near-invisible hairlines.
+        let lw_pt = lw_override
+            .unwrap_or_else(|| (wire.line_weight_px * LW_PX_TO_PT).max(0.1) / scale.max(1e-6));
         if last_lw.map(|l| (l - lw_pt).abs() > 0.01).unwrap_or(true) {
             ops.push(Op::SetOutlineThickness { pt: Pt(lw_pt) });
             last_lw = Some(lw_pt);
@@ -275,7 +323,7 @@ fn build_pdf(
         flush_line(&mut ops, &segment);
     }
 
-    if needs_rotation {
+    if needs_state {
         ops.push(Op::RestoreGraphicsState);
     }
 
@@ -439,4 +487,35 @@ fn emit_hatch(ops: &mut Vec<Op>, hatch: &HatchModel, ox: f32, oy: f32) {
             winding_order: WindingOrder::EvenOdd,
         },
     });
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clip_and_scale_emit_pdf_bytes() {
+        let w = WireModel::solid(
+            "test".into(),
+            vec![[0.0, 0.0, 0.0], [50.0, 50.0, 0.0]],
+            WireModel::WHITE,
+            false,
+        );
+        let bytes = build_pdf(
+            &[w],
+            &[],
+            &[],
+            210.0,
+            297.0,
+            0.0,
+            0.0,
+            0,
+            2.0,
+            Some((10.0, 10.0, 100.0, 100.0)),
+            None,
+        );
+        // A valid PDF is produced (starts with the PDF header) and is non-trivial.
+        assert!(bytes.starts_with(b"%PDF"), "not a PDF");
+        assert!(bytes.len() > 200, "suspiciously small: {}", bytes.len());
+    }
 }

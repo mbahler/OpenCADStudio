@@ -1,6 +1,7 @@
 //! Page Setup window — fills the entire OS window.
 
 use crate::app::Message;
+use crate::io::paper_sizes::{Orientation, PaperSize};
 use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
 use iced::{Background, Border, Color, Element, Fill, Theme};
 
@@ -154,6 +155,8 @@ pub fn view_window<'a>(
     offset_y: &'a str,
     rotation: &'a str,
     scale: &'a str,
+    plot_format: PaperSize,
+    plot_orientation: Orientation,
 ) -> Element<'a, Message> {
     // ── Toolbar ───────────────────────────────────────────────────────────
     let toolbar = container(
@@ -286,6 +289,46 @@ pub fn view_window<'a>(
     ]
     .spacing(4);
 
+    // ── Model-space window plot ───────────────────────────────────────────
+    // Sheet size/orientation for PLOTWINDOW's clipped export; the scale
+    // pills above (`scale_row1`/`scale_row2`) double as its plot scale.
+    let format_row = {
+        let mut r = row![lbl("Format")].spacing(4).align_y(iced::Center);
+        for size in PaperSize::ALL {
+            r = r.push(
+                button(text(size.label()).size(10))
+                    .on_press(Message::PlotFormat(size))
+                    .style(pill(plot_format == size))
+                    .padding([3, 8]),
+            );
+        }
+        r
+    };
+    let orient_row = row![
+        lbl("Orientation"),
+        button(text("Portrait").size(10))
+            .on_press(Message::PlotOrientation(Orientation::Portrait))
+            .style(pill(plot_orientation == Orientation::Portrait))
+            .padding([3, 8]),
+        button(text("Landscape").size(10))
+            .on_press(Message::PlotOrientation(Orientation::Landscape))
+            .style(pill(plot_orientation == Orientation::Landscape))
+            .padding([3, 8]),
+    ]
+    .spacing(4)
+    .align_y(iced::Center);
+    let window_row = row![
+        button(text("Pick window").size(10))
+            .on_press(Message::Command("PLOTWINDOW".into()))
+            .style(btn(false))
+            .padding([4, 10]),
+        button(text("Plot window → PDF").size(10))
+            .on_press(Message::PlotWindowExport)
+            .style(btn(true))
+            .padding([4, 10]),
+    ]
+    .spacing(6);
+
     // ── Main scrollable form ──────────────────────────────────────────────
     let form = column![
         section_label("Paper Size"),
@@ -366,6 +409,11 @@ pub fn view_window<'a>(
         section_label("Plot Scale"),
         scale_row1,
         scale_row2,
+        hdivider(),
+        section_label("Model-Space Window Plot"),
+        format_row,
+        orient_row,
+        window_row,
     ]
     .spacing(10)
     .padding(16)

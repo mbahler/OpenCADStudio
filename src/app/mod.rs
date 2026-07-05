@@ -525,6 +525,10 @@ pub(super) struct OpenCADStudio {
     page_setup_rotation: String,
     /// Plot scale: "Fit" | "1:1" | "1:2" | "1:4" | "1:5" | "1:10" | "1:20" | "1:50" | "1:100" | "2:1".
     page_setup_scale: String,
+    /// Pending model-space plot window (x0, y0, x1, y1) in world XY, or None.
+    plot_window: Option<(f64, f64, f64, f64)>,
+    plot_format: crate::io::paper_sizes::PaperSize,
+    plot_orientation: crate::io::paper_sizes::Orientation,
 
     // ── Plot Style Table ──────────────────────────────────────────────────
     /// Currently loaded CTB/STB table (None = no override).
@@ -1756,6 +1760,14 @@ pub enum Message {
     PlotExport,
     /// Callback after the user picks (or cancels) the export path.
     PlotExportPath(Option<std::path::PathBuf>),
+    /// User picked a paper size for the model-space window plot.
+    PlotFormat(crate::io::paper_sizes::PaperSize),
+    /// User picked a sheet orientation for the model-space window plot.
+    PlotOrientation(crate::io::paper_sizes::Orientation),
+    /// Export the pending model-space plot window (from PLOTWINDOW) to PDF.
+    PlotWindowExport,
+    /// Callback after the user picks (or cancels) the window-export path.
+    PlotWindowExportPath(Option<std::path::PathBuf>),
     /// Send current layout to the system printer (via lp / lpr).
     PrintToPrinter,
     /// Callback from the async printer job.
@@ -2102,6 +2114,9 @@ impl OpenCADStudio {
             page_setup_offset_y: "0.0".to_string(),
             page_setup_rotation: "0".to_string(),
             page_setup_scale: "Fit".to_string(),
+            plot_window: None,
+            plot_format: crate::io::paper_sizes::PaperSize::A4,
+            plot_orientation: crate::io::paper_sizes::Orientation::Landscape,
             opening: None,
             pending_close: None,
             save_dialog_format: "DWG 2018".to_string(),

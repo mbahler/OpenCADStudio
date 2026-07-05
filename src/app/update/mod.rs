@@ -850,6 +850,14 @@ impl OpenCADStudio {
                 self.tabs[i].scene.selection.borrow_mut().context_menu = None;
                 // Any command also dismisses the Isolate action menu.
                 self.isolate_popup_open = false;
+                // "Pick window" (PLOTWINDOW) from Page Setup needs the backdrop
+                // gone so the viewport pick lands; every other command leaves an
+                // open modal (and its staged edits) untouched.
+                if cmd.trim().eq_ignore_ascii_case("PLOTWINDOW")
+                    || cmd.trim().eq_ignore_ascii_case("PW")
+                {
+                    self.close_active_modal();
+                }
                 self.dispatch_command(&cmd)
             }
 
@@ -3005,6 +3013,30 @@ impl OpenCADStudio {
             }
             Message::PlotExportPath(None) => Task::none(),
             Message::PlotExportPath(Some(path)) => self.on_plot_export_path_some(path),
+
+            Message::PlotFormat(f) => {
+                self.plot_format = f;
+                Task::none()
+            }
+            Message::PlotOrientation(o) => {
+                self.plot_orientation = o;
+                Task::none()
+            }
+            Message::PlotWindowExport => {
+                let i = self.active_tab;
+                let stem = self.tabs[i]
+                    .current_path
+                    .as_deref()
+                    .and_then(|p: &std::path::Path| p.file_stem())
+                    .map(|s: &std::ffi::OsStr| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "drawing".into());
+                Task::perform(
+                    crate::io::pdf_export::pick_pdf_path_owned(stem),
+                    Message::PlotWindowExportPath,
+                )
+            }
+            Message::PlotWindowExportPath(None) => Task::none(),
+            Message::PlotWindowExportPath(Some(path)) => self.on_plot_window_export_path_some(path),
 
             // ── Print to system printer ───────────────────────────────────────
             Message::PrintToPrinter => self.on_print_to_printer(),

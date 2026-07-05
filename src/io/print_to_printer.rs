@@ -57,6 +57,8 @@ pub async fn print_wires(
         offset_x,
         offset_y,
         rotation_deg,
+        1.0,
+        None,
         &tmp_path,
         plot_style.as_ref(),
     )?;

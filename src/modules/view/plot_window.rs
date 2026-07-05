@@ -1,7 +1,7 @@
 // PLOTWINDOW command — pick two corners to define the plot window area.
 //
-// Works only in paper space layouts. After picking P1 and P2, writes the
-// window to the layout's PlotSettings (PlotType::Window).
+// In paper space it writes the layout's PlotSettings (PlotType::Window); in
+// model space the host stores the window for the plot dialog.
 
 use crate::command::{CadCommand, CmdResult};
 use crate::scene::model::wire_model::WireModel;

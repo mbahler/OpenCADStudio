@@ -509,13 +509,11 @@ impl OpenCADStudio {
                 }
             }
 
+            // Model space now has its own dialog section (window-plot format /
+            // orientation / pick), so PAGESETUP opens there too, not just on
+            // paper-space layouts.
             "PAGESETUP" => {
-                if self.tabs[i].scene.current_layout == "Model" {
-                    self.command_line
-                        .push_error("PAGESETUP: switch to a paper space layout first.");
-                } else {
-                    return Some(Task::done(Message::PageSetupOpen));
-                }
+                return Some(Task::done(Message::PageSetupOpen));
             }
 
             // ── Recognized commands whose full implementation is pending ─────────
