@@ -127,14 +127,16 @@ pub struct Snapper {
     /// segment is genuinely perpendicular to the target — without it, perp
     /// would just give the nearest point on the line. Set before each `snap`.
     pub from_point: Option<Vec3>,
-    /// Parallel snap: the acquired reference line direction (unit, XY plane).
-    /// When the cursor's direction from the command's start point runs parallel
-    /// to this, the point locks onto that parallel line. Works with only the
-    /// Parallel object snap on — independent of OTRACK (#277).
-    pub parallel_ref: Option<Vec3>,
-    /// Dwell state for acquiring `parallel_ref`: the candidate line direction
-    /// under the cursor and when it was first hovered.
-    parallel_dwell: Option<(Vec3, Instant)>,
+    /// Parallel snap: the acquired reference as (unit direction, a point on the
+    /// line). When the cursor's direction from the command's start point runs
+    /// parallel to this, the point locks onto that parallel line; the point half
+    /// marks the reference on screen. Works with only the Parallel object snap
+    /// on — independent of OTRACK (#277).
+    pub parallel_ref: Option<(Vec3, Vec3)>,
+    /// Dwell state for acquiring/removing `parallel_ref`: the candidate line
+    /// direction + point under the cursor, when it was first hovered, and
+    /// whether this dwell has already fired (so it acquires/toggles once).
+    parallel_dwell: Option<(Vec3, Vec3, Instant, bool)>,
 }
 
 impl Default for Snapper {
@@ -606,11 +608,12 @@ impl Snapper {
     }
 
     /// Parallel snap acquisition. When the Parallel object snap is on, hovering
-    /// a line (or polyline segment) for a short dwell acquires its direction as
-    /// the parallel reference; the reference persists once the cursor moves off
-    /// so the user can then draw parallel to it. Curves (circle/arc/ellipse) are
-    /// ignored — "parallel to a curve" is undefined. Call on every viewport move.
-    /// (#277)
+    /// a line (or polyline segment) for a short dwell acquires it as the parallel
+    /// reference (its direction + a point on it, which marks it on screen); the
+    /// reference persists once the cursor moves off so the user can then draw
+    /// parallel to it. Dwelling on the SAME reference line again removes it
+    /// (toggle). Curves (circle/arc/ellipse) are ignored — "parallel to a curve"
+    /// is undefined. Call on every viewport move. (#277)
     pub fn update_parallel(
         &mut self,
         cursor_world: Vec3,
@@ -626,26 +629,35 @@ impl Snapper {
             return;
         }
         const PAR_DWELL_MS: u128 = 150;
-        let hovered =
-            nearest_segment_dir(cursor_world, wires, view_rot, eye, bounds, self.osnap_radius_px);
-        match hovered {
-            Some(d) => {
-                // A line and its reverse are the same alignment.
-                let same = self
-                    .parallel_dwell
-                    .map_or(false, |(pd, _)| (pd.x * d.x + pd.y * d.y).abs() > 0.9998);
-                match self.parallel_dwell {
-                    Some((pd, since)) if same => {
-                        if now.duration_since(since).as_millis() >= PAR_DWELL_MS {
-                            self.parallel_ref = Some(pd);
-                        }
-                    }
-                    _ => self.parallel_dwell = Some((d, now)),
+        let parallel = |a: Vec3, b: Vec3| (a.x * b.x + a.y * b.y).abs() > 0.9998;
+        let Some((dir, pt)) =
+            nearest_segment(cursor_world, wires, view_rot, eye, bounds, self.osnap_radius_px)
+        else {
+            // Off all lines: drop the in-progress candidate, keep the reference.
+            self.parallel_dwell = None;
+            return;
+        };
+        // Restart the dwell when the hovered line changes (different direction,
+        // or a parallel line far from the candidate's point on screen).
+        let same_candidate = self.parallel_dwell.map_or(false, |(cd, cp, _, _)| {
+            parallel(cd, dir)
+                && screen_perp_dist(pt, cp, cd, view_rot, eye, bounds) < self.osnap_radius_px
+        });
+        match self.parallel_dwell {
+            Some((cd, cp, since, fired)) if same_candidate => {
+                if !fired && now.duration_since(since).as_millis() >= PAR_DWELL_MS {
+                    // Dwelt long enough: acquire this line, or remove it if it is
+                    // already the reference (hovering it a second time toggles).
+                    let is_ref = self.parallel_ref.map_or(false, |(rd, rp)| {
+                        parallel(rd, dir)
+                            && screen_perp_dist(pt, rp, rd, view_rot, eye, bounds)
+                                < self.osnap_radius_px
+                    });
+                    self.parallel_ref = if is_ref { None } else { Some((dir, pt)) };
+                    self.parallel_dwell = Some((cd, cp, since, true));
                 }
             }
-            // Off all lines: stop tracking a new candidate but keep the acquired
-            // reference so the user can draw parallel to it.
-            None => self.parallel_dwell = None,
+            _ => self.parallel_dwell = Some((dir, pt, now, false)),
         }
     }
 
@@ -664,7 +676,7 @@ impl Snapper {
         if !(self.snap_enabled && self.is_on(SnapType::Parallel)) {
             return None;
         }
-        let dir = self.parallel_ref?;
+        let (dir, _) = self.parallel_ref?;
         let base = base?;
         let d = cursor_world - base;
         // Need a bit of travel from the base, and the cursor must be pulling
@@ -1675,22 +1687,22 @@ fn dist2(a: Point, b: Point) -> f32 {
     dx * dx + dy * dy
 }
 
-/// Direction (unit, XY) of the nearest line / polyline segment under the
-/// cursor, within `aperture_px` in screen space, or None. Tessellated curves
-/// (circle / arc / ellipse) are skipped — they carry a Center snap hint and
-/// "parallel to a curve" is meaningless. Used to acquire the Parallel-snap
-/// reference. (#277)
-fn nearest_segment_dir(
+/// The nearest line / polyline segment under the cursor as (unit direction,
+/// world point on it), within `aperture_px` in screen space, or None.
+/// Tessellated curves (circle / arc / ellipse) are skipped — they carry a
+/// Center snap hint and "parallel to a curve" is meaningless. Used to acquire
+/// the Parallel-snap reference. (#277)
+fn nearest_segment(
     cursor_world: Vec3,
     wires: &[WireModel],
     view_rot: Mat4,
     eye: glam::DVec3,
     bounds: Rectangle,
     aperture_px: f32,
-) -> Option<Vec3> {
+) -> Option<(Vec3, Vec3)> {
     let cs = world_to_screen(cursor_world.as_dvec3(), view_rot, eye, bounds);
     let mut best_d2 = aperture_px * aperture_px;
-    let mut best_dir: Option<Vec3> = None;
+    let mut best: Option<(Vec3, Vec3)> = None;
     for wire in wires {
         if wire
             .snap_pts
@@ -1714,12 +1726,37 @@ fn nearest_segment_dir(
                 let l = (dx * dx + dy * dy).sqrt();
                 if l > 1e-9 {
                     best_d2 = d2;
-                    best_dir = Some(Vec3::new((dx / l) as f32, (dy / l) as f32, 0.0));
+                    let dir = Vec3::new((dx / l) as f32, (dy / l) as f32, 0.0);
+                    let np = nearest_on_segment(cursor_world.as_dvec3(), a, b).as_vec3();
+                    best = Some((dir, np));
                 }
             }
         }
     }
-    best_dir
+    best
+}
+
+/// Perpendicular screen-space distance (px) from world point `q` to the infinite
+/// line through `line_pt` along `line_dir`. Used to tell whether a hovered line
+/// is the acquired parallel reference (same line) regardless of zoom. (#277)
+fn screen_perp_dist(
+    q: Vec3,
+    line_pt: Vec3,
+    line_dir: Vec3,
+    view_rot: Mat4,
+    eye: glam::DVec3,
+    bounds: Rectangle,
+) -> f32 {
+    let sq = world_to_screen(q.as_dvec3(), view_rot, eye, bounds);
+    let s0 = world_to_screen(line_pt.as_dvec3(), view_rot, eye, bounds);
+    let s1 = world_to_screen((line_pt + line_dir).as_dvec3(), view_rot, eye, bounds);
+    let ex = s1.x - s0.x;
+    let ey = s1.y - s0.y;
+    let l = (ex * ex + ey * ey).sqrt();
+    if l < 1e-6 {
+        return dist2(sq, s0).sqrt();
+    }
+    (ex * (sq.y - s0.y) - ey * (sq.x - s0.x)).abs() / l
 }
 
 /// Squared distance from point p to line segment [a, b] in screen space.

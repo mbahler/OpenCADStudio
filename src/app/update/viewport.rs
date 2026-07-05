@@ -951,7 +951,7 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
                             eye,
                             bounds,
                         ) {
-                            if let (Some(base), Some(dir)) =
+                            if let (Some(base), Some((dir, _))) =
                                 (self.last_point, self.snapper.parallel_ref)
                             {
                                 self.otrack_active = Some((base, dir));

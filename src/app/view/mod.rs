@@ -386,6 +386,15 @@ impl OpenCADStudio {
                     }
                     _ => None,
                 };
+            // The acquired Parallel-snap reference, marked on its line (#277).
+            let parallel_ref_marker: Option<iced::Point> =
+                match (otrack_proj, self.snapper.parallel_ref) {
+                    (Some((view_rot, eye, ob)), Some((_, pt))) => {
+                        let s = ost_project(pt, view_rot, eye, ob);
+                        (s.x.is_finite() && s.y.is_finite()).then_some(s)
+                    }
+                    _ => None,
+                };
 
             // Model-space pane dividers (none in paper / single-pane layouts).
             let dividers = if !is_paper {
@@ -437,6 +446,7 @@ impl OpenCADStudio {
                 ucs_icons,
                 ost_points,
                 otrack_line,
+                parallel_ref_marker,
                 !is_paper && self.show_viewcube,
                 dividers,
                 pane_move_rect,

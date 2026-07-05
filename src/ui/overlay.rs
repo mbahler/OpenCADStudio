@@ -186,6 +186,7 @@ pub fn selection_overlay<'a>(
     ucs_icons: Vec<UcsIconParams>,
     ost_points: Vec<OstTrackPoint>,
     otrack_line: Option<(Point, Point)>,
+    parallel_ref_marker: Option<Point>,
     show_viewcube: bool,
     dividers: Vec<iced::Rectangle>,
     pane_move_rect: Option<iced::Rectangle>,
@@ -203,6 +204,7 @@ pub fn selection_overlay<'a>(
         ucs_icons,
         ost_points,
         otrack_line,
+        parallel_ref_marker,
         show_viewcube,
         dividers,
         pane_move_rect,
@@ -236,6 +238,9 @@ struct SelectionCanvas {
     /// cursor so the extension / tracking line the user snapped to is visible.
     /// (#219)
     otrack_line: Option<(Point, Point)>,
+    /// The acquired Parallel-snap reference point (screen), marked with a small
+    /// ∥ glyph so the user sees which line is the parallel reference. (#277)
+    parallel_ref_marker: Option<Point>,
     show_viewcube: bool,
     /// Divider bars (pixel rects, canvas-relative) between Model panes — drawn
     /// as filled lines and used to suppress the crosshair over a divider.
@@ -1042,6 +1047,25 @@ impl canvas::Program<Message> for SelectionCanvas {
                 };
                 frame.stroke(&canvas::Path::line(p0, p1), dash);
             }
+        }
+        // The acquired Parallel-snap reference — a small ∥ glyph on its line so
+        // the user sees which line the parallel is measured from. (#277)
+        if let Some(m) = self.parallel_ref_marker {
+            let stroke = canvas::Stroke::default()
+                .with_color(track_color)
+                .with_width(1.5);
+            let r = 6.0_f32;
+            let off = 3.0_f32;
+            let b1 = canvas::Path::new(|b| {
+                b.move_to(Point::new(m.x - r - off, m.y + r));
+                b.line_to(Point::new(m.x + r - off, m.y - r));
+            });
+            let b2 = canvas::Path::new(|b| {
+                b.move_to(Point::new(m.x - r + off, m.y + r));
+                b.line_to(Point::new(m.x + r + off, m.y - r));
+            });
+            frame.stroke(&b1, stroke.clone());
+            frame.stroke(&b2, stroke);
         }
         // Small cross at each acquired tracking point.
         for ost in &self.ost_points {
