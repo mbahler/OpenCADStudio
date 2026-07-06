@@ -66,25 +66,68 @@ pub fn layout_glyph_quads(
         [sx * cos_r - sy * sin_r, sx * sin_r + sy * cos_r]
     };
 
+    use crate::scene::text::lff::{tokenize_run, Deco, Op, Tok};
+
+    // Decoration line positions (glyph units) and half-thickness — mirror the
+    // stroke tessellator's constants so SDF decorations align with strokes.
+    const UNDER_Y: f32 = -1.5;
+    const OVER_Y: f32 = 10.5;
+    const STRIKE_Y: f32 = 4.5;
+    const DECO_HALF: f32 = 0.35;
+
+    let solid = atlas.solid_uv();
     let face = Face::resolve(font_name);
     let mut cursor_x = 0.0f32;
     let mut quads = Vec::new();
+    // Open decoration runs (pen x where each turned on) and the spans to draw.
+    let mut under: Option<f32> = None;
+    let mut over: Option<f32> = None;
+    let mut strike: Option<f32> = None;
+    let mut decos: Vec<(f32, f32, f32)> = Vec::new(); // (start_x, end_x, y)
 
     // Same token walk as `tessellate_text_run` (LFF branch): DXF `%%` specials
-    // resolve to glyphs, spaces/missing advance the pen, decoration toggles emit
-    // no glyph (they render as lines on the stroke path).
-    for tok in crate::scene::text::lff::tokenize_run(text) {
+    // resolve to glyphs, spaces/missing advance the pen, decoration toggles
+    // open/close underline / overline / strikethrough runs.
+    for tok in tokenize_run(text) {
         let ch = match tok {
-            crate::scene::text::lff::Tok::Glyph(c) => c,
-            crate::scene::text::lff::Tok::Space => {
+            Tok::Glyph(c) => c,
+            Tok::Space => {
                 cursor_x += face.word_spacing();
                 continue;
             }
-            crate::scene::text::lff::Tok::Missing => {
+            Tok::Missing => {
                 cursor_x += 6.0 + face.letter_spacing() * tracking;
                 continue;
             }
-            crate::scene::text::lff::Tok::Deco(..) => continue,
+            Tok::Deco(deco, op) => {
+                let (slot, y) = match deco {
+                    Deco::Under => (&mut under, UNDER_Y),
+                    Deco::Over => (&mut over, OVER_Y),
+                    Deco::Strike => (&mut strike, STRIKE_Y),
+                };
+                match op {
+                    Op::On => {
+                        if slot.is_none() {
+                            *slot = Some(cursor_x);
+                        }
+                    }
+                    Op::Off => {
+                        if let Some(s) = slot.take() {
+                            decos.push((s, cursor_x, y));
+                        }
+                    }
+                    Op::Toggle => {
+                        *slot = match slot.take() {
+                            Some(s) => {
+                                decos.push((s, cursor_x, y));
+                                None
+                            }
+                            None => Some(cursor_x),
+                        };
+                    }
+                }
+                continue;
+            }
         };
         match atlas.get_or_insert(font_name, ch) {
             Some(e) => {
@@ -107,6 +150,27 @@ pub fn layout_glyph_quads(
                 cursor_x += adv + face.letter_spacing() * tracking;
             }
         }
+    }
+
+    // Any decoration still open at the end runs to the final pen position.
+    for (slot, y) in [(under, UNDER_Y), (over, OVER_Y), (strike, STRIKE_Y)] {
+        if let Some(s) = slot {
+            decos.push((s, cursor_x, y));
+        }
+    }
+    // Decoration lines: thin quads sampling the atlas's solid texel so the SDF
+    // shader fills them solid in the run colour.
+    for (s, e, y) in decos {
+        quads.push(GlyphQuad {
+            corners: [
+                xform(s, y - DECO_HALF, 0.0),
+                xform(e, y - DECO_HALF, 0.0),
+                xform(e, y + DECO_HALF, 0.0),
+                xform(s, y + DECO_HALF, 0.0),
+            ],
+            uv_min: solid,
+            uv_max: solid,
+        });
     }
 
     quads
@@ -205,5 +269,18 @@ mod tests {
             (r - 2.0).abs() < 0.15,
             "double height ~ double quad extent, got {r}"
         );
+    }
+
+    #[test]
+    fn underline_emits_an_extra_solid_quad() {
+        let mut atlas = GlyphAtlas::new(512, 512);
+        let plain = layout_glyph_quads(&mut atlas, 10.0, 0.0, 1.0, 0.0, 1.0, "txt", "AB");
+        // `\L…\l` underlines the run — same glyph quads plus one decoration quad.
+        let under = layout_glyph_quads(&mut atlas, 10.0, 0.0, 1.0, 0.0, 1.0, "txt", "\\LAB\\l");
+        assert_eq!(under.len(), plain.len() + 1, "underline adds one quad");
+        // The decoration quad samples the atlas's solid texel (degenerate UV).
+        let deco = under.last().unwrap();
+        assert_eq!(deco.uv_min, deco.uv_max, "decoration quad uses the solid UV");
+        assert_eq!(deco.uv_min, atlas.solid_uv());
     }
 }

@@ -92,6 +92,11 @@ pub struct GlyphAtlas {
     cursor_x: u32,
     cursor_y: u32,
     shelf_h: u32,
+    /// UV of a fully-inside (value 255) texel, reserved at the atlas corner.
+    /// A quad whose corners all map here samples a constant "inside" field, so
+    /// the SDF shader fills it solid — used to draw decoration lines
+    /// (underline / overline / strikethrough) through the glyph pipeline.
+    solid_uv: [f32; 2],
     /// Set when `data` changed since the last upload; the GPU side clears it.
     dirty: bool,
 }
@@ -106,18 +111,41 @@ struct BakedTile {
     advance: f32,
 }
 
+/// Side of the reserved solid (all-255) block at the atlas corner.
+const SOLID_PX: u32 = 4;
+
 impl GlyphAtlas {
     pub fn new(width: u32, height: u32) -> Self {
+        let mut data = vec![0u8; (width * height) as usize];
+        // Reserve a small solid block at (0,0) for decoration lines; the shelf
+        // packer starts past it so glyphs never overwrite it.
+        let solid = SOLID_PX.min(width).min(height);
+        for y in 0..solid {
+            for x in 0..solid {
+                data[(y * width + x) as usize] = 255;
+            }
+        }
         Self {
             width,
             height,
-            data: vec![0u8; (width * height) as usize],
+            data,
             entries: HashMap::new(),
-            cursor_x: 0,
+            cursor_x: solid,
             cursor_y: 0,
-            shelf_h: 0,
-            dirty: false,
+            shelf_h: solid,
+            // Centre of the solid block, safely inside it under bilinear filtering.
+            solid_uv: [
+                (solid as f32 * 0.5) / width as f32,
+                (solid as f32 * 0.5) / height as f32,
+            ],
+            dirty: true,
         }
+    }
+
+    /// UV of a fully-inside texel; a quad with all corners at this UV renders
+    /// solid. Used for decoration lines.
+    pub fn solid_uv(&self) -> [f32; 2] {
+        self.solid_uv
     }
 
     pub fn width(&self) -> u32 {
