@@ -3,6 +3,7 @@ pub mod hatch_batched_gpu;
 pub mod hatch_gpu;
 pub mod image_gpu;
 pub mod mesh_gpu;
+pub mod text_gpu;
 pub mod uniforms;
 pub mod viewcube;
 pub mod wire_gpu;
