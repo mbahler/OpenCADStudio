@@ -783,8 +783,31 @@ impl Scene {
     #[allow(dead_code)] // consumed by the text render pass in the GPU integration step
     pub(in crate::scene) fn sdf_text_vertices(
         &self,
-    ) -> Vec<crate::scene::pipeline::text_gpu::TextVertex> {
-        self.sdf_text_vertices_enabled(crate::scene::text::sdf_atlas::sdf_text_enabled())
+    ) -> std::sync::Arc<Vec<crate::scene::pipeline::text_gpu::TextVertex>> {
+        use std::sync::Arc;
+        if !crate::scene::text::sdf_atlas::sdf_text_enabled() {
+            return Arc::new(Vec::new());
+        }
+        // Cache keyed on (geometry_epoch, annotation scale): the run layout only
+        // changes when geometry or the scale changes, so pan / zoom reuses it
+        // instead of re-laying-out every glyph each frame.
+        let anno = if self.current_layout == "Model" {
+            self.annotation_scale
+        } else {
+            1.0
+        };
+        let key = (self.geometry_epoch, anno.to_bits());
+        {
+            let cache = self.sdf_text_cache.borrow();
+            if let Some((epoch, anno_bits, verts)) = cache.as_ref() {
+                if *epoch == key.0 && *anno_bits == key.1 {
+                    return verts.clone();
+                }
+            }
+        }
+        let verts = Arc::new(self.sdf_text_vertices_enabled(true));
+        *self.sdf_text_cache.borrow_mut() = Some((key.0, key.1, verts.clone()));
+        verts
     }
 
     #[allow(dead_code)]
@@ -1152,7 +1175,7 @@ impl Scene {
         let text_verts = if inst.paper_sheet {
             Arc::new(Vec::new())
         } else {
-            Arc::new(self.sdf_text_vertices())
+            self.sdf_text_vertices()
         };
         Some(ViewportData {
             wires: all_wires,

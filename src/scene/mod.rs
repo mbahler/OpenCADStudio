@@ -710,6 +710,11 @@ pub struct Scene {
     pub(crate) model_tiles: RefCell<Vec<ModelTile>>,
     /// Index of the active model tile (camera input + overlays target it).
     pub(crate) active_model_tile: std::cell::Cell<usize>,
+    /// Cache of the SDF text vertex list, keyed on `(geometry_epoch,
+    /// anno_scale.to_bits())`, so the per-frame collector is not re-laid-out on
+    /// pan / zoom. See [`Scene::sdf_text_vertices`].
+    sdf_text_cache:
+        RefCell<Option<(u64, u32, std::sync::Arc<Vec<crate::scene::pipeline::text_gpu::TextVertex>>)>>,
     /// pane_grid layout tree for the Model tab — the source of truth for the
     /// tile split layout, resize and focus. `model_tiles` (the renderer's
     /// per-pane data: camera / render-mode / grid) is kept in lock-step with
@@ -959,6 +964,7 @@ impl Scene {
                 snap_on: false,
             }]),
             active_model_tile: std::cell::Cell::new(0),
+            sdf_text_cache: RefCell::new(None),
             // One pane mapped to tile 0 — matches the single default tile above.
             model_panes: iced::widget::pane_grid::State::new(0).0,
             selection: Rc::new(RefCell::new(SelectionState::default())),
