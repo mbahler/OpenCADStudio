@@ -437,7 +437,12 @@ pub(crate) fn tessellate_entity(
             let aabb = entity_aabb(e);
             for w in &mut wires {
                 w.aci = aci;
-                w.aabb = aabb;
+                // Empty SDF-text cells keep their tight glyph-box AABB; only
+                // stroke/fill wires take the whole-table box as a broad-phase
+                // pick hint (matches the dim / mleader / baked-block paths).
+                if !w.points.is_empty() || !w.fill_tris.is_empty() {
+                    w.aabb = aabb;
+                }
             }
             return wires;
         }
