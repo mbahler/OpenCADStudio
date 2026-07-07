@@ -183,13 +183,53 @@ pub fn clip_wires(wires: &mut Vec<WireModel>, poly: &[[f64; 2]]) {
             w.fill_tris = hi;
             w.fill_tris_low = lo;
         }
+        // Clip SDF text: keep each glyph quad (6 verts = 2 triangles) whose
+        // centroid is inside the boundary. Whole-glyph granularity so block-
+        // instance text is bounded by the xclip region instead of bleeding past
+        // it — the stroke path clips per-segment, but per-glyph reads cleanly.
+        if !w.text_verts.is_empty() {
+            let mut kept = Vec::with_capacity(w.text_verts.len());
+            for quad in w.text_verts.chunks(6) {
+                let n = quad.len() as f64;
+                let (mut cx, mut cy) = (0.0f64, 0.0f64);
+                for v in quad {
+                    cx += v.pos[0] as f64 + v.pos_low[0] as f64;
+                    cy += v.pos[1] as f64 + v.pos_low[1] as f64;
+                }
+                if point_in_poly((cx / n - rx) as f32, (cy / n - ry) as f32, &lpoly) {
+                    kept.extend_from_slice(quad);
+                }
+            }
+            w.text_verts = kept;
+        }
         w.key_vertices
             .retain(|v| point_in_poly((v[0] - rx) as f32, (v[1] - ry) as f32, &lpoly));
         w.snap_pts
             .retain(|(p, _)| point_in_poly((p.x - rx) as f32, (p.y - ry) as f32, &lpoly));
-        w.aabb = recompute_aabb(&w.points, &w.fill_tris);
+        // AABB from surviving points + fills, then fold in the surviving glyph
+        // quads so a text-only wire keeps a tight (non-degenerate) pick box.
+        let mut bb = recompute_aabb(&w.points, &w.fill_tris);
+        if !w.text_verts.is_empty() {
+            let (mut nx, mut ny, mut xx, mut xy) = if bb == [0.0; 4] {
+                (f32::MAX, f32::MAX, f32::MIN, f32::MIN)
+            } else {
+                (bb[0], bb[1], bb[2], bb[3])
+            };
+            for v in &w.text_verts {
+                nx = nx.min(v.pos[0]);
+                ny = ny.min(v.pos[1]);
+                xx = xx.max(v.pos[0]);
+                xy = xy.max(v.pos[1]);
+            }
+            if nx <= xx {
+                bb = [nx, ny, xx, xy];
+            }
+        }
+        w.aabb = bb;
     }
-    wires.retain(|w| !w.points.is_empty() || !w.fill_tris.is_empty());
+    wires.retain(|w| {
+        !w.points.is_empty() || !w.fill_tris.is_empty() || !w.text_verts.is_empty()
+    });
 }
 
 /// Double-single split of an f64 into (high, low) f32 — mirrors

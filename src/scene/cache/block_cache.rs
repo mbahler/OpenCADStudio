@@ -1187,7 +1187,17 @@ fn emit_wire(
             .tangent_geoms
             .push(transform_tangent(tg, accum_xform));
     }
-    debug_assert_eq!(lw.fill_tris.len(), lw.fill_tris_low.len());
+    // Per the WireModel contract an empty `fill_tris_low` means "all-zero low
+    // half" (e.g. a Leader / dimension arrowhead fill, which the tessellator
+    // emits without a low half). Only a *partially* populated low half is a
+    // real bug — keep the tripwire for that, but permit the empty case so debug
+    // builds don't panic on legitimate geometry.
+    debug_assert!(
+        lw.fill_tris_low.is_empty() || lw.fill_tris.len() == lw.fill_tris_low.len(),
+        "fill_tris_low must be empty or the same length as fill_tris (got {} vs {})",
+        lw.fill_tris.len(),
+        lw.fill_tris_low.len(),
+    );
     for (idx, p) in lw.fill_tris.iter().enumerate() {
         // Empty/short fill_tris_low means "no low half" (all-zero), per the
         // WireModel contract — same panic-safe access the other fill consumers
