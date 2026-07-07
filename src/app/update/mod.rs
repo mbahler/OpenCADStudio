@@ -2730,12 +2730,17 @@ impl OpenCADStudio {
                 Task::none()
             }
             Message::PatronsFetched(Ok(names)) => {
-                self.patrons = names;
+                // Merge the hand-maintained supporters and rank everyone by
+                // amount (also sorts the web list, which arrives unsorted).
+                self.patrons = crate::patreon::merge_manual(names);
                 Task::none()
             }
-            // No token / offline: leave the list empty (Start page shows a
-            // "Support on Patreon" prompt instead).
-            Message::PatronsFetched(Err(_)) => Task::none(),
+            // No token / offline: still show any hand-maintained supporters
+            // (Start page shows a "Support on Patreon" prompt when empty).
+            Message::PatronsFetched(Err(_)) => {
+                self.patrons = crate::patreon::merge_manual(Vec::new());
+                Task::none()
+            }
             Message::PluginReleasesFetched(repo, Ok(tags)) => {
                 if let Some(first) = tags.first() {
                     self.repo_selected_tag

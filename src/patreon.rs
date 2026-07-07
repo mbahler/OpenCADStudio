@@ -7,6 +7,34 @@
 //! can still be extracted from a shipped binary, so it should be a
 //! campaign-scoped token with the minimum needed access.
 
+/// Supporters who donated outside Patreon (direct transfer, crypto, one-off
+/// gifts, …), maintained by hand here. They are merged with the fetched patrons
+/// and ranked together by amount, so the combined Start-page list is ordered by
+/// pledge regardless of where the donation came from.
+///
+/// To add a supporter, add a `("Display name", cents)` line below. The amount is
+/// in **cents**: a $25 donation is `2500`, €10 is `1000`.
+const MANUAL_SUPPORTERS: &[(&str, i64)] = &[
+    ("Stefano", 6000), // $60
+];
+
+/// Append the hand-maintained [`MANUAL_SUPPORTERS`] to `patrons` and sort the
+/// combined list by amount (highest first, then alphabetically). Both the
+/// native and web boot paths funnel their fetched list through here, so the
+/// manual entries — and the ranking — are identical on every platform, and the
+/// list is still sorted (and still shows the manual entries) even when the
+/// fetch returns nothing because the app is offline or has no Patreon token.
+pub fn merge_manual(mut patrons: Vec<(String, i64)>) -> Vec<(String, i64)> {
+    for &(name, cents) in MANUAL_SUPPORTERS {
+        let name = name.trim();
+        if !name.is_empty() {
+            patrons.push((name.to_string(), cents));
+        }
+    }
+    patrons.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    patrons
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 const UA: &str = concat!("OpenCADStudio/", env!("CARGO_PKG_VERSION"));
 
