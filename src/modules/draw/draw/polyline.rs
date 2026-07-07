@@ -218,9 +218,25 @@ impl CadCommand for PlineCommand {
             "PLINE  Specify start point:".into()
         } else {
             format!(
-                "PLINE [{mode_tag}]  Next pt  [{}pts | A=arc L=line C=close Enter=done]:",
+                "PLINE [{mode_tag}]  Next pt  [{}pts]:",
                 self.vertices.len()
             )
+        }
+    }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        // Options appear once at least one vertex is placed: the segment step
+        // accepts A / L / C, and Enter finishes.
+        if self.vertices.is_empty() {
+            Vec::new()
+        } else {
+            vec![
+                CmdOption::new("Arc", "A"),
+                CmdOption::new("Line", "L"),
+                CmdOption::new("Close", "C"),
+                CmdOption::enter("Done"),
+            ]
         }
     }
 

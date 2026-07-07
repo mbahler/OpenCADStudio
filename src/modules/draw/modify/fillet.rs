@@ -1249,7 +1249,7 @@ impl CadCommand for FilletCommand {
     fn prompt(&self) -> String {
         match &self.step {
             FilletStep::First => format!(
-                "FILLET  Select first object (Line/Arc/LwPolyline)  [R={:.4} | type R to change]:",
+                "FILLET  Select first object (Line/Arc/LwPolyline)  [R={:.4}]:",
                 self.radius
             ),
             FilletStep::WaitingForRadius => {
@@ -1261,6 +1261,16 @@ impl CadCommand for FilletCommand {
                     self.radius
                 )
             }
+        }
+    }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        match self.step {
+            // Offer the radius keyword while selecting objects; the "R" token is
+            // already handled by on_text_input.
+            FilletStep::First | FilletStep::Second { .. } => vec![CmdOption::new("Radius", "R")],
+            FilletStep::WaitingForRadius => vec![],
         }
     }
 
@@ -1623,7 +1633,7 @@ impl CadCommand for ChamferCommand {
     fn prompt(&self) -> String {
         match &self.step {
             ChamferStep::First => format!(
-                "CHAMFER  Select first line  [D1={:.4} D2={:.4} | type D to change]:",
+                "CHAMFER  Select first line  [D1={:.4} D2={:.4}]:",
                 self.dist1, self.dist2
             ),
             ChamferStep::WaitingForDist1 => {
@@ -1641,6 +1651,18 @@ impl CadCommand for ChamferCommand {
                 "CHAMFER  Select the adjacent polyline segment  [D1={:.4} D2={:.4}]:",
                 self.dist1, self.dist2
             ),
+        }
+    }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        match self.step {
+            // Offer the distance keyword while selecting objects; the "D" token
+            // is already handled by on_text_input.
+            ChamferStep::First
+            | ChamferStep::Second { .. }
+            | ChamferStep::SecondPoly { .. } => vec![CmdOption::new("Distance", "D")],
+            ChamferStep::WaitingForDist1 | ChamferStep::WaitingForDist2 => vec![],
         }
     }
 

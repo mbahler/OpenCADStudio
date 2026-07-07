@@ -55,7 +55,17 @@ impl CadCommand for Solid2dCommand {
             0 => "SOLID  Specify first point:".to_string(),
             1 => "SOLID  Specify second point:".to_string(),
             2 => "SOLID  Specify third point:".to_string(),
-            _ => "SOLID  Specify fourth point  [Enter = triangle]:".to_string(),
+            _ => "SOLID  Specify fourth point:".to_string(),
+        }
+    }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        // After three corners Enter commits a triangle; offer a Done button.
+        if self.points.len() == 3 {
+            vec![CmdOption::enter("Done")]
+        } else {
+            Vec::new()
         }
     }
 

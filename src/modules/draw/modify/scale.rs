@@ -82,7 +82,7 @@ impl CadCommand for ScaleCommand {
                 self.handles.len()
             ),
             Step::Factor { .. } => format!(
-                "SCALE  Specify scale factor or [Reference]  <{:.4}>:",
+                "SCALE  Specify scale factor  <{:.4}>:",
                 self.default_factor
             ),
             Step::RefLen { .. } => {
@@ -92,6 +92,15 @@ impl CadCommand for ScaleCommand {
                 "SCALE  Specify new length  (pick a point or type a length)  [ref={:.3}]:",
                 ref_dist
             ),
+        }
+    }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        match &self.step {
+            // The reference-scaling keyword is only offered at the factor step.
+            Step::Factor { .. } => vec![CmdOption::new("Reference", "R")],
+            _ => vec![],
         }
     }
 

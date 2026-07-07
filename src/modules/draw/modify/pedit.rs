@@ -16,11 +16,17 @@ use crate::command::{CadCommand, CmdResult};
 
 pub struct PeditCommand {
     target: Option<Handle>,
+    /// Set once the bare `W` keyword (or the Width button) is chosen: the next
+    /// text input is parsed as the new width instead of an option. (#304)
+    awaiting_width: bool,
 }
 
 impl PeditCommand {
     pub fn new() -> Self {
-        Self { target: None }
+        Self {
+            target: None,
+            awaiting_width: false,
+        }
     }
 }
 
@@ -32,8 +38,24 @@ impl CadCommand for PeditCommand {
     fn prompt(&self) -> String {
         if self.target.is_none() {
             "PEDIT  Select polyline:".into()
+        } else if self.awaiting_width {
+            "PEDIT  Specify new width:".into()
         } else {
-            "PEDIT  Enter option [C=Close O=Open W=Width X=Exit]:".into()
+            "PEDIT  Enter option:".into()
+        }
+    }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        if self.target.is_none() || self.awaiting_width {
+            vec![]
+        } else {
+            vec![
+                CmdOption::new("Close", "C"),
+                CmdOption::new("Open", "O"),
+                CmdOption::new("Width", "W"),
+                CmdOption::new("eXit", "X"),
+            ]
         }
     }
 
@@ -57,6 +79,21 @@ impl CadCommand for PeditCommand {
         let handle = self.target?;
         let up = text.trim().to_uppercase();
 
+        // Width sub-step: the previous input was a bare `W` (typed or via the
+        // Width button), so this input is the width value. (#304)
+        if self.awaiting_width {
+            let w: f64 = up
+                .replace(',', ".")
+                .parse()
+                .ok()
+                .filter(|&v: &f64| v >= 0.0)?;
+            self.awaiting_width = false;
+            return Some(CmdResult::PeditOp {
+                handle,
+                op: PeditOp::SetWidth(w),
+            });
+        }
+
         match up.as_str() {
             "X" | "EXIT" => return Some(CmdResult::Cancel),
             "C" | "CLOSE" => {
@@ -71,10 +108,17 @@ impl CadCommand for PeditCommand {
                     op: PeditOp::SetClosed(false),
                 })
             }
+            "W" | "WIDTH" => {
+                // Bare width keyword (the Width button): prompt for the value
+                // rather than doing nothing.
+                self.awaiting_width = true;
+                return Some(CmdResult::NeedPoint);
+            }
             _ => {}
         }
 
-        if let Some(rest) = up.strip_prefix("W ").or_else(|| up.strip_prefix("W")) {
+        // Inline shorthand `W <value>`.
+        if let Some(rest) = up.strip_prefix("W ") {
             let w: f64 = rest
                 .trim()
                 .replace(',', ".")

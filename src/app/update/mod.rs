@@ -147,6 +147,13 @@ impl OpenCADStudio {
             .as_ref()
             .map(|c| c.prompt());
         self.command_line.set_step_prompt(prompt);
+        // Mirror the step's clickable options so they render as buttons (#304).
+        let opts = self.tabs[self.active_tab]
+            .active_cmd
+            .as_ref()
+            .map(|c| c.options())
+            .unwrap_or_default();
+        self.command_line.set_step_options(opts);
         // Persist UI preferences whenever a toggle changes them (issue #68).
         self.persist_settings_if_changed();
         // OTRACK acquires tracking points only while a command or grip drag is
@@ -827,6 +834,19 @@ impl OpenCADStudio {
                 self.command_line.input.clear();
                 self.command_line.close_history();
                 self.dispatch_command(&cmd)
+            }
+
+            Message::CommandOptionPick(kw) => {
+                // Clicking an option button feeds its keyword to the active
+                // command through the same path as typed text; an empty keyword
+                // finishes the step like Enter. (#304)
+                self.command_line.input.clear();
+                self.command_line.close_history();
+                if kw.is_empty() {
+                    return self.feed_command(crate::command::StepInput::Enter);
+                }
+                self.feed_active_cmd(&kw);
+                Task::none()
             }
 
             Message::CommandSubmit => self.on_command_submit(),

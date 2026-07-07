@@ -35,7 +35,16 @@ impl CadCommand for RayCommand {
         if self.base.is_none() {
             "RAY  Specify start point:".into()
         } else {
-            "RAY  Specify through point  [Enter/Esc = done]:".into()
+            "RAY  Specify through point:".into()
+        }
+    }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        if self.base.is_some() {
+            vec![CmdOption::enter("Done")]
+        } else {
+            vec![]
         }
     }
 
@@ -117,7 +126,16 @@ impl CadCommand for XLineCommand {
         if self.base.is_none() {
             "XLINE  Specify a point:".into()
         } else {
-            "XLINE  Specify through point  [Enter/Esc = done]:".into()
+            "XLINE  Specify through point:".into()
+        }
+    }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        if self.base.is_some() {
+            vec![CmdOption::enter("Done")]
+        } else {
+            vec![]
         }
     }
 

@@ -139,16 +139,28 @@ impl CadCommand for HatchCommand {
                 } else {
                     ""
                 };
-                format!("HATCH  Pick internal point [S=Draw manually]:{miss}")
+                format!("HATCH  Pick internal point:{miss}")
             }
             Mode::Manual => {
                 if self.manual_pts.is_empty() {
                     "HATCH  Boundary point 1:".into()
                 } else {
-                    format!(
-                        "HATCH  Point {} [Enter=accept, ≥3 points]:",
-                        self.manual_pts.len() + 1
-                    )
+                    format!("HATCH  Point {}:", self.manual_pts.len() + 1)
+                }
+            }
+        }
+    }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        match &self.mode {
+            Mode::PickInside => vec![CmdOption::new("Draw manually", "S")],
+            Mode::Manual => {
+                // Enter accepts the boundary once at least 3 points are picked.
+                if self.manual_pts.len() >= 3 {
+                    vec![CmdOption::enter("Accept")]
+                } else {
+                    vec![]
                 }
             }
         }
@@ -277,16 +289,28 @@ impl CadCommand for GradientCommand {
                 } else {
                     ""
                 };
-                format!("GRADIENT  Pick internal point [S=Draw manually]:{miss}")
+                format!("GRADIENT  Pick internal point:{miss}")
             }
             Mode::Manual => {
                 if self.manual_pts.is_empty() {
                     "GRADIENT  Boundary point 1:".into()
                 } else {
-                    format!(
-                        "GRADIENT  Point {} [Enter=accept, ≥3 points]:",
-                        self.manual_pts.len() + 1
-                    )
+                    format!("GRADIENT  Point {}:", self.manual_pts.len() + 1)
+                }
+            }
+        }
+    }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        match &self.mode {
+            Mode::PickInside => vec![CmdOption::new("Draw manually", "S")],
+            Mode::Manual => {
+                // Enter accepts the boundary once at least 3 points are picked.
+                if self.manual_pts.len() >= 3 {
+                    vec![CmdOption::enter("Accept")]
+                } else {
+                    vec![]
                 }
             }
         }

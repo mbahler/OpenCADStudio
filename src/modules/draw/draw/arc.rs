@@ -254,6 +254,28 @@ impl CadCommand for ArcCommand {
             ),
         }
     }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        // Alternate construction methods, offered only at the first (center)
+        // step. Each keyword hands off to the dedicated variant command.
+        if self.step == 0 {
+            vec![
+                CmdOption::new("SCE", "SCE"),
+                CmdOption::new("SCA", "SCA"),
+                CmdOption::new("SEA", "SEA"),
+                CmdOption::new("SER", "SER"),
+                CmdOption::new("CSA", "CSA"),
+                CmdOption::new("3P", "3P"),
+            ]
+        } else {
+            vec![]
+        }
+    }
+
+    fn point_step_accepts_keywords(&self) -> bool {
+        self.step == 0
+    }
     fn on_point(&mut self, pt: DVec3) -> CmdResult {
         match self.step {
             0 => {
@@ -283,6 +305,22 @@ impl CadCommand for ArcCommand {
     }
     fn on_escape(&mut self) -> CmdResult {
         CmdResult::Cancel
+    }
+    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        // At the center step, keyword options switch construction method by
+        // handing off to the dedicated variant command.
+        if self.step == 0 {
+            return match text.trim().to_uppercase().as_str() {
+                "SCE" => Some(CmdResult::Dispatch("ARC_SCE".into())),
+                "SCA" => Some(CmdResult::Dispatch("ARC_SCA".into())),
+                "SEA" => Some(CmdResult::Dispatch("ARC_SEA".into())),
+                "SER" => Some(CmdResult::Dispatch("ARC_SER".into())),
+                "CSA" => Some(CmdResult::Dispatch("ARC_CSA".into())),
+                "3P" => Some(CmdResult::Dispatch("ARC_3P".into())),
+                _ => None,
+            };
+        }
+        None
     }
     fn on_mouse_move(&mut self, pt: DVec3) -> Option<WireModel> {
         match self.step {

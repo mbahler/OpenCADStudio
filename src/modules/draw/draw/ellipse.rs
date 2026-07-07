@@ -135,6 +135,21 @@ impl CadCommand for EllipseCommand {
         }
     }
 
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        match self.step {
+            CtrStep::Center => vec![
+                CmdOption::new("Arc", "ARC"),
+                CmdOption::new("Axis", "AXIS"),
+            ],
+            _ => vec![],
+        }
+    }
+
+    fn point_step_accepts_keywords(&self) -> bool {
+        matches!(self.step, CtrStep::Center)
+    }
+
     fn on_point(&mut self, pt: DVec3) -> CmdResult {
         match &self.step {
             CtrStep::Center => {
@@ -164,6 +179,15 @@ impl CadCommand for EllipseCommand {
     }
 
     fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        // At the centre step, keyword options switch construction method by
+        // handing off to the dedicated variant command.
+        if matches!(self.step, CtrStep::Center) {
+            return match text.trim().to_uppercase().as_str() {
+                "A" | "ARC" => Some(CmdResult::Dispatch("ELLIPSE_ARC".into())),
+                "AXIS" => Some(CmdResult::Dispatch("ELLIPSE_AXIS".into())),
+                _ => None,
+            };
+        }
         if let CtrStep::MinorRatio { center, major } = &self.step {
             let r_minor = parse_num(text)?;
             if r_minor > 0.0 {

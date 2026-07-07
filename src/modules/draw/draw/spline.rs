@@ -80,11 +80,20 @@ impl CadCommand for SplineCommand {
         if self.pts.is_empty() {
             "SPLINE  Specify first control point:".into()
         } else {
-            format!(
-                "SPLINE  Specify next point  [{} pts | Close/Undo | Enter=done]:",
-                self.pts.len()
-            )
+            format!("SPLINE  Specify next point  [{} pts]:", self.pts.len())
         }
+    }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        if self.pts.is_empty() {
+            return Vec::new();
+        }
+        let mut opts = vec![CmdOption::new("Close", "C")];
+        // Undo only makes sense once a control point exists.
+        opts.push(CmdOption::new("Undo", "U"));
+        opts.push(CmdOption::enter("Done"));
+        opts
     }
 
     fn on_point(&mut self, pt: DVec3) -> CmdResult { let pt = pt.as_vec3();

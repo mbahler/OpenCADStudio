@@ -499,12 +499,51 @@ pub struct DynSpec {
 // ── Trait ─────────────────────────────────────────────────────────────────
 
 /// An interactive CAD command that collects user input step-by-step.
+/// One clickable option a command step offers. Rendered as a button next to
+/// the command-line prompt; clicking it feeds `keyword` to the running command
+/// exactly as if the user had typed it (routed through `on_text_input`). An
+/// empty `keyword` submits the step like pressing Enter (the finish / default
+/// action). Lets every bracketed `[A=arc L=line …]` prompt become buttons so
+/// the option need not be typed. (#304)
+#[derive(Clone, Debug)]
+pub struct CmdOption {
+    /// Text shown on the button, e.g. `"3P"` or `"Close"`.
+    pub label: String,
+    /// Token fed to the command when clicked, e.g. `"3P"`. Empty = Enter.
+    pub keyword: String,
+}
+
+impl CmdOption {
+    /// Button whose keyword is typed on click, e.g. `("Ttr", "TTR")`.
+    pub fn new(label: &str, keyword: &str) -> Self {
+        Self {
+            label: label.to_string(),
+            keyword: keyword.to_string(),
+        }
+    }
+    /// A "finish" button that submits the step like Enter.
+    pub fn enter(label: &str) -> Self {
+        Self {
+            label: label.to_string(),
+            keyword: String::new(),
+        }
+    }
+}
+
 pub trait CadCommand: Send {
     /// Short name shown in the command line prompt, e.g. `"LINE"`.
     #[allow(dead_code)]
     fn name(&self) -> &'static str;
     /// Current prompt string to display in the command line.
     fn prompt(&self) -> String;
+
+    /// Clickable keyword options for the current step, rendered as buttons in
+    /// the command line next to the prompt. Default: none. A command returns
+    /// different options per step; clicking a button feeds its keyword through
+    /// the same path as typed command-line text (`on_text_input`). (#304)
+    fn options(&self) -> Vec<CmdOption> {
+        Vec::new()
+    }
 
     /// Push the active UCS into the command as a UCS→render(wire)-space affine
     /// (identity = plain WCS). Commands that build axis-aligned geometry (RECT,

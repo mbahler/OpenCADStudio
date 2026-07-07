@@ -3,6 +3,7 @@
 use iced::time::Instant;
 
 use crate::app::Message;
+use crate::command::CmdOption;
 use iced::widget::{
     button, column, container, opaque, row, text, text_editor, text_input, Space,
 };
@@ -52,6 +53,10 @@ pub struct CommandLine {
     /// The active command step's prompt, mirrored here so a step change
     /// can be detected and the pinned (non-fading) history line updated.
     step_prompt: Option<String>,
+    /// The active command step's clickable options, mirrored here so they
+    /// render as buttons above the input row. Empty when no command is
+    /// active or the current step offers no options. (#304)
+    step_options: Vec<CmdOption>,
 }
 
 #[derive(Clone, Debug)]
@@ -213,6 +218,12 @@ impl CommandLine {
         self.step_prompt = prompt;
     }
 
+    /// Mirror the active command step's clickable options so `view` can render
+    /// them as buttons. Called each frame alongside [`Self::set_step_prompt`].
+    pub fn set_step_options(&mut self, opts: Vec<CmdOption>) {
+        self.step_options = opts;
+    }
+
     /// `true` while at least one history entry is still within the
     /// visible window — the host app uses this to drive a low-frequency
     /// tick subscription so the overlay re-renders and fades the entry
@@ -318,7 +329,48 @@ impl CommandLine {
                     EntryKind::Error => ERR_COLOR,
                     EntryKind::Info => INFO_COLOR,
                 };
-                col.push(container(text(&entry.text).size(11).color(color)).padding([1, 8]))
+                // The current step's prompt is the single pinned line. When the
+                // step offers options, render them as clickable buttons inline
+                // beside the prompt text — so options need never be typed and
+                // don't clutter the prompt string itself. (#304)
+                if entry.pinned && !self.step_options.is_empty() {
+                    let mut r = row![text(&entry.text).size(11).color(color)]
+                        .spacing(6)
+                        .align_y(iced::Center);
+                    for opt in &self.step_options {
+                        let btn = button(
+                            text(opt.label.to_uppercase()).size(11).color(CMD_COLOR),
+                        )
+                        .on_press(Message::CommandOptionPick(opt.keyword.clone()))
+                        .padding([1, 6])
+                        .style(|_: &Theme, status| {
+                            let bg = if matches!(status, button::Status::Hovered) {
+                                Color {
+                                    r: 0.28,
+                                    g: 0.40,
+                                    b: 0.56,
+                                    a: 1.0,
+                                }
+                            } else {
+                                INPUT_ROW_BG
+                            };
+                            button::Style {
+                                background: Some(Background::Color(bg)),
+                                text_color: Color::WHITE,
+                                border: Border {
+                                    color: BORDER_COLOR,
+                                    width: 1.0,
+                                    radius: 3.0.into(),
+                                },
+                                ..Default::default()
+                            }
+                        });
+                        r = r.push(btn);
+                    }
+                    col.push(container(r).padding([1, 8]))
+                } else {
+                    col.push(container(text(&entry.text).size(11).color(color)).padding([1, 8]))
+                }
             });
         let prompt = container(text("Command:").size(11).color(PROMPT_COLOR)).padding([5, 8]);
         // While dynamic input is capturing keystrokes, the command-line

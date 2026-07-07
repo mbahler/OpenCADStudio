@@ -34,7 +34,12 @@ impl CadCommand for PointCommand {
         "POINT"
     }
     fn prompt(&self) -> String {
-        "POINT  Specify point  [Enter=done]:".into()
+        "POINT  Specify point:".into()
+    }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        vec![CmdOption::enter("Done")]
     }
 
     fn on_point(&mut self, pt: DVec3) -> CmdResult {

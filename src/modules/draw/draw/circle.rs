@@ -142,6 +142,24 @@ impl CadCommand for CircleCommand {
             ),
         }
     }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        match self.step {
+            StepCR::Center => vec![
+                CmdOption::new("3P", "3P"),
+                CmdOption::new("2P", "2P"),
+                CmdOption::new("Ttr", "TTR"),
+                CmdOption::new("Ttt", "TTT"),
+                CmdOption::new("Diameter", "D"),
+            ],
+            StepCR::Radius(_) => vec![],
+        }
+    }
+
+    fn point_step_accepts_keywords(&self) -> bool {
+        matches!(self.step, StepCR::Center)
+    }
     fn on_point(&mut self, pt: DVec3) -> CmdResult {
         match &self.step {
             StepCR::Center => {
@@ -174,6 +192,18 @@ impl CadCommand for CircleCommand {
         }
     }
     fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        // At the centre step, keyword options switch construction method by
+        // handing off to the dedicated variant command. (#304)
+        if matches!(self.step, StepCR::Center) {
+            return match text.trim().to_uppercase().as_str() {
+                "3P" => Some(CmdResult::Dispatch("CIRCLE_3P".into())),
+                "2P" => Some(CmdResult::Dispatch("CIRCLE_2P".into())),
+                "T" | "TTR" => Some(CmdResult::Dispatch("CIRCLE_TTR".into())),
+                "TTT" => Some(CmdResult::Dispatch("CIRCLE_TTT".into())),
+                "D" | "DIAMETER" => Some(CmdResult::Dispatch("CIRCLE_CD".into())),
+                _ => None,
+            };
+        }
         if let StepCR::Radius(c) = &self.step {
             let r: f64 = text.trim().replace(',', ".").parse().ok()?;
             if r > 0.0 {

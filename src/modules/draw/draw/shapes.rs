@@ -170,6 +170,37 @@ impl CadCommand for RectCommand {
             "RECT  Specify opposite corner:".into()
         }
     }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        // First corner also offers the alternate rectangle methods; later steps
+        // are plain point picks. (#304)
+        if self.a.is_none() {
+            vec![
+                CmdOption::new("Rotation", "ROTATION"),
+                CmdOption::new("Center", "CENTER"),
+            ]
+        } else {
+            vec![]
+        }
+    }
+
+    fn point_step_accepts_keywords(&self) -> bool {
+        self.a.is_none()
+    }
+
+    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        // At the first corner, keyword options hand off to the dedicated
+        // variant command. (#304)
+        if self.a.is_none() {
+            return match text.trim().to_uppercase().as_str() {
+                "R" | "ROTATION" => Some(CmdResult::Dispatch("RECT_ROT".into())),
+                "C" | "CENTER" => Some(CmdResult::Dispatch("RECT_CEN".into())),
+                _ => None,
+            };
+        }
+        None
+    }
     fn on_point(&mut self, pt: DVec3) -> CmdResult {
         match self.a {
             None => {
@@ -438,6 +469,24 @@ impl CadCommand for PolyCommand {
         self.step == 0
     }
 
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        use crate::command::CmdOption;
+        // The sides step also offers the alternate polygon methods; later steps
+        // are plain point picks. (#304)
+        if self.step == 0 {
+            vec![
+                CmdOption::new("Circumscribed", "CIRCUMSCRIBED"),
+                CmdOption::new("Edge", "EDGE"),
+            ]
+        } else {
+            vec![]
+        }
+    }
+
+    fn point_step_accepts_keywords(&self) -> bool {
+        self.step == 0
+    }
+
     fn dyn_field(&self) -> crate::command::DynField {
         if self.step == 0 {
             crate::command::DynField::Scalar
@@ -461,6 +510,15 @@ impl CadCommand for PolyCommand {
     }
 
     fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        // At the sides step, keyword options hand off to the dedicated variant
+        // command; numeric input still sets the side count. (#304)
+        if self.step == 0 {
+            match text.trim().to_uppercase().as_str() {
+                "C" | "CIRCUMSCRIBED" => return Some(CmdResult::Dispatch("POLY_C".into())),
+                "E" | "EDGE" => return Some(CmdResult::Dispatch("POLY_E".into())),
+                _ => {}
+            }
+        }
         if let Ok(n) = text.trim().parse::<u32>() {
             if (3..=1024).contains(&n) {
                 self.sides = n;

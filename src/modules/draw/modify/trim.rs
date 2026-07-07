@@ -2027,7 +2027,11 @@ impl CadCommand for TrimCommand {
     }
 
     fn prompt(&self) -> String {
-        "TRIM  Click segment to remove  [Enter=done]:".into()
+        "TRIM  Click segment to remove:".into()
+    }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        vec![crate::command::CmdOption::enter("Done")]
     }
 
     fn needs_entity_pick(&self) -> bool {
@@ -2537,7 +2541,11 @@ impl CadCommand for ExtendCommand {
     }
 
     fn prompt(&self) -> String {
-        "EXTEND  Click near end of object to extend  [Enter=done]:".into()
+        "EXTEND  Click near end of object to extend:".into()
+    }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        vec![crate::command::CmdOption::enter("Done")]
     }
 
     fn needs_entity_pick(&self) -> bool {
