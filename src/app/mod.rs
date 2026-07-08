@@ -1558,6 +1558,12 @@ pub enum Message {
     /// User picked an MTEXT background fill colour — sets `background_color`
     /// and switches the background mode to Fill so it shows immediately.
     PropBgColorChanged(AcadColor),
+    /// Toggle the generic per-field colour picker (e.g. a hatch gradient colour)
+    /// identified by its property field name.
+    PropColorFieldToggle(String),
+    /// User picked a colour for a generic per-field colour row (hatch gradient
+    /// `Color 1` / `Color 2`), routed by the field name.
+    PropColorFieldChanged { field: String, color: AcadColor },
     /// Collapse the inline color picker dropdown. Fired when another
     /// properties-panel dropdown (a combo_box) opens, so at most one panel
     /// dropdown is open at a time and they can't overlap. (#235)

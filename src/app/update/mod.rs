@@ -2279,17 +2279,70 @@ impl OpenCADStudio {
                 if !handles.is_empty() {
                     self.push_undo_snapshot(i, "CHPROP");
                     for &handle in &handles {
-                        if let Some(acadrust::EntityType::MText(m)) =
-                            self.tabs[i].scene.document.get_entity_mut(handle)
-                        {
-                            m.background_color = color.clone();
-                            // Picking a colour turns the background on in Fill
-                            // mode (specific colour), preserving the frame bit.
-                            m.background_fill_flags = (m.background_fill_flags & !0x02) | 0x01;
+                        match self.tabs[i].scene.document.get_entity_mut(handle) {
+                            Some(acadrust::EntityType::MText(m)) => {
+                                m.background_color = color.clone();
+                                // Picking a colour turns the background on in Fill
+                                // mode (specific colour), preserving the frame bit.
+                                m.background_fill_flags =
+                                    (m.background_fill_flags & !0x02) | 0x01;
+                            }
+                            Some(acadrust::EntityType::Hatch(h)) => {
+                                crate::entities::hatch::set_background_color(h, &color);
+                            }
+                            _ => {}
                         }
                     }
                     self.invalidate_property_targets(i, &handles);
                     self.tabs[i].properties.bg_color_picker_open = false;
+                    self.tabs[i].dirty = true;
+                    self.refresh_properties();
+                }
+                Task::none()
+            }
+
+            Message::PropColorFieldToggle(field) => {
+                let i = self.active_tab;
+                let p = &mut self.tabs[i].properties;
+                p.open_color_field = if p.open_color_field.as_deref() == Some(field.as_str()) {
+                    None
+                } else {
+                    Some(field)
+                };
+                Task::none()
+            }
+
+            Message::PropColorFieldChanged { field, color } => {
+                let i = self.active_tab;
+                let handles = self.property_target_handles(i);
+                if !handles.is_empty() {
+                    self.push_undo_snapshot(i, "CHPROP");
+                    let idx = if field == "gradient_color_2" { 1 } else { 0 };
+                    for &handle in &handles {
+                        if let Some(acadrust::EntityType::Hatch(h)) =
+                            self.tabs[i].scene.document.get_entity_mut(handle)
+                        {
+                            while h.gradient_color.colors.len() <= idx {
+                                let value = if h.gradient_color.colors.is_empty() {
+                                    0.0
+                                } else {
+                                    1.0
+                                };
+                                h.gradient_color.colors.push(
+                                    acadrust::entities::hatch::GradientColorEntry {
+                                        value,
+                                        color: acadrust::types::Color::Index(7),
+                                    },
+                                );
+                            }
+                            h.gradient_color.colors[idx].color = color.clone();
+                        }
+                    }
+                    // Rebuild hatch seeds so the gradient fill picks up the new
+                    // colour (synced_hatch_models only patches the main colour).
+                    self.tabs[i].scene.populate_hatches_from_document();
+                    self.invalidate_property_targets(i, &handles);
+                    self.tabs[i].properties.open_color_field = None;
                     self.tabs[i].dirty = true;
                     self.refresh_properties();
                 }

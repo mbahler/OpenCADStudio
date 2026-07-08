@@ -483,12 +483,23 @@ impl Scene {
                         self.model_space_block_handle(),
                     )
             })
-            .map(|(&handle, model)| {
+            .flat_map(|(&handle, model)| {
                 let entity = self.document.get_entity(handle);
                 let mut m = model.clone();
+                // Optional solid backdrop drawn behind the pattern/gradient when
+                // the hatch carries a HATCHBACKGROUNDCOLOR. Same draw_depth +
+                // emitted first so LessEqual layering keeps it underneath.
+                let mut backdrop: Option<HatchModel> = None;
                 if let Some(e) = entity {
                     m.color = self.render_style(e).0;
                     if let EntityType::Hatch(dxf) = e {
+                        if let Some(bg) = crate::entities::hatch::background_color(dxf) {
+                            let mut b = m.clone();
+                            b.pattern = model::hatch_model::HatchPattern::Solid;
+                            b.color = crate::scene::convert::tess_util::aci_to_rgba(&bg);
+                            b.name = "SOLID".into();
+                            backdrop = Some(b);
+                        }
                         match &mut m.pattern {
                             // Pattern built from the hatch's own stored lines is
                             // already final (scale 1 / angle 0) — don't re-apply
@@ -516,8 +527,12 @@ impl Scene {
                 if self.selected.contains(&handle) {
                     m.color = [0.15, 0.55, 1.00, m.color[3]];
                 }
-                m.draw_depth = depth_map.get(&handle.value()).copied().unwrap_or(0.0);
-                m
+                let d = depth_map.get(&handle.value()).copied().unwrap_or(0.0);
+                m.draw_depth = d;
+                if let Some(b) = &mut backdrop {
+                    b.draw_depth = d;
+                }
+                backdrop.into_iter().chain(std::iter::once(m))
             })
             .collect();
 

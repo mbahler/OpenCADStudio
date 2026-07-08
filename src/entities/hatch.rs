@@ -99,9 +99,51 @@ fn boundary_centroid(h: &Hatch) -> Option<(f64, f64)> {
     (n > 0.0).then(|| (sx / n, sy / n))
 }
 
-/// Format a color for a read-only row (`ByLayer` / `ByBlock` / index / RGB).
-fn color_str(c: acadrust::types::Color) -> String {
-    c.to_string()
+/// Read the hatch background colour from its `HATCHBACKGROUNDCOLOR` extended
+/// data (group 1071, packed true colour: high byte = colour method, low three =
+/// RGB). `None` when unset or not a true-colour value.
+pub fn background_color(h: &Hatch) -> Option<acadrust::types::Color> {
+    let rec = h.common.extended_data.get_record("HATCHBACKGROUNDCOLOR")?;
+    let raw = rec.values.iter().find_map(|v| match v {
+        acadrust::xdata::XDataValue::Integer32(n) => Some(*n as u32),
+        _ => None,
+    })?;
+    match (raw >> 24) & 0xFF {
+        0xC2 | 0xC3 => Some(acadrust::types::Color::Rgb {
+            r: ((raw >> 16) & 0xFF) as u8,
+            g: ((raw >> 8) & 0xFF) as u8,
+            b: (raw & 0xFF) as u8,
+        }),
+        _ => None,
+    }
+}
+
+/// Pack an RGB colour into a `HATCHBACKGROUNDCOLOR` group-1071 true-colour word.
+pub fn pack_background_color(c: &acadrust::types::Color) -> i32 {
+    let (r, g, b) = c.rgb().unwrap_or((255, 255, 255));
+    (0xC2000000u32 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)) as i32
+}
+
+/// Replace (or insert) the hatch's `HATCHBACKGROUNDCOLOR` extended-data record,
+/// preserving every other application's records.
+pub fn set_background_color(h: &mut Hatch, c: &acadrust::types::Color) {
+    use acadrust::xdata::{ExtendedDataRecord, XDataValue};
+    const APP: &str = "HATCHBACKGROUNDCOLOR";
+    let kept: Vec<ExtendedDataRecord> = h
+        .common
+        .extended_data
+        .records()
+        .iter()
+        .filter(|r| r.application_name != APP)
+        .cloned()
+        .collect();
+    h.common.extended_data.clear();
+    for r in kept {
+        h.common.extended_data.add_record(r);
+    }
+    let mut rec = ExtendedDataRecord::new(APP);
+    rec.add_value(XDataValue::Integer32(pack_background_color(c)));
+    h.common.extended_data.add_record(rec);
 }
 
 fn properties(h: &Hatch) -> Vec<PropSection> {
@@ -117,8 +159,10 @@ fn properties(h: &Hatch) -> Vec<PropSection> {
     };
     let area = boundary_area(h);
     let g = &h.gradient_color;
-    let grad_c1 = g.colors.first().map(|e| color_str(e.color)).unwrap_or_default();
-    let grad_c2 = g.colors.get(1).map(|e| color_str(e.color)).unwrap_or_default();
+    let default_col = acadrust::types::Color::Index(7);
+    let grad_c1 = g.colors.first().map(|e| e.color).unwrap_or(default_col);
+    let grad_c2 = g.colors.get(1).map(|e| e.color).unwrap_or(default_col);
+    let bg_col = background_color(h).unwrap_or(default_col);
 
     if g.enabled {
         // ── Gradient fill ──────────────────────────────────────────────────
@@ -128,10 +172,25 @@ fn properties(h: &Hatch) -> Vec<PropSection> {
             PropSection {
                 title: "Pattern".into(),
                 props: vec![
-                    ro("Type", "fill_type", grad_type),
+                    Property {
+                        label: "Type".into(),
+                        field: "fill_type",
+                        value: PropValue::Choice {
+                            selected: grad_type.to_string(),
+                            options: vec!["Two color".into(), "One color".into()],
+                        },
+                    },
                     ro("Gradient name", "gradient_name", g.name.clone()),
-                    ro("Color 1", "gradient_color_1", grad_c1),
-                    ro("Color 2", "gradient_color_2", grad_c2),
+                    Property {
+                        label: "Color 1".into(),
+                        field: "gradient_color_1",
+                        value: PropValue::ColorChoice(grad_c1),
+                    },
+                    Property {
+                        label: "Color 2".into(),
+                        field: "gradient_color_2",
+                        value: PropValue::ColorChoice(grad_c2),
+                    },
                     edit("Angle", "pattern_angle", g.angle.to_degrees()),
                     ro("Centered", "gradient_centered", centered),
                 ],
@@ -140,8 +199,6 @@ fn properties(h: &Hatch) -> Vec<PropSection> {
                 title: "Geometry".into(),
                 props: vec![
                     edit("Elevation", "elevation", h.elevation),
-                    ro("Origin X", "origin_x", String::new()),
-                    ro("Origin Y", "origin_y", String::new()),
                     ro("Area", "area", format!("{:.4}", area)),
                     ro("Cumulative area", "cumulative_area", format!("{:.4}", area)),
                 ],
@@ -156,7 +213,11 @@ fn properties(h: &Hatch) -> Vec<PropSection> {
                     ),
                     ro("Annotative", "annotative", String::new()),
                     ro("Island detection style", "style", style),
-                    ro("Background color", "background_color", String::new()),
+                    Property {
+                    label: "Background color".into(),
+                    field: "background_color",
+                    value: PropValue::ColorChoice(bg_col),
+                },
                 ],
             },
         ];
@@ -234,12 +295,11 @@ fn properties(h: &Hatch) -> Vec<PropSection> {
                 double_row,
                 associative_row,
                 island_row,
-                ro("Background color", "background_color", String::new()),
-                // ── Gradient info (read-only) ──────────────────────────────
-                ro("Gradient colors", "gradient_colors", g.colors.len().to_string()),
-                ro("Gradient tint", "gradient_tint", format!("{:.4}", g.color_tint)),
-                ro("Gradient color 1", "gradient_color_1", grad_c1),
-                ro("Gradient color 2", "gradient_color_2", grad_c2),
+                Property {
+                    label: "Background color".into(),
+                    field: "background_color",
+                    value: PropValue::ColorChoice(bg_col),
+                },
             ],
         },
         PropSection {
@@ -290,6 +350,10 @@ fn apply_geom_prop(h: &mut Hatch, field: &str, value: &str) {
                 "Ignore" => HatchStyleType::Ignore,
                 _ => h.style,
             };
+            return;
+        }
+        "fill_type" => {
+            h.gradient_color.is_single_color = value == "One color";
             return;
         }
         _ => {}

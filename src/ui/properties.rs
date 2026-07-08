@@ -149,6 +149,9 @@ pub struct PropertiesPanel {
     /// from `color_picker_open` so the entity colour and the background colour
     /// pickers are independent.
     pub bg_color_picker_open: bool,
+    /// Field name of the generic per-field colour picker currently open (e.g. a
+    /// hatch gradient colour), or `None`. Keeps each field's picker independent.
+    pub open_color_field: Option<String>,
     /// Which vertex a multi-vertex entity (polyline) is focused on — driven by
     /// the Current Vertex ◀ / ▶ stepper. Reset to 0 when the selection changes.
     pub prop_vertex: usize,
@@ -173,6 +176,7 @@ impl Default for PropertiesPanel {
             color_picker_open: false,
             color_palette_open: false,
             bg_color_picker_open: false,
+            open_color_field: None,
             prop_vertex: 0,
         }
     }
@@ -427,6 +431,27 @@ impl PropertiesPanel {
                 Message::PropBgColorChanged,
                 Message::PropBgColorPickerToggle,
                 Message::PropBgColorPickerToggle,
+            );
+            return prop_row_widget(label, selector);
+        }
+        // Generic per-field colour picker (hatch gradient colours) — routes to
+        // the field, not the entity's main colour.
+        if field == "gradient_color_1" || field == "gradient_color_2" {
+            let open = self.open_color_field.as_deref() == Some(field);
+            let fsel = field.to_string();
+            let selector = crate::ui::color_select::color_selector(
+                color,
+                open,
+                crate::ui::color_select::ColorExtras {
+                    by_layer: false,
+                    by_block: false,
+                },
+                move |c| Message::PropColorFieldChanged {
+                    field: fsel.clone(),
+                    color: c,
+                },
+                Message::PropColorFieldToggle(field.to_string()),
+                Message::PropColorFieldToggle(field.to_string()),
             );
             return prop_row_widget(label, selector);
         }
