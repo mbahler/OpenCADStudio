@@ -221,7 +221,7 @@ impl OpenCADStudio {
                 // A line/arc drawn by a repeating command advances the ARC_CONT
                 // continuation anchor, so ending one run and launching another
                 // keeps continuing from the last segment (mirrors the
-                // CommitAndExit arm). Non-continuable repeats (point/ray/spline)
+                // CommitAndExit arm). Non-continuable repeats (point/ray)
                 // leave the anchor untouched. (#327)
                 if matches!(
                     entity,

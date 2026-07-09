@@ -10,6 +10,8 @@ use crate::command::{CadCommand, CmdResult};
 use crate::modules::{IconKind, ModuleEvent, ToolDef};
 use crate::scene::model::wire_model::WireModel;
 use glam::{DVec3, Vec3};
+use truck_modeling::base::{BoundedCurve, ParametricCurve};
+use truck_modeling::{BSplineCurve, KnotVec, Point3};
 
 #[allow(dead_code)]
 pub fn tool() -> ToolDef {
@@ -71,6 +73,33 @@ fn uniform_knots(n: usize, d: usize) -> Vec<f64> {
         .collect()
 }
 
+/// Sample the degree-3 clamped B-spline through `pts` into a dense polyline,
+/// built with the same control points + knot vector `build()` commits so the
+/// preview traces the exact final curve — not the straight control polygon.
+/// Fewer than 2 points has no curve; the points are returned as-is.
+fn sample_curve(pts: &[Vec3]) -> Vec<[f32; 3]> {
+    let n = pts.len();
+    if n < 2 {
+        return pts.iter().map(|p| [p.x, p.y, p.z]).collect();
+    }
+    let degree = 3_usize.min(n - 1);
+    let ctrl: Vec<Point3> = pts
+        .iter()
+        .map(|p| Point3::new(p.x as f64, p.y as f64, p.z as f64))
+        .collect();
+    let curve = BSplineCurve::new(KnotVec::from(uniform_knots(n, degree)), ctrl);
+    let (t0, t1) = curve.range_tuple();
+    // Resolution scales with span count so long splines stay smooth.
+    let steps = 24 * (n - 1);
+    (0..=steps)
+        .map(|i| {
+            let t = t0 + (t1 - t0) * (i as f64 / steps as f64);
+            let p = curve.subs(t);
+            [p.x as f32, p.y as f32, p.z as f32]
+        })
+        .collect()
+}
+
 impl CadCommand for SplineCommand {
     fn name(&self) -> &'static str {
         "SPLINE"
@@ -102,15 +131,18 @@ impl CadCommand for SplineCommand {
     }
 
     fn on_enter(&mut self) -> CmdResult {
+        // A spline gathers many points into ONE entity, so finishing must end
+        // the command (CommitAndExit) — CommitEntity keeps the command armed
+        // with the accumulated points and traps the cursor in a redraw loop.
         match self.build(false) {
-            Some(e) => CmdResult::CommitEntity(e),
+            Some(e) => CmdResult::CommitAndExit(e),
             None => CmdResult::Cancel,
         }
     }
 
     fn on_escape(&mut self) -> CmdResult {
         match self.build(false) {
-            Some(e) => CmdResult::CommitEntity(e),
+            Some(e) => CmdResult::CommitAndExit(e),
             None => CmdResult::Cancel,
         }
     }
@@ -142,12 +174,14 @@ impl CadCommand for SplineCommand {
         if self.pts.is_empty() {
             return None;
         }
-        // Show all committed points + cursor as a connected polyline.
-        let mut pts: Vec<[f32; 3]> = self.pts.iter().map(|p| [p.x, p.y, p.z]).collect();
-        pts.push([pt.x, pt.y, pt.z]);
+        // Preview the actual B-spline curve, treating the cursor as the next
+        // control point, sampled exactly like the committed entity — not the
+        // straight control polygon.
+        let mut ctrl = self.pts.clone();
+        ctrl.push(pt);
         Some(WireModel::solid(
             "rubber_band".into(),
-            pts,
+            sample_curve(&ctrl),
             WireModel::CYAN,
             false,
         ))
