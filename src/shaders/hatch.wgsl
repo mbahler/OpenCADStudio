@@ -1,16 +1,25 @@
-// Hatch shader — GPU-driven hatch fill over an arbitrary polygon boundary.
+// Phase 4-B — batched hatch shader. All hatches in one draw call;
+// per-instance data fetched from storage buffers indexed by the
+// `instance_index` vertex attribute (passed from the per-vertex
+// (local_xy, instance_index) stream of tessellated boundary-triangle
+// positions so we don't depend on @builtin(instance_index) edge cases
+// across backends).
 //
-// Vertex shader  : projects a bounding-box quad over the hatch region.
-// Fragment shader: three stages —
-//   1. Point-in-polygon (ray casting against boundary vertices in world XY).
-//   2. Pattern test:
-//        mode 0 — N line families (PAT format), each with optional dash pattern.
-//        mode 1 — solid fill.
-//        mode 2 — linear gradient.
+// Layout — matches `hatch_gpu.rs`:
+//   group 1 binding 0  InstanceBuffer  HatchInstance[]   (128 B / inst)
+//   group 1 binding 1  BoundaryBuffer  vec4<f32>[]       (xy in .xy)
+//   group 1 binding 2  FamilyBuffer    LineFamilyGpu[]   (48 B / fam)
+//   group 1 binding 3  DashBuffer      f32[]
 //
-// GPU limits: MAX_FAMILIES = 16, MAX_DASHES = 128.
+// The vertex shader emits tessellated boundary triangles in local space
+// (an instance whose boundary failed to tessellate falls back to an
+// AABB quad with `poly_test == 1`, so the fragment shader still runs
+// `in_polygon` to clip it to the real shape). A `visible == 0` instance
+// gets an out-of-NDC clip position so the fragment shader never runs
+// for it — that's the GPU-side cull (Phase 4-B equivalent of
+// `compute_hatch_lod` writing `hatch_skip_flags`).
 
-// ── Group 0: frame uniforms (shared) ──────────────────────────────────────
+// ── Group 0: shared frame uniforms (matches hatch.wgsl) ──────────────────
 
 struct Uniforms {
     viewport_size:       vec2<f32>,
@@ -28,94 +37,109 @@ struct Uniforms {
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
-// ── Group 1: per-hatch data ────────────────────────────────────────────────
-//
-// mode encoding:
-//   0 → Pattern  (evaluate FamilyBatch)
-//   1 → Solid    (return h.color immediately)
-//   2 → Gradient (mix h.color → h.color2 along grad_cos/grad_sin)
+// ── Group 1: batched hatch storage ───────────────────────────────────────
 
-struct HatchUniforms {
-    color:        vec4<f32>,  //  0: primary RGBA
-    color2:       vec4<f32>,  // 16: gradient end color
-    mode:         u32,        // 32: 0=pattern, 1=solid, 2=gradient
-    vcount:       u32,        // 36: boundary vertex count
-    angle_offset: f32,        // 40: pattern rotation (radians, added to each family)
-    scale:        f32,        // 44: pattern scale multiplier
-    grad_cos:     f32,        // 48: gradient direction cos
-    grad_sin:     f32,        // 52: gradient direction sin
-    grad_min:     f32,        // 56: gradient proj_min
-    grad_range:   f32,        // 60: gradient proj_range
-    origin:       vec2<f32>,  // 64: hatch-local pattern origin (boundary
-    //                        //     centre). Pattern math runs against
-    //                        //     `xz - origin` so the f32 modulo doesn't
-    //                        //     catastrophically cancel when world coords
-    //                        //     are large and pattern spacing is small.
-    origin_low:   vec2<f32>,  // 72: anchor low residual (double-single)
+struct HatchInstance {
+    color:           vec4<f32>,
+    color2:          vec4<f32>,
+    aabb:            vec4<f32>,   // (xmin, ymin, xmax, ymax) — local space
+    world_origin:    vec2<f32>,     // anchor high half
+    world_origin_low: vec2<f32>,    // anchor low residual (double-single)
+    angle_offset:    f32,
+    scale:           f32,
+    grad_cos:        f32,
+    grad_sin:        f32,
+    grad_min:        f32,
+    grad_range:      f32,
+    mode:            u32,         // 0=pattern, 1=solid, 2=gradient
+    visible:         u32,         // 0 = skip (CPU writes via compute_hatch_lod)
+    boundary_offset: u32,
+    boundary_count:  u32,
+    family_offset:   u32,
+    family_count:    u32,
+    draw_depth:      f32,          // signed (-1,1) draw-order bias; 0 = neutral
+    poly_test:       u32,         // 1 = run in_polygon (fallback), 0 = skip
+    _pad1:           u32,
+    _pad2:           u32,
 }
-@group(1) @binding(0) var<uniform> h: HatchUniforms;
 
-struct Boundary {
-    verts: array<vec4<f32>, 1024>,
-}
-@group(1) @binding(1) var<uniform> b: Boundary;
+// Draw-order depth bias (see wire.wgsl). Higher draw_depth → smaller z →
+// drawn on top, ordering this fill against other entity types.
+const DRAW_ORDER_BIAS: f32 = 0.001;
 
-// One line family (48 bytes, matches LineFamilyGpu in hatch_gpu.rs).
 struct LineFamily {
-    cos_a:      f32,   // base cos(angle)
-    sin_a:      f32,   // base sin(angle)
-    x0:         f32,   // family origin x
-    y0:         f32,   // family origin y
-    dx:         f32,   // step vector x
-    dy:         f32,   // step vector y
-    perp_step:  f32,   // -dx*sin_a + dy*cos_a  (perpendicular spacing)
-    along_step: f32,   //  dx*cos_a + dy*sin_a  (phase shift per step)
-    line_width: f32,   // half-width of each line (|perp_step| × 0.08)
-    period:     f32,   // sum(|dashes|) — 0 means solid
-    n_dashes:   u32,   // number of dash entries
-    dash_off:   u32,   // start index in dash_values
+    cos_a:       f32,
+    sin_a:       f32,
+    x0:          f32,
+    y0:          f32,
+    dx:          f32,
+    dy:          f32,
+    perp_step:   f32,
+    along_step:  f32,
+    line_width:  f32,
+    period:      f32,
+    n_dashes:    u32,
+    dash_offset: u32,
 }
 
-struct FamilyBatch {
-    families:    array<LineFamily, 16>,
-    dash_values: array<vec4<f32>, 32>,  // 128 f32s packed as 32×vec4 (uniform stride=16)
-    n_families:  u32,
-    _pad0: u32, _pad1: u32, _pad2: u32,
+@group(1) @binding(0) var<storage, read> instances:  array<HatchInstance>;
+@group(1) @binding(1) var<storage, read> boundary:   array<vec4<f32>>;
+@group(1) @binding(2) var<storage, read> families:   array<LineFamily>;
+@group(1) @binding(3) var<storage, read> dashes:     array<f32>;
+// Per-instance visibility (Phase 4-B sub-pixel + frustum skip).
+// CPU writes `1` to draw / `0` to skip every frame; vertex shader
+// emits an out-of-NDC clip position for 0-instances so the GPU
+// rasterizer culls the primitive before any fragment runs.
+@group(1) @binding(4) var<storage, read> visibility: array<u32>;
+
+// ── Vertex shader ────────────────────────────────────────────────────────
+
+struct VIn {
+    @location(0) local_xy:       vec2<f32>,
+    @location(1) instance_index: u32,
 }
-@group(1) @binding(2) var<uniform> f: FamilyBatch;
 
-// ── Vertex shader ──────────────────────────────────────────────────────────
-
-struct VIn  { @location(0) pos: vec3<f32> }
 struct VOut {
-    @builtin(position) clip: vec4<f32>,
-    @location(0)       xz:   vec2<f32>,
+    @builtin(position) clip:           vec4<f32>,
+    @location(0)       xz:             vec2<f32>,
+    @location(1) @interpolate(flat) instance_index: u32,
 }
 
 @vertex fn vs_main(v: VIn) -> VOut {
     var o: VOut;
-    // v.pos comes in pre-shifted to hatch-local space (CPU subtracted
-    // h.origin from the quad). Add origin back inside the view_proj
-    // multiply to land at the correct world-space clip position. The
-    // f32+f32 addition can lose sub-mm precision at very far hatches
-    // but the result feeds view_proj for screen NDC where sub-pixel
-    // jitter is invisible. The local-space `xz` we export to the
-    // fragment shader stays at full f32 precision so the in_polygon /
-    // pattern math doesn't catastrophically cancel.
-    // Double-single relative-to-eye: anchor high cancels eye_high (Sterbenz);
-    // boundary-local v.pos + anchor low + (−eye_low) carry the residual.
-    let hi = vec3<f32>(h.origin.x - u.eye_high.x,
-                       h.origin.y - u.eye_high.y,
+    let inst = instances[v.instance_index];
+
+    // Per-frame visibility (CPU-driven sub-pixel + frustum skip).
+    // 0 → emit a clip position whose x/y exceed |w| so the GPU
+    // frustum-culls the primitive and no fragment runs. (WGSL
+    // forbids literal NaN so this out-of-NDC trick replaces the
+    // usual NaN-degenerate-triangle.)
+    if visibility[v.instance_index] == 0u {
+        o.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        o.xz = vec2<f32>(0.0, 0.0);
+        o.instance_index = v.instance_index;
+        return o;
+    }
+
+    let local = v.local_xy;
+    // Double-single relative-to-eye: the anchor high half cancels exactly
+    // against eye_high (Sterbenz); local + anchor low + (−eye_low) carry the
+    // residual. `local` is small (boundary-relative), so adding it in the low
+    // term keeps full precision at UTM-scale anchors.
+    let hi = vec3<f32>(inst.world_origin.x - u.eye_high.x,
+                       inst.world_origin.y - u.eye_high.y,
                        -u.eye_high.z);
-    let lo = vec3<f32>(v.pos.x + h.origin_low.x - u.eye_low.x,
-                       v.pos.y + h.origin_low.y - u.eye_low.y,
-                       v.pos.z - u.eye_low.z);
+    let lo = vec3<f32>(local.x + inst.world_origin_low.x - u.eye_low.x,
+                       local.y + inst.world_origin_low.y - u.eye_low.y,
+                       -u.eye_low.z);
     o.clip = u.view_rot * vec4<f32>(hi + lo, 1.0);
-    o.xz   = vec2<f32>(v.pos.x, v.pos.y);
+    o.clip.z = o.clip.z - inst.draw_depth * DRAW_ORDER_BIAS * o.clip.w;
+    o.xz = local;
+    o.instance_index = v.instance_index;
     return o;
 }
 
-// ── Point-in-polygon (ray casting) ────────────────────────────────────────
+// ── Point-in-polygon (ray casting) over a sub-range of BoundaryBuffer ────
 
 fn valid_vertex(p: vec2<f32>) -> bool {
     return p.x == p.x && p.y == p.y;
@@ -129,14 +153,13 @@ fn edge_crosses(p: vec2<f32>, a: vec2<f32>, c: vec2<f32>) -> bool {
     return false;
 }
 
-fn in_polygon(p: vec2<f32>) -> bool {
+fn in_polygon(p: vec2<f32>, offset: u32, count: u32) -> bool {
     var inside = false;
-    let n = h.vcount;
     var prev = vec2<f32>(0.0, 0.0);
     var first = vec2<f32>(0.0, 0.0);
     var have_prev = false;
-    for (var i = 0u; i < n; i++) {
-        let vi = b.verts[i].xy;
+    for (var i = 0u; i < count; i++) {
+        let vi = boundary[offset + i].xy;
         if !valid_vertex(vi) {
             // Close the sub-loop that just ended (last → first edge). An
             // unclosed boundary — e.g. a SOLID's 4 corners, which are not
@@ -164,11 +187,8 @@ fn in_polygon(p: vec2<f32>) -> bool {
     return inside;
 }
 
-// ── Per-family hatch test ─────────────────────────────────────────────────
-//
-// Returns true if world point `xz` falls on a hatch line of `fam`.
-// `cos_off` / `sin_off` are cos/sin of `h.angle_offset` (precomputed once).
-// `scale` is `h.scale`.
+// ── Per-family hatch test (same math as hatch.wgsl, dashes from
+// global DashBuffer instead of per-hatch FamilyBatch) ────────────────────
 
 fn check_family(
     xz:      vec2<f32>,
@@ -177,18 +197,15 @@ fn check_family(
     sin_off: f32,
     scale:   f32,
 ) -> bool {
-    // Rotate family direction by angle_offset.
     let cos_a = fam.cos_a * cos_off - fam.sin_a * sin_off;
     let sin_a = fam.sin_a * cos_off + fam.cos_a * sin_off;
 
-    // Rotate and scale the family origin.
     let ox = (fam.x0 * cos_off - fam.y0 * sin_off) * scale;
     let oz = (fam.x0 * sin_off + fam.y0 * cos_off) * scale;
 
     let px = xz.x - ox;
     let pz = xz.y - oz;
 
-    // Perpendicular distance from the nearest parallel line.
     let perp_step = fam.perp_step * scale;
     let line_w    = abs(fam.line_width * scale);
 
@@ -199,18 +216,16 @@ fn check_family(
     let half_px = length(vec2<f32>(dpdx(perp), dpdy(perp))) * 0.5;
 
     // World units per screen pixel on each axis — used to light exactly the
-    // one pixel that contains a dot's centre (pixel-snapped, so a dot stays a
-    // steady single pixel at any pattern angle instead of flickering).
+    // one pixel that contains a dot's centre (pixel-snapped, so the dot stays
+    // a steady single pixel at any pattern angle instead of flickering).
     let wpx = length(vec2<f32>(dpdx(xz.x), dpdy(xz.x)));
     let wpy = length(vec2<f32>(dpdx(xz.y), dpdy(xz.y)));
 
-    // A fragment within ~1px of a line may be a dot; further out is empty fill.
+    // A fragment within ~1px of a line may be a dot; everything further out is
+    // empty fill. (A dot's pixel sits on a line, so its perp offset is < 1px.)
     if d > half_px * 2.0 { return false; }
-
-    // Solid line family — no dash check needed.
     if fam.n_dashes == 0u { return d <= half_px; }
 
-    // Dash pattern test: position along line k.
     let along_step = fam.along_step * scale;
     let period     = fam.period * scale;
     let along      = px * cos_a + pz * sin_a;
@@ -219,17 +234,17 @@ fn check_family(
 
     var pos = 0.0;
     for (var j = 0u; j < fam.n_dashes; j++) {
-        let idx = fam.dash_off + j;
-        let sv  = f.dash_values[idx / 4u][idx % 4u] * scale;  // scale dash lengths
+        let sv = dashes[fam.dash_offset + j] * scale;
         if sv > 0.0 {
             if d <= half_px && t_mod >= pos && t_mod < pos + sv { return true; }
             pos = pos + sv;
         } else if sv < 0.0 {
             pos = pos - sv;
         } else {
-            // Dot: signed distance to its lattice centre, rotated back to world
-            // and snapped to the pixel grid — the grid rotates with the
-            // pattern but the lit pixel stays a steady single pixel.
+            // Dot: signed distance to its lattice centre (along the line and
+            // across lines), rotated back to world, then snapped to the pixel
+            // grid. The dot grid rotates with the pattern; the lit pixel does
+            // not, so it never thins/flickers.
             let dtv = (t - pos) - round((t - pos) / period) * period;
             let owx = -dtv * cos_a + dperp * sin_a;
             let owy = -dtv * sin_a - dperp * cos_a;
@@ -239,51 +254,50 @@ fn check_family(
     return false;
 }
 
-// ── Fragment shader ────────────────────────────────────────────────────────
+// ── Fragment shader ──────────────────────────────────────────────────────
 
 @fragment fn fs_main(v: VOut) -> @location(0) vec4<f32> {
-    // 1. Boundary test.
-    if !in_polygon(v.xz) { discard; }
+    let inst = instances[v.instance_index];
 
-    // 2. Mode dispatch.
-    if h.mode == 1u {
-        // Solid fill.
-        return h.color;
-    } else if h.mode == 2u {
-        // Linear gradient.
-        let proj = v.xz.x * h.grad_cos + v.xz.y * h.grad_sin;
-        let t    = clamp((proj - h.grad_min) / h.grad_range, 0.0, 1.0);
-        return mix(h.color, h.color2, t);
+    // 1. Boundary test — only on the fallback path (poly_test==1). On the
+    //    tessellated fast path the triangles already bound the fill.
+    if inst.poly_test == 1u {
+        if !in_polygon(v.xz, inst.boundary_offset, inst.boundary_count) {
+            discard;
+        }
     }
 
-    // 3. Pattern: LOD substitution — when the densest family's spacing
-    //    projects to less than 2 px, individual lines blur into a solid
-    //    fill and the per-family loop just wastes ALU. Return solid color
-    //    instead. (Phase 3.3 hatch LOD.)
-    if u.world_per_pixel > 0.0 && f.n_families > 0u {
+    // 2. Mode dispatch.
+    if inst.mode == 1u {
+        return inst.color;
+    } else if inst.mode == 2u {
+        let proj = v.xz.x * inst.grad_cos + v.xz.y * inst.grad_sin;
+        let t = clamp((proj - inst.grad_min) / inst.grad_range, 0.0, 1.0);
+        return mix(inst.color, inst.color2, t);
+    }
+
+    // 3. Pattern LOD: when the densest family's spacing projects below
+    //    2 px, lines blur into a solid fill — return color instead of
+    //    iterating every family (mirrors Phase 3.3 LOD in hatch.wgsl).
+    if u.world_per_pixel > 0.0 && inst.family_count > 0u {
         var min_spacing_world: f32 = 1.0e30;
-        for (var i = 0u; i < f.n_families; i++) {
-            let s = abs(f.families[i].perp_step) * h.scale;
+        for (var i = 0u; i < inst.family_count; i++) {
+            let s = abs(families[inst.family_offset + i].perp_step) * inst.scale;
             if s > 0.0 && s < min_spacing_world {
                 min_spacing_world = s;
             }
         }
         if min_spacing_world / u.world_per_pixel < 2.0 {
-            return h.color;
+            return inst.color;
         }
     }
 
-    // 4. Pattern: v.xz is already in hatch-local space (CPU pre-shifted
-    //    quad + BoundaryData by h.origin). The PAT family origin
-    //    (typically (0,0)) is treated as relative to h.origin, so
-    //    pattern phase is per-hatch rather than world-aligned — that
-    //    trade-off is the price of f32 precision at large drawing
-    //    extents.
-    let cos_off = cos(h.angle_offset);
-    let sin_off = sin(h.angle_offset);
-    for (var i = 0u; i < f.n_families; i++) {
-        if check_family(v.xz, f.families[i], cos_off, sin_off, h.scale) {
-            return h.color;
+    // 4. Pattern evaluation.
+    let cos_off = cos(inst.angle_offset);
+    let sin_off = sin(inst.angle_offset);
+    for (var i = 0u; i < inst.family_count; i++) {
+        if check_family(v.xz, families[inst.family_offset + i], cos_off, sin_off, inst.scale) {
+            return inst.color;
         }
     }
     discard;

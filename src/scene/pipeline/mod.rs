@@ -1,6 +1,6 @@
 pub mod face3d_gpu;
-pub mod hatch_batched_gpu;
 pub mod hatch_gpu;
+pub mod wipeout_gpu;
 pub mod image_gpu;
 pub mod mesh_gpu;
 pub mod text_gpu;
@@ -13,7 +13,7 @@ use iced::wgpu::util::DeviceExt;
 use iced::{Rectangle, Size};
 
 pub use face3d_gpu::Face3DGpu;
-pub use hatch_gpu::HatchGpu;
+pub use wipeout_gpu::WipeoutGpu;
 pub use image_gpu::ImageGpu;
 pub use mesh_gpu::MeshLodGpu;
 pub use uniforms::Uniforms;
@@ -41,12 +41,12 @@ pub struct Pipeline {
     /// storage). Passed to `WireGpu::from_run` / `from_batch` so they can build
     /// each batch's per-wire bind group.
     wire_const_bgl: Option<wgpu::BindGroupLayout>,
-    hatch_pipeline: wgpu::RenderPipeline,
+    wipeout_pipeline: wgpu::RenderPipeline,
     /// Phase 4-B — single-draw batched hatch pipeline. Per-instance
     /// data lives in storage buffers; one draw call covers every
     /// hatch in the frame. `None` on WebGL2 (wasm), which lacks
     /// vertex-stage storage buffers.
-    hatch_batched_pipeline: Option<wgpu::RenderPipeline>,
+    hatch_pipeline: Option<wgpu::RenderPipeline>,
     image_pipeline: wgpu::RenderPipeline,
     /// SDF text-quad pipeline (Phase 2b): draws per-glyph quads sampling the
     /// shared glyph atlas. Fed only when `OCS_TEXT_SDF` is set (else no verts).
@@ -72,10 +72,10 @@ pub struct Pipeline {
     face3d_depth_pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
-    hatch_bgl1: wgpu::BindGroupLayout,
+    wipeout_bgl1: wgpu::BindGroupLayout,
     /// Group-1 layout for the batched hatch pipeline (storage buffers
     /// for instances / boundary / families / dashes). `None` on WebGL2.
-    hatch_batched_bgl1: Option<wgpu::BindGroupLayout>,
+    hatch_bgl1: Option<wgpu::BindGroupLayout>,
     image_bgl1: wgpu::BindGroupLayout,
     /// Group-1 layout for the text pipeline (atlas texture + sampler).
     text_atlas_bgl: wgpu::BindGroupLayout,
@@ -125,14 +125,13 @@ pub struct Pipeline {
     /// frame they are present (small), drawn on top of the base wire pass — so
     /// a live drag never re-uploads the resident base buffer.
     gpu_preview_wires: Vec<WireGpu>,
-    /// Phase 4-B — single batched-hatch GPU resource. Drawn in one
-    /// indexed call with per-instance visibility masking the rest.
-    /// Legacy per-hatch `Vec<HatchGpu>` + scissor / skip-flag plumbing
-    /// removed in step 5; the `hatch_pipeline` itself stays around to
-    /// serve the wipeout path which still uses `HatchGpu`.
-    gpu_hatch_batched: Option<hatch_batched_gpu::HatchBatchedGpu>,
-    /// Wipeout fills — rendered after wires in a separate pass.
-    gpu_wipeouts: Vec<HatchGpu>,
+    /// The canonical hatch fills — a single batched GPU resource drawn in one
+    /// call with per-instance visibility masking the rest. All pattern line
+    /// families are uploaded (no cap). `None` on WebGL2.
+    gpu_hatch: Option<hatch_gpu::HatchGpu>,
+    /// Wipeout masks — solid fills rendered after wires in a separate pass via
+    /// the legacy per-primitive `WipeoutGpu` renderer.
+    gpu_wipeouts: Vec<WipeoutGpu>,
     /// Per-wipeout draw-time skip flag (Phase 2.3 frustum cull). `true`
     /// when the wipeout's projected AABB sits entirely outside the
     /// viewport rect. Recomputed by `compute_wipeout_lod`.
@@ -431,8 +430,8 @@ impl Pipeline {
         };
         let frag = wgpu::ShaderStages::FRAGMENT;
         let vert_frag = wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT;
-        let hatch_bgl1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("hatch.bgl1"),
+        let wipeout_bgl1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("wipeout.bgl1"),
             entries: &[
                 hatch_entry(0, vert_frag),
                 hatch_entry(1, frag),
@@ -440,19 +439,86 @@ impl Pipeline {
             ],
         });
 
+        let wipeout_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("wipeout.pipeline_layout"),
+            bind_group_layouts: &[&frame_bgl, &wipeout_bgl1],
+            push_constant_ranges: &[],
+        });
+
+        let wipeout_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("wipeout.shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
+                "../../shaders/wipeout.wgsl"
+            ))),
+        });
+
+        let wipeout_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wipeout.pipeline"),
+            layout: Some(&wipeout_layout),
+            vertex: wgpu::VertexState {
+                module: &wipeout_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wipeout_gpu::HatchVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 1,
+                    slope_scale: 1.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState {
+                count: MSAA_SAMPLES,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &wipeout_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        // ── Hatch batched pipeline (Phase 4-B) ─────────────────────────────
+        // WebGL2 (the wasm fallback backend) has no vertex-stage storage
+        // buffers, which this pipeline's bind group requires. Skip it on wasm
+        // and run without the batched-hatch optimization.
+        #[cfg(target_arch = "wasm32")]
+        let (hatch_bgl1, hatch_pipeline): (
+            Option<wgpu::BindGroupLayout>,
+            Option<wgpu::RenderPipeline>,
+        ) = (None, None);
+        #[cfg(not(target_arch = "wasm32"))]
+        let (hatch_bgl1, hatch_pipeline) = {
+        let hatch_bgl1 = hatch_gpu::HatchGpu::bind_group_layout(device);
         let hatch_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("hatch.pipeline_layout"),
             bind_group_layouts: &[&frame_bgl, &hatch_bgl1],
             push_constant_ranges: &[],
         });
-
         let hatch_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("hatch.shader"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
                 "../../shaders/hatch.wgsl"
             ))),
         });
-
         let hatch_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("hatch.pipeline"),
             layout: Some(&hatch_layout),
@@ -496,74 +562,7 @@ impl Pipeline {
             multiview: None,
             cache: None,
         });
-
-        // ── Hatch batched pipeline (Phase 4-B) ─────────────────────────────
-        // WebGL2 (the wasm fallback backend) has no vertex-stage storage
-        // buffers, which this pipeline's bind group requires. Skip it on wasm
-        // and run without the batched-hatch optimization.
-        #[cfg(target_arch = "wasm32")]
-        let (hatch_batched_bgl1, hatch_batched_pipeline): (
-            Option<wgpu::BindGroupLayout>,
-            Option<wgpu::RenderPipeline>,
-        ) = (None, None);
-        #[cfg(not(target_arch = "wasm32"))]
-        let (hatch_batched_bgl1, hatch_batched_pipeline) = {
-        let hatch_batched_bgl1 = hatch_batched_gpu::HatchBatchedGpu::bind_group_layout(device);
-        let hatch_batched_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("hatch_batched.pipeline_layout"),
-            bind_group_layouts: &[&frame_bgl, &hatch_batched_bgl1],
-            push_constant_ranges: &[],
-        });
-        let hatch_batched_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("hatch_batched.shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
-                "../../shaders/hatch_batched.wgsl"
-            ))),
-        });
-        let hatch_batched_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("hatch_batched.pipeline"),
-            layout: Some(&hatch_batched_layout),
-            vertex: wgpu::VertexState {
-                module: &hatch_batched_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[hatch_batched_gpu::HatchBatchedVertex::layout()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: 1,
-                    slope_scale: 1.0,
-                    clamp: 0.0,
-                },
-            }),
-            multisample: wgpu::MultisampleState {
-                count: MSAA_SAMPLES,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &hatch_batched_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            multiview: None,
-            cache: None,
-        });
-        (Some(hatch_batched_bgl1), Some(hatch_batched_pipeline))
+        (Some(hatch_bgl1), Some(hatch_pipeline))
         };
 
         // ── Mesh pipeline ──────────────────────────────────────────────────
@@ -1152,8 +1151,8 @@ impl Pipeline {
             wire_const_bgl: Some(wire_const_bgl),
             #[cfg(target_arch = "wasm32")]
             wire_const_bgl: None,
+            wipeout_pipeline,
             hatch_pipeline,
-            hatch_batched_pipeline,
             image_pipeline,
             text_pipeline,
             text_atlas_bgl,
@@ -1172,8 +1171,8 @@ impl Pipeline {
             face3d_depth_pipeline,
             uniform_buffer,
             uniform_bind_group,
+            wipeout_bgl1,
             hatch_bgl1,
-            hatch_batched_bgl1,
             image_bgl1,
             depth_texture_size: Size::new(1, 1),
             // (0, 0) forces the first `ensure_depth_texture` to allocate at the
@@ -1192,7 +1191,7 @@ impl Pipeline {
             wire_pixel_scissors: vec![],
             gpu_selected_wires: vec![],
             gpu_preview_wires: vec![],
-            gpu_hatch_batched: None,
+            gpu_hatch: None,
             gpu_wipeouts: vec![],
             wipeout_skip_flags: vec![],
             wipeout_pixel_scissors: vec![],
@@ -1408,7 +1407,7 @@ impl Pipeline {
         clip_w: u32,
         clip_h: u32,
     ) {
-        let Some(batch) = &mut self.gpu_hatch_batched else {
+        let Some(batch) = &mut self.gpu_hatch else {
             return;
         };
         for (i, aabb) in batch.instance_aabbs.iter().enumerate() {
@@ -1581,21 +1580,21 @@ impl Pipeline {
 
     pub fn upload_hatches(&mut self, device: &wgpu::Device, hatches: &[HatchModel]) {
         // No batched pipeline (WebGL2) → nothing to upload.
-        let Some(bgl1) = &self.hatch_batched_bgl1 else {
-            self.gpu_hatch_batched = None;
+        let Some(bgl1) = &self.hatch_bgl1 else {
+            self.gpu_hatch = None;
             return;
         };
         let renderable: Vec<HatchModel> =
             hatches.iter().filter(|h| h.boundary.len() >= 3).cloned().collect();
-        self.gpu_hatch_batched =
-            hatch_batched_gpu::HatchBatchedGpu::build(device, bgl1, &renderable);
+        self.gpu_hatch =
+            hatch_gpu::HatchGpu::build(device, bgl1, &renderable);
     }
 
     pub fn upload_wipeouts(&mut self, device: &wgpu::Device, wipeouts: &[HatchModel]) {
         self.gpu_wipeouts = wipeouts
             .iter()
             .filter(|h| h.boundary.len() >= 3)
-            .map(|h| HatchGpu::new(device, h, &self.hatch_bgl1))
+            .map(|h| WipeoutGpu::new(device, h, &self.wipeout_bgl1))
             .collect();
     }
 
@@ -1733,7 +1732,7 @@ impl Pipeline {
             // (paper-space MSPACE) isn't ported to the batched path
             // yet — follow-up if it shows up as a visual issue.
             if let (Some(batch), Some(pipeline)) =
-                (&self.gpu_hatch_batched, &self.hatch_batched_pipeline)
+                (&self.gpu_hatch, &self.hatch_pipeline)
             {
                 // Skipped while navigating (interaction LOD) — the per-pixel
                 // hatch pass dominates the GPU frame on hatch-heavy drawings.
@@ -2211,7 +2210,7 @@ impl Pipeline {
                 occlusion_query_set: None,
             });
             pass.set_viewport(0.0, 0.0, vp.width as f32, vp.height as f32, 0.0, 1.0);
-            pass.set_pipeline(&self.hatch_pipeline);
+            pass.set_pipeline(&self.wipeout_pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             let mut scissor_active = false;
             for (i, wipeout) in self.gpu_wipeouts.iter().enumerate() {
@@ -2457,7 +2456,7 @@ fn aabb_diagonal_pixels(
 /// does, so the extra cost is negligible.
 ///
 /// IMPORTANT: the AABB must be in the same local space (world_offset
-/// subtracted) that `view_proj` expects. `HatchGpu.world_aabb` rebuilds
+/// subtracted) that `view_proj` expects. `WipeoutGpu.world_aabb` rebuilds
 /// the absolute local-space rect from `model.world_origin + boundary
 /// extents` for this reason; meshes already store an absolute rect.
 fn aabb_offscreen(
