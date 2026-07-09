@@ -141,7 +141,7 @@ impl StatusBar {
         };
         let scale_element: Element<'_, Message> = if scale_pill_enabled {
             tip(
-                scale_popup_btn(&scale_label, scale_popup_open),
+                popup_pill(&scale_label, scale_popup_open, Message::ToggleScalePopup),
                 "Annotation / Viewport Scale\nClick to change",
             )
         } else {
@@ -232,9 +232,10 @@ impl StatusBar {
                 PosReport::new(
                     SB_UNITS_ID,
                     tip(
-                        units_btn(
+                        popup_pill(
                             crate::ui::popup::units_popup::unit_short(insertion_units),
                             units_popup_open,
+                            Message::ToggleUnitsPopup,
                         ),
                         "Drawing Units (INSUNITS)\nClick to change",
                     ),
@@ -887,42 +888,17 @@ const SNAP_OFF_HOVER: Color = Color {
 
 // ── Scale popup button ────────────────────────────────────────────────────
 
-fn units_btn(label: &str, open: bool) -> Element<'static, Message> {
+/// A labelled status-bar pill that opens a picker popup on click (units,
+/// scale, …). Lit + accent-bordered while its popup is `open`. Shared so the
+/// popup-opening pills don't each re-declare the same button chrome.
+fn popup_pill(label: &str, open: bool, msg: Message) -> Element<'static, Message> {
     let label = label.to_string();
     button(
         text(label)
             .size(12)
             .color(if open { SNAP_BORDER_ON } else { OSNAP_OFF_TEXT }),
     )
-    .on_press(Message::ToggleUnitsPopup)
-    .style(move |_: &Theme, status| button::Style {
-        background: Some(Background::Color(match (open, status) {
-            (true, button::Status::Hovered) => SNAP_ON_HOVER,
-            (true, _) => SNAP_ON_BG,
-            (false, button::Status::Hovered) => SNAP_OFF_HOVER,
-            (false, _) => SNAP_OFF_BG,
-        })),
-        border: Border {
-            color: if open { SNAP_BORDER_ON } else { BORDER_COLOR },
-            width: 1.0,
-            radius: 2.0.into(),
-        },
-        text_color: if open { SNAP_BORDER_ON } else { OSNAP_OFF_TEXT },
-        shadow: iced::Shadow::default(),
-        snap: false,
-    })
-    .padding([4, 7])
-    .into()
-}
-
-fn scale_popup_btn(label: &str, open: bool) -> Element<'static, Message> {
-    let label = label.to_string();
-    button(
-        text(label)
-            .size(12)
-            .color(if open { SNAP_BORDER_ON } else { OSNAP_OFF_TEXT }),
-    )
-    .on_press(Message::ToggleScalePopup)
+    .on_press(msg)
     .style(move |_: &Theme, status| button::Style {
         background: Some(Background::Color(match (open, status) {
             (true, button::Status::Hovered) => SNAP_ON_HOVER,
