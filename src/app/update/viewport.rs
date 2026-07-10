@@ -812,12 +812,11 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
                         self.tabs[i].scene.set_preview_text(slid);
                         self.tabs[i].scene.set_preview_wires(Vec::new());
                     } else {
+                        // Wire geometry, or a reshape grip: re-tessellate. The
+                        // preview WireModels carry the entity's glyphs (gathered
+                        // for the preview-text buffer in the render path), so a
+                        // dimension / MTEXT-width drag keeps its text visible too.
                         let preview = self.tabs[i].scene.wire_models_for(&[grip.handle]);
-                        let ptext = preview
-                            .iter()
-                            .flat_map(|w| w.text_verts.iter().copied())
-                            .collect();
-                        self.tabs[i].scene.set_preview_text(ptext);
                         self.tabs[i].scene.set_preview_wires(preview);
                     }
                     self.refresh_selected_grips();

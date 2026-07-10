@@ -70,7 +70,7 @@ impl TextVertex {
 
 /// Split an f64 into the double-single (high f32, low residual f32) pair the
 /// shaders reconstruct relative-to-eye.
-fn split_ds(v: f64) -> (f32, f32) {
+pub(crate) fn split_ds(v: f64) -> (f32, f32) {
     let high = v as f32;
     (high, (v - high as f64) as f32)
 }

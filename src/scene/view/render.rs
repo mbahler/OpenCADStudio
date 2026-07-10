@@ -1126,14 +1126,22 @@ impl Scene {
         // draws only the text that belongs to it. Cached on the wire content
         // id so an unchanged wire set is not re-walked every frame.
         let text_verts = self.gather_text_verts(&all_wires, wire_content_id);
-        // Grip-drag / command-preview glyphs live on `self.preview_text` (set by
-        // the edit handlers), excluded from the epoch-cached base gather above.
-        // Clone the (tiny — one dragged entity) set per frame so dragged text
-        // stays on screen without re-uploading the resident base buffer (#316).
-        let preview_text_verts = if self.preview_text.is_empty() {
-            Arc::new(Vec::new())
-        } else {
-            Arc::new(self.preview_text.clone())
+        // Grip-drag / command-preview glyphs, excluded from the epoch-cached base
+        // gather above. Two sources, both tiny (one operation's worth) and walked
+        // per frame: the overlay wires' own glyphs (MOVE / COPY / ROTATE / SCALE /
+        // STRETCH / MIRROR ghosts carry text_verts) and `self.preview_text` (the
+        // grip-slide fast path, which emits bare glyphs with empty preview_wires).
+        // The two never overlap — a slide leaves preview_wires empty — so a plain
+        // concat is correct, no double-draw (issue #316).
+        let preview_text_verts = {
+            let mut pv: Vec<crate::scene::pipeline::text_gpu::TextVertex> = Vec::new();
+            for w in preview_wires.iter() {
+                if !w.text_verts.is_empty() {
+                    pv.extend_from_slice(&w.text_verts);
+                }
+            }
+            pv.extend_from_slice(&self.preview_text);
+            Arc::new(pv)
         };
         Some(ViewportData {
             wires: all_wires,

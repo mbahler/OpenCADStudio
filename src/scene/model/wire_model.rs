@@ -168,6 +168,11 @@ impl WireModel {
             p[1] += delta.y;
             p[2] += delta.z;
         }
+        if !out.text_verts.is_empty() {
+            let (dx, dy, dz) = (delta.x as f64, delta.y as f64, delta.z as f64);
+            out.text_verts =
+                map_text_verts(&self.text_verts, |x, y, z| (x + dx, y + dy, z + dz));
+        }
         out
     }
 
@@ -184,6 +189,14 @@ impl WireModel {
             p[0] = center.x + dx * c - dy * s;
             p[1] = center.y + dx * s + dy * c;
         }
+        if !out.text_verts.is_empty() {
+            let (cx, cy) = (center.x as f64, center.y as f64);
+            let (s, c) = (s as f64, c as f64);
+            out.text_verts = map_text_verts(&self.text_verts, |x, y, z| {
+                let (dx, dy) = (x - cx, y - cy);
+                (cx + dx * c - dy * s, cy + dx * s + dy * c, z)
+            });
+        }
         out
     }
 
@@ -197,6 +210,13 @@ impl WireModel {
             p[0] = center.x + (p[0] - center.x) * factor;
             p[1] = center.y + (p[1] - center.y) * factor;
             p[2] = center.z + (p[2] - center.z) * factor;
+        }
+        if !out.text_verts.is_empty() {
+            let (cx, cy, cz) = (center.x as f64, center.y as f64, center.z as f64);
+            let f = factor as f64;
+            out.text_verts = map_text_verts(&self.text_verts, |x, y, z| {
+                (cx + (x - cx) * f, cy + (y - cy) * f, cz + (z - cz) * f)
+            });
         }
         out
     }
@@ -217,6 +237,18 @@ impl WireModel {
                 p[1] += delta.y;
                 p[2] += delta.z;
             }
+        }
+        if !out.text_verts.is_empty() {
+            let (mnx, mny) = (win_min.x as f64, win_min.y as f64);
+            let (mxx, mxy) = (win_max.x as f64, win_max.y as f64);
+            let (dx, dy, dz) = (delta.x as f64, delta.y as f64, delta.z as f64);
+            out.text_verts = map_text_verts(&self.text_verts, |x, y, z| {
+                if x >= mnx && x <= mxx && y >= mny && y <= mxy {
+                    (x + dx, y + dy, z + dz)
+                } else {
+                    (x, y, z)
+                }
+            });
         }
         out
     }
@@ -248,6 +280,18 @@ impl WireModel {
             p[0] = 2.0 * t * ax - p[0];
             p[1] = 2.0 * t * ay - p[1];
         }
+        // Glyph quads reflect wholesale (true mirror) — the caller only routes
+        // text through here for MIRRTEXT-on; MIRRTEXT-off relocates via
+        // `translated` so glyphs stay readable.
+        if !out.text_verts.is_empty() {
+            let (ax, ay, len2) = (ax as f64, ay as f64, len2 as f64);
+            let (p1x, p1y) = (p1.x as f64, p1.y as f64);
+            out.text_verts = map_text_verts(&self.text_verts, |x, y, z| {
+                let (dx, dy) = (x - p1x, y - p1y);
+                let t = (dx * ax + dy * ay) / len2;
+                (p1x + 2.0 * t * ax - dx, p1y + 2.0 * t * ay - dy, z)
+            });
+        }
         out
     }
 
@@ -264,6 +308,36 @@ impl WireModel {
             })
             .sum()
     }
+}
+
+/// Map every glyph vertex's double-single world position through `f`, re-
+/// splitting the result. The preview transforms above move `points`, but SDF
+/// glyph quads live in `text_verts` (absolute-world double-single) — so a text
+/// ghost (MOVE / COPY / ROTATE / SCALE / STRETCH / MIRROR preview) must carry
+/// these along or the dragged text renders frozen at its source (issue #316).
+fn map_text_verts(
+    verts: &[crate::scene::pipeline::text_gpu::TextVertex],
+    f: impl Fn(f64, f64, f64) -> (f64, f64, f64),
+) -> Vec<crate::scene::pipeline::text_gpu::TextVertex> {
+    use crate::scene::pipeline::text_gpu::split_ds;
+    verts
+        .iter()
+        .map(|v| {
+            let (nx, ny, nz) = f(
+                v.pos[0] as f64 + v.pos_low[0] as f64,
+                v.pos[1] as f64 + v.pos_low[1] as f64,
+                v.pos[2] as f64 + v.pos_low[2] as f64,
+            );
+            let (xh, xl) = split_ds(nx);
+            let (yh, yl) = split_ds(ny);
+            let (zh, zl) = split_ds(nz);
+            crate::scene::pipeline::text_gpu::TextVertex {
+                pos: [xh, yh, zh],
+                pos_low: [xl, yl, zl],
+                ..*v
+            }
+        })
+        .collect()
 }
 
 impl Default for WireModel {
