@@ -104,26 +104,49 @@ impl StatusPill {
     }
 }
 
-/// Tracks which pills the user has hidden. Empty = every pill visible.
-#[derive(Clone, Default)]
+/// Tracks which pills the user has hidden.
+#[derive(Clone)]
 pub struct StatusBarConfig {
     hidden: HashSet<StatusPill>,
 }
 
-impl StatusBarConfig {
-    /// Load the saved customization, or all-visible when none exists.
-    pub fn load() -> Self {
-        let mut hidden = HashSet::default();
-        if let Some(path) = config_path() {
-            if let Ok(body) = std::fs::read_to_string(path) {
-                for line in body.lines() {
-                    if let Some(p) = StatusPill::from_id(line.trim()) {
-                        hidden.insert(p);
-                    }
-                }
-            }
-        }
+impl Default for StatusBarConfig {
+    /// The out-of-the-box bar: a few informational / niche pills are hidden by
+    /// default to keep it uncluttered, and the user turns them on from the
+    /// customization (⚙) menu if wanted. The mode toggles that matter most
+    /// (Ortho, Polar, Otrack, Osnap, …) stay visible.
+    fn default() -> Self {
+        let hidden = [
+            StatusPill::Coords,
+            StatusPill::Lwt,
+            StatusPill::Dyn,
+            StatusPill::Space,
+            StatusPill::Units,
+            StatusPill::Transparency,
+            StatusPill::SelCycle,
+            StatusPill::Vp,
+        ]
+        .into_iter()
+        .collect();
         Self { hidden }
+    }
+}
+
+impl StatusBarConfig {
+    /// Load the saved customization. When no config file exists yet, fall back
+    /// to the shipped defaults ([`StatusBarConfig::default`]); an existing file
+    /// (even an empty one — the user showed every pill) is authoritative.
+    pub fn load() -> Self {
+        match config_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+            Some(body) => {
+                let hidden = body
+                    .lines()
+                    .filter_map(|l| StatusPill::from_id(l.trim()))
+                    .collect();
+                Self { hidden }
+            }
+            None => Self::default(),
+        }
     }
 
     pub fn is_visible(&self, pill: StatusPill) -> bool {
