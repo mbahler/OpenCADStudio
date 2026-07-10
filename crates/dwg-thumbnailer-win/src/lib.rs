@@ -99,7 +99,7 @@ impl IThumbnailProvider_Impl for DwgThumbProvider_Impl {
 }
 
 /// Build a 32-bit top-down BGRA `HBITMAP` from an RGBA image.
-unsafe fn rgba_to_hbitmap(img: &image::RgbaImage) -> windows::core::Result<HBITMAP> {
+unsafe fn rgba_to_hbitmap(img: &dwg_thumbnailer::RgbaImage) -> windows::core::Result<HBITMAP> {
     let (w, h) = (img.width() as i32, img.height() as i32);
     let bi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -148,7 +148,7 @@ impl IClassFactory_Impl for Factory_Impl {
         unsafe { provider.query(&*riid, ppvobject).ok() }
     }
 
-    fn LockServer(&self, _flock: windows::core::BOOL) -> windows::core::Result<()> {
+    fn LockServer(&self, _flock: windows::Win32::Foundation::BOOL) -> windows::core::Result<()> {
         Ok(())
     }
 }

@@ -11,7 +11,10 @@
 
 use std::path::Path;
 
-use image::{ImageFormat, RgbaImage};
+use image::ImageFormat;
+// Re-exported so downstream crates (the Windows/macOS handlers) can name the
+// returned image type without taking their own direct `image` dependency.
+pub use image::RgbaImage;
 
 /// Read the DWG at `path`, extract its embedded preview, and scale it so the
 /// longest edge is at most `max_dim` pixels (aspect preserved). Returns `None`
