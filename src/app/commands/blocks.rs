@@ -430,8 +430,19 @@ impl OpenCADStudio {
             // ATTMAN — list the attribute definitions of each block (or one named
             // block). The full graphical manager is not built; this reports the
             // same information from the command line.
-            cmd if cmd == "ATTMAN" || cmd == "BATTMAN" || cmd.starts_with("ATTMAN ") => {
-                let arg = cmd.trim_start_matches("ATTMAN").trim();
+            cmd if cmd == "ATTMAN"
+                || cmd == "BATTMAN"
+                || cmd.starts_with("ATTMAN ")
+                || cmd.starts_with("BATTMAN ") =>
+            {
+                // BATTMAN is an alias for ATTMAN. Strip whichever keyword was
+                // typed so the remainder is the optional block-name argument;
+                // check BATTMAN first since ATTMAN is a suffix of it.
+                let arg = cmd
+                    .strip_prefix("BATTMAN")
+                    .or_else(|| cmd.strip_prefix("ATTMAN"))
+                    .unwrap_or("")
+                    .trim();
                 let blocks = self.tabs[i].scene.custom_block_names();
                 let targets: Vec<String> = if arg.is_empty() {
                     blocks
@@ -635,5 +646,94 @@ impl OpenCADStudio {
             _ => return None,
         }
         Some(self.finish_dispatch(cmd))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::OpenCADStudio;
+
+    /// Build a headless app with a single custom block "MYBLK" carrying one
+    /// attribute definition (COST=0), so ATTMAN/BATTMAN have something to list.
+    fn app_with_attributed_block() -> OpenCADStudio {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+
+        let i = app.active_tab;
+        let doc = &mut app.tabs[i].scene.document;
+        let br_h = acadrust::Handle::new(doc.next_handle());
+        let mut br = acadrust::tables::BlockRecord::new("MYBLK");
+        br.handle = br_h;
+        doc.block_records.add(br).unwrap();
+
+        let mut ad = acadrust::entities::AttributeDefinition {
+            tag: "COST".into(),
+            prompt: "Cost".into(),
+            default_value: "0".into(),
+            insertion_point: acadrust::types::Vector3::new(0.0, 0.0, 0.0),
+            height: 1.0,
+            ..Default::default()
+        };
+        ad.common.owner_handle = br_h;
+        doc.add_entity(acadrust::EntityType::AttributeDefinition(ad))
+            .unwrap();
+        app
+    }
+
+    /// Run one command line and return only the command-line text it appended.
+    fn run_capture(app: &mut OpenCADStudio, cmd: &str) -> String {
+        let start = app.command_line.history.len();
+        let _ = app.run_command_line(cmd);
+        app.command_line.history[start..]
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // Regression for #295: BATTMAN triggered the ATTMAN handler but the argument
+    // was extracted with `trim_start_matches("ATTMAN")`, which leaves "BATTMAN"
+    // as a bogus block-name argument — so BATTMAN always reported
+    // "ATTMAN: no matching block" instead of listing attributes like ATTMAN.
+    #[test]
+    fn battman_is_a_working_alias_for_attman() {
+        let attman_out = run_capture(&mut app_with_attributed_block(), "ATTMAN");
+        let battman_out = run_capture(&mut app_with_attributed_block(), "BATTMAN");
+
+        // ATTMAN lists the block; the reported bug is that BATTMAN did not.
+        assert!(
+            attman_out.contains("MYBLK"),
+            "ATTMAN should list the block, got: {attman_out:?}"
+        );
+        assert!(
+            battman_out.contains("MYBLK"),
+            "BATTMAN should list the block like ATTMAN, got: {battman_out:?}"
+        );
+        assert!(
+            !battman_out.contains("no matching block"),
+            "BATTMAN must not fall into the no-argument error path, got: {battman_out:?}"
+        );
+        // The alias must behave identically, attribute listing included.
+        assert_eq!(
+            attman_out, battman_out,
+            "BATTMAN output must match ATTMAN output exactly"
+        );
+    }
+
+    // The keyword-stripping fix must also honour an explicit block-name argument
+    // on BATTMAN (`BATTMAN <name>`), which the old code never matched at all.
+    #[test]
+    fn battman_honours_a_block_name_argument() {
+        let hit = run_capture(&mut app_with_attributed_block(), "BATTMAN MYBLK");
+        assert!(
+            hit.contains("MYBLK") && !hit.contains("no matching block"),
+            "BATTMAN MYBLK should list that block, got: {hit:?}"
+        );
+
+        let miss = run_capture(&mut app_with_attributed_block(), "BATTMAN NOPE");
+        assert!(
+            miss.contains("no matching block"),
+            "BATTMAN NOPE should report no match, got: {miss:?}"
+        );
     }
 }
