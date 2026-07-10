@@ -1068,7 +1068,7 @@ impl Snapper {
                             {
                                 continue;
                             }
-                            if let Some(pt) = seg_intersect_xy(a0, a1, b0, b1) {
+                            if let Some(pt) = seg_intersect_3d(a0, a1, b0, b1) {
                                 try_pt(pt, SnapType::Intersection);
                             }
                         }
@@ -1520,7 +1520,13 @@ fn perp_foot(query: glam::DVec3, p0: glam::DVec3, p1: glam::DVec3) -> Option<gla
 }
 
 /// XY-plane segment-segment intersection.  Returns `None` if parallel or outside.
-fn seg_intersect_xy(a0: glam::DVec3, a1: glam::DVec3, b0: glam::DVec3, b1: glam::DVec3) -> Option<glam::DVec3> {
+/// True 3D intersection of two segments: the point where their plan (XY)
+/// projections cross **and** both segments are at the same height there. Returns
+/// `None` when parallel in plan, out of range, or the segments only *appear* to
+/// cross in plan because they sit at different Z — a real Intersection requires
+/// the objects to actually meet, so that case is left to Apparent Intersection
+/// (the view-space crossing). (#335)
+fn seg_intersect_3d(a0: glam::DVec3, a1: glam::DVec3, b0: glam::DVec3, b1: glam::DVec3) -> Option<glam::DVec3> {
     let d1x = a1.x - a0.x;
     let d1y = a1.y - a0.y;
     let d2x = b1.x - b0.x;
@@ -1528,7 +1534,7 @@ fn seg_intersect_xy(a0: glam::DVec3, a1: glam::DVec3, b0: glam::DVec3, b1: glam:
     let cross = d1x * d2y - d1y * d2x;
     if cross.abs() < 1e-9 {
         return None;
-    } // parallel
+    } // parallel in plan
     let ex = b0.x - a0.x;
     let ey = b0.y - a0.y;
     let t = (ex * d2y - ey * d2x) / cross;
@@ -1536,7 +1542,16 @@ fn seg_intersect_xy(a0: glam::DVec3, a1: glam::DVec3, b0: glam::DVec3, b1: glam:
     if t < 0.0 || t > 1.0 || s < 0.0 || s > 1.0 {
         return None;
     }
-    Some(glam::DVec3::new(a0.x + t * d1x, a0.y + t * d1y, 0.0))
+    // The plans cross; the segments truly meet only if they are at the same
+    // height at that crossing. Different Z ⇒ they merely overlap in plan, which
+    // is an apparent (view-dependent) intersection, not a real one.
+    let za = a0.z + t * (a1.z - a0.z);
+    let zb = b0.z + s * (b1.z - b0.z);
+    let tol = 1e-6_f64.max(1e-9 * za.abs().max(zb.abs()));
+    if (za - zb).abs() > tol {
+        return None;
+    }
+    Some(glam::DVec3::new(a0.x + t * d1x, a0.y + t * d1y, 0.5 * (za + zb)))
 }
 
 /// Intersection of two infinite lines in the XY plane, each given by an origin
@@ -1972,5 +1987,44 @@ mod ext_tests {
         assert!((t0.x - 2.5).abs() < 1e-2 && (t0.y.abs() - 4.330).abs() < 1e-2);
         // A point inside the circle has no external tangent.
         assert!(circle_tangent_points(Vec3::new(1.0, 0.0, 0.0), c, 5.0).is_none());
+    }
+
+    #[test]
+    fn intersection_requires_matching_z_not_just_plan_crossing() {
+        use glam::DVec3;
+        // Two segments whose plans cross at the origin, both at z = 0: a real
+        // 3D intersection.
+        let hit = seg_intersect_3d(
+            DVec3::new(-1.0, 0.0, 0.0),
+            DVec3::new(1.0, 0.0, 0.0),
+            DVec3::new(0.0, -1.0, 0.0),
+            DVec3::new(0.0, 1.0, 0.0),
+        )
+        .expect("coplanar crossing is a real intersection");
+        assert!(hit.x.abs() < 1e-9 && hit.y.abs() < 1e-9 && hit.z.abs() < 1e-9);
+
+        // Same plan crossing, but the second segment sits at z = 5: the lines
+        // only *appear* to cross in top view — not a real intersection (#335).
+        assert!(
+            seg_intersect_3d(
+                DVec3::new(-1.0, 0.0, 0.0),
+                DVec3::new(1.0, 0.0, 0.0),
+                DVec3::new(0.0, -1.0, 5.0),
+                DVec3::new(0.0, 1.0, 5.0),
+            )
+            .is_none(),
+            "different-Z plan crossing must not be a real Intersection"
+        );
+
+        // A real 3D crossing above the ground plane: both segments pass through
+        // (0,0,5), so it snaps there at the true height.
+        let hi = seg_intersect_3d(
+            DVec3::new(-1.0, 0.0, 5.0),
+            DVec3::new(1.0, 0.0, 5.0),
+            DVec3::new(0.0, -1.0, 5.0),
+            DVec3::new(0.0, 1.0, 5.0),
+        )
+        .expect("coplanar crossing at z=5");
+        assert!((hi.z - 5.0).abs() < 1e-9, "z should be the true height, got {}", hi.z);
     }
 }
