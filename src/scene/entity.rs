@@ -1372,17 +1372,48 @@ impl Scene {
             [0.0, 0.0]
         };
 
-        // Anchor each prebaked family at its stored pattern origin (per-line
-        // `base_point`), expressed relative to `world_origin` so it shares the
-        // boundary's coordinate frame. Left at 0 the pattern tiles from the
-        // boundary centre instead: invisible for a solid infinite-line family
-        // but the wrong phase for dashed / offset patterns and for a user-moved
-        // origin (Origin X/Y property + origin grip).
+        // Anchor the prebaked families near the geometry, tracking the pattern
+        // origin. The DWG base points sit at the pattern's *authored* origin,
+        // which on a UTM drawing can be ~1e6 units from the hatch. Handing the
+        // shader `base - world_origin` (~1e6) is wrong two ways: it consumes
+        // `x0/y0` as f32 (so ~0.5 m quantization shreds the phase — boundaries
+        // are unaffected, they ride the double-single relative-to-eye path), AND
+        // it evaluates the pattern that far from its origin. Multi-family
+        // aggregate patterns (AR-CONC, AR-SAND, GRAVEL, …) are effectively
+        // quasi-periodic: their families only cohere into the intended
+        // stones/grains near their shared origin and dissolve into scattered
+        // dashes at large offsets.
+        //
+        // So fold the origin's offset from `world_origin` down to a small,
+        // coherence-safe remainder on a grid of `spacing * 64` (many multiples
+        // of the pattern spacing — well inside the coherence range yet far
+        // larger than any realistic grip drag). Applying ONE common fold (from
+        // the reference line) preserves each family's relative phase, which is
+        // what forms the stones. Because the origin grip / Origin X/Y edit
+        // shifts every base point by the same delta, the sub-grid remainder
+        // tracks that delta 1:1, so the grip still moves the fill; a grid
+        // crossing (a whole `spacing * 64` drag) is never hit in practice.
         if prebaked {
             if let model::hatch_model::HatchPattern::Pattern(fams) = &mut pattern {
-                for (fam, ln) in fams.iter_mut().zip(dxf.pattern.lines.iter()) {
-                    fam.x0 = (ln.base_point.x - world_origin[0]) as f32;
-                    fam.y0 = (ln.base_point.y - world_origin[1]) as f32;
+                if let Some(rb) = dxf.pattern.lines.first().map(|l| l.base_point) {
+                    let spacing = dxf
+                        .pattern
+                        .lines
+                        .iter()
+                        .map(|l| l.offset.length())
+                        .fold(0.0_f64, f64::max)
+                        .max(1e-6);
+                    let cell = spacing * 64.0;
+                    let fold = |v: f64, o: f64| -> f64 {
+                        let d = v - o;
+                        d - (d / cell).round() * cell
+                    };
+                    let ox = fold(rb.x, world_origin[0]);
+                    let oy = fold(rb.y, world_origin[1]);
+                    for (fam, ln) in fams.iter_mut().zip(dxf.pattern.lines.iter()) {
+                        fam.x0 = (ln.base_point.x - rb.x + ox) as f32;
+                        fam.y0 = (ln.base_point.y - rb.y + oy) as f32;
+                    }
                 }
             }
         }
