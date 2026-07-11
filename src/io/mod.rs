@@ -538,10 +538,47 @@ pub fn saved_active_layout(doc: &CadDocument) -> Option<String> {
 }
 
 /// Record `name` as the active layout tab (`CTAB`) so the next save round-trips
-/// which space was open. No-op when the document has no `CTAB` entry yet; the
-/// `$TILEMODE` header (model vs paper) remains the guaranteed fallback.
+/// which space was open. Updates the existing `CTAB` variable in place, or
+/// creates one under the root named-object dictionary when the drawing never
+/// carried it (e.g. a document authored here from scratch) — otherwise the exact
+/// paper layout would be lost and reopening fell back to the first paper tab.
 pub fn set_saved_active_layout(doc: &mut CadDocument, name: &str) {
-    set_vardict_value(doc, "CTAB", name);
+    use acadrust::objects::{DictionaryVariable, ObjectType};
+    if let Some(h) = vardict_handle(doc, "CTAB") {
+        if let Some(ObjectType::DictionaryVariable(v)) = doc.objects.get_mut(&h) {
+            v.value = name.to_string();
+        }
+        return;
+    }
+    // Attach a new CTAB entry to the root named-object dictionary. Prefer the
+    // header handle; fall back to scanning for the root dict (the one holding
+    // `ACAD_LAYOUT`) since a from-scratch document leaves the header handle null
+    // until it is built. No root dict at all → `$TILEMODE` still records
+    // model-vs-paper.
+    let named = doc.header.named_objects_dict_handle;
+    let root = if !named.is_null() && doc.objects.contains_key(&named) {
+        named
+    } else {
+        match doc.objects.iter().find_map(|(h, o)| match o {
+            ObjectType::Dictionary(d)
+                if d.entries.iter().any(|(k, _)| k.eq_ignore_ascii_case("ACAD_LAYOUT")) =>
+            {
+                Some(*h)
+            }
+            _ => None,
+        }) {
+            Some(h) => h,
+            None => return,
+        }
+    };
+    let handle = doc.allocate_handle();
+    let mut var = DictionaryVariable::new("CTAB", name);
+    var.handle = handle;
+    var.owner_handle = root;
+    doc.objects.insert(handle, ObjectType::DictionaryVariable(var));
+    if let Some(ObjectType::Dictionary(rd)) = doc.objects.get_mut(&root) {
+        rd.entries.push(("CTAB".to_string(), handle));
+    }
 }
 
 /// Materialise the current-style choices into their format-specific storage
