@@ -36,7 +36,10 @@ use crate::scene::text::lff::Glyph;
 /// Mirrors the existing global font-glyph caches (see `ttf_glyph`).
 pub fn text_atlas() -> &'static Mutex<GlyphAtlas> {
     static ATLAS: OnceLock<Mutex<GlyphAtlas>> = OnceLock::new();
-    ATLAS.get_or_init(|| Mutex::new(GlyphAtlas::new(1024, 1024)))
+    // 2048² (~780 glyphs) covers real text-heavy drawings (many fonts + CJK /
+    // Vietnamese diacritics) without ever growing; `pack()` still grows as a
+    // fallback beyond that. See issue #347.
+    ATLAS.get_or_init(|| Mutex::new(GlyphAtlas::new(2048, 2048)))
 }
 
 /// TEXTFILL system variable — `true` fills TrueType glyphs (default), `false`
@@ -86,6 +89,11 @@ const PEN_HALF_UNITS: f32 = 0.35;
 /// Upper bound on a single glyph tile's dimension (texels), a guard against a
 /// pathologically wide/tall glyph blowing up the atlas.
 const MAX_TILE_PX: u32 = 512;
+
+/// Largest atlas dimension the packer will grow the texture to, kept within the
+/// common wgpu `max_texture_dimension_2d` limit (8192). The atlas starts at
+/// 1024² and doubles its height on demand up to this bound.
+const MAX_ATLAS_PX: u32 = 8192;
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -222,8 +230,33 @@ impl GlyphAtlas {
         entry
     }
 
-    /// Blit a baked tile into the atlas via a simple shelf packer. Returns the
-    /// placement, or `None` if the tile does not fit (atlas full).
+    /// Grow the atlas taller (keeping the width, so packed X positions and their
+    /// normalized U stay valid) and rescale every cached entry's V for the new
+    /// height. Returns false once the height hits `MAX_ATLAS_PX` — text-heavy
+    /// drawings would otherwise silently drop glyphs once the single page filled
+    /// (issue #347). Width is unchanged, so the row-major data just grows with
+    /// zeroed rows appended at the bottom.
+    fn grow_height(&mut self) -> bool {
+        if self.height >= MAX_ATLAS_PX {
+            return false;
+        }
+        let old_h = self.height;
+        let new_h = (self.height * 2).min(MAX_ATLAS_PX);
+        self.data.resize((self.width * new_h) as usize, 0);
+        let sy = old_h as f32 / new_h as f32;
+        for entry in self.entries.values_mut().flatten() {
+            entry.uv_min[1] *= sy;
+            entry.uv_max[1] *= sy;
+        }
+        self.solid_uv[1] *= sy;
+        self.height = new_h;
+        self.dirty = true;
+        true
+    }
+
+    /// Blit a baked tile into the atlas via a simple shelf packer. Grows the
+    /// atlas when a tile doesn't fit; returns `None` only once it can grow no
+    /// further (or the tile is wider than the atlas, which the tile cap prevents).
     fn pack(&mut self, tile: BakedTile) -> Option<AtlasEntry> {
         // Wrap to a new shelf if the tile overflows the current row.
         if self.cursor_x + tile.w > self.width {
@@ -231,8 +264,13 @@ impl GlyphAtlas {
             self.cursor_x = 0;
             self.shelf_h = 0;
         }
-        if self.cursor_x + tile.w > self.width || self.cursor_y + tile.h > self.height {
-            return None; // atlas full
+        if self.cursor_x + tile.w > self.width {
+            return None; // tile wider than the atlas (MAX_TILE_PX guards this)
+        }
+        while self.cursor_y + tile.h > self.height {
+            if !self.grow_height() {
+                return None; // atlas full and cannot grow further
+            }
         }
         let (ox, oy) = (self.cursor_x, self.cursor_y);
         for row in 0..tile.h {
@@ -481,9 +519,33 @@ mod tests {
 
     #[test]
     fn full_atlas_returns_none() {
-        // A tiny atlas cannot fit even one padded tile.
+        // A tiny atlas cannot fit even one padded tile (wider than the atlas —
+        // the width the packer does not grow).
         let mut atlas = GlyphAtlas::new(4, 4);
         assert!(atlas.pack(bake_glyph(&filled_square(), PEN_HALF_UNITS).unwrap()).is_none());
+    }
+
+    #[test]
+    fn atlas_grows_instead_of_dropping_glyphs() {
+        // Text-heavy drawings need more unique glyphs than one 1024² page holds;
+        // the packer must grow taller rather than start returning None, which
+        // silently dropped text and dimensions (issue #347).
+        let mut atlas = GlyphAtlas::new(1024, 1024);
+        let start_h = atlas.height();
+        let mut packed = 0;
+        for _ in 0..1000 {
+            match atlas.pack(bake_glyph(&filled_square(), PEN_HALF_UNITS).unwrap()) {
+                Some(e) => {
+                    // UVs stay normalized after any growth-driven rescale.
+                    assert!(e.uv_min[1] >= 0.0 && e.uv_max[1] <= 1.0);
+                    packed += 1;
+                }
+                None => break,
+            }
+        }
+        assert_eq!(packed, 1000, "every tile must fit once the atlas grows");
+        assert!(atlas.height() > start_h, "atlas should have grown taller");
+        assert!(atlas.height() <= MAX_ATLAS_PX);
     }
 
     // Full path over a real, embedded stroke font (no system fonts needed):
