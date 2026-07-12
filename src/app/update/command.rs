@@ -1460,6 +1460,20 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                                                 entity, field, &val,
                                             );
                                         }
+                                        "hyperlink" => {
+                                            // Stored in the standard PE_URL XDATA
+                                            // record; an empty value clears it.
+                                            let vals = if val.trim().is_empty() {
+                                                None
+                                            } else {
+                                                Some(vec![acadrust::xdata::XDataValue::String(
+                                                    val.clone(),
+                                                )])
+                                            };
+                                            crate::scene::view::dispatch::set_common_xdata(
+                                                entity, "PE_URL", vals,
+                                            );
+                                        }
                                         _ => {
                                             crate::scene::view::dispatch::apply_geom_prop(
                                                 entity, field, &val,

@@ -85,6 +85,34 @@ pub fn apply_common_prop(entity: &mut EntityType, field: &str, value: &str) {
     }
 }
 
+/// Replace — or, when `values` is `None`, remove — the single XDATA record for
+/// application `app` on an entity's common data, preserving every other record
+/// and the verbatim DWG EED blob. `ExtendedData` only appends, so a plain
+/// `add_record` would leave a stale duplicate that the reader picks first;
+/// rebuilding the collection is the only way to edit or clear a record.
+pub fn set_common_xdata(
+    entity: &mut EntityType,
+    app: &str,
+    values: Option<Vec<acadrust::xdata::XDataValue>>,
+) {
+    let common = entity.common_mut();
+    let mut rebuilt = acadrust::xdata::ExtendedData::new();
+    for r in common.extended_data.records() {
+        if r.application_name != app {
+            rebuilt.add_record(r.clone());
+        }
+    }
+    if let Some(vals) = values {
+        let mut rec = acadrust::xdata::ExtendedDataRecord::new(app);
+        for v in vals {
+            rec.add_value(v);
+        }
+        rebuilt.add_record(rec);
+    }
+    rebuilt.raw_dwg_eed = common.extended_data.raw_dwg_eed.clone();
+    common.extended_data = rebuilt;
+}
+
 /// The extrusion thickness (DXF 39) of the entities that carry one, or `None`
 /// for entity types that have none. Thickness is a per-entity field but is
 /// surfaced in the General group (as in a standard properties palette), so
