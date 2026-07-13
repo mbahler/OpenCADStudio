@@ -91,7 +91,7 @@ fn scale_row(label: String, active: bool, msg: Message) -> Element<'static, Mess
 }
 
 fn manage_row() -> Element<'static, Message> {
-    button(text("Manage scales...").size(11).color(CHECK_COLOR))
+    button(text("Manage...").size(11).color(CHECK_COLOR))
         .on_press(Message::ScaleManagerOpen)
         .style(|_: &Theme, status| button::Style {
             background: Some(Background::Color(match status {

@@ -1825,6 +1825,59 @@ impl Scene {
     /// ratio (0.02 for "1:50"). Sorted smallest ratio first (1:100 … 1:1 …
     /// 10:1). Falls back to a standard ratio set when the drawing carries no
     /// scale list of its own, so the scale picker is always usable. (#154)
+    /// Standard fallback ratio set as (label, paper/drawing factor). Shown when
+    /// the drawing defines no annotation scales of its own, and materialised as
+    /// real `Scale` objects on demand by [`Scene::ensure_real_scale_list`].
+    const DEFAULT_SCALES: &'static [(&'static str, f64)] = &[
+        ("1:500", 0.002),
+        ("1:200", 0.005),
+        ("1:100", 0.01),
+        ("1:50", 0.02),
+        ("1:20", 0.05),
+        ("1:10", 0.1),
+        ("1:5", 0.2),
+        ("1:2", 0.5),
+        ("1:1", 1.0),
+        ("2:1", 2.0),
+        ("5:1", 5.0),
+        ("10:1", 10.0),
+    ];
+
+    /// True when the drawing owns at least one annotation scale of its own
+    /// (i.e. `scale_list` returns real objects rather than the fallback set).
+    fn has_own_scales(&self) -> bool {
+        self.document.objects.values().any(|o| {
+            matches!(o, ObjectType::Scale(s)
+                if !s.is_temporary
+                    && !s.name.contains('|')
+                    && !s.name.to_ascii_uppercase().ends_with("_XREF"))
+        })
+    }
+
+    /// If the drawing has no annotation scales of its own, populate it with the
+    /// standard fallback set as real `Scale` objects (and the `ACAD_SCALELIST`
+    /// dictionary) so they can be selected, edited and renamed uniformly with a
+    /// drawing that ships its own list. Returns `true` if any were created.
+    ///
+    /// The scale manager calls this on open and stages the result, so the set
+    /// is discarded again unless the user applies an edit.
+    pub fn ensure_real_scale_list(&mut self) -> bool {
+        if self.has_own_scales() {
+            return false;
+        }
+        for &(label, factor) in Self::DEFAULT_SCALES {
+            // Fallback labels are "paper:drawing"; parse them for tidy whole
+            // units, else derive drawing units from the factor (paper = 1).
+            let (paper, drawing) = label
+                .split_once(':')
+                .and_then(|(p, d)| Some((p.trim().parse::<f64>().ok()?, d.trim().parse::<f64>().ok()?)))
+                .filter(|&(p, d)| p > 0.0 && d > 0.0)
+                .unwrap_or((1.0, 1.0 / factor));
+            self.add_scale(label, paper, drawing);
+        }
+        true
+    }
+
     pub fn scale_list(&self) -> Vec<(String, f32, f64)> {
         let mut list: Vec<(String, f32, f64)> = self
             .document
@@ -1852,26 +1905,52 @@ impl Scene {
             // annotation / viewport scale picker would be empty and so appear
             // broken. Substitute the standard ratio set — file scales still
             // win whenever the drawing actually defines any. (#154)
-            const DEFAULT_SCALES: &[(&str, f64)] = &[
-                ("1:500", 0.002),
-                ("1:200", 0.005),
-                ("1:100", 0.01),
-                ("1:50", 0.02),
-                ("1:20", 0.05),
-                ("1:10", 0.1),
-                ("1:5", 0.2),
-                ("1:2", 0.5),
-                ("1:1", 1.0),
-                ("2:1", 2.0),
-                ("5:1", 5.0),
-                ("10:1", 10.0),
-            ];
-            list = DEFAULT_SCALES
+            list = Self::DEFAULT_SCALES
                 .iter()
                 .map(|&(label, vp)| (label.to_string(), (1.0 / vp) as f32, vp))
                 .collect();
         }
         list
+    }
+
+    /// Handle of the drawing's `ACAD_SCALELIST` dictionary, located robustly.
+    ///
+    /// The canonical path is the root named-objects dict → `"ACAD_SCALELIST"`,
+    /// but DWGs written by other programs don't always expose a resolvable root
+    /// dict (the header handle points at no loaded object). In that case fall
+    /// back to the owner dictionary shared by the drawing's `Scale` objects.
+    /// Returns `None` only when the drawing genuinely has no scale list.
+    pub(crate) fn scalelist_dict_handle(&self) -> Option<Handle> {
+        use acadrust::objects::ObjectType;
+        let root_h = self.document.header.named_objects_dict_handle;
+        if let Some(h) = crate::scene::annotative::as_dict(&self.document, root_h)
+            .and_then(|d| d.get("ACAD_SCALELIST"))
+        {
+            return Some(h);
+        }
+        let owner = self.document.objects.values().find_map(|o| match o {
+            ObjectType::Scale(s) if !s.is_temporary => Some(s.owner_handle),
+            _ => None,
+        })?;
+        matches!(
+            self.document.objects.get(&owner),
+            Some(ObjectType::Dictionary(_))
+        )
+        .then_some(owner)
+    }
+
+    /// Handle of the real (non-temporary) `Scale` object with this display name.
+    /// Scales are matched by their `name` field, not the dictionary key — some
+    /// files key the entries by an internal identifier (`*A1`, `A0`, …) that
+    /// bears no relation to the scale name.
+    fn scale_object_handle(&self, name: &str) -> Option<Handle> {
+        use acadrust::objects::ObjectType;
+        self.document.objects.iter().find_map(|(h, o)| match o {
+            ObjectType::Scale(s) if !s.is_temporary && s.name.eq_ignore_ascii_case(name) => {
+                Some(*h)
+            }
+            _ => None,
+        })
     }
 
     /// Add a named annotation scale to the drawing's `ACAD_SCALELIST`. Returns
@@ -1880,12 +1959,15 @@ impl Scene {
     /// has none of its own — many minimal files carry no scale list at all.
     pub fn add_scale(&mut self, name: &str, paper: f64, drawing: f64) -> bool {
         use acadrust::objects::{Dictionary, ObjectType, Scale};
-        let root_h = self.document.header.named_objects_dict_handle;
-        let scalelist_h = match crate::scene::annotative::as_dict(&self.document, root_h)
-            .and_then(|d| d.get("ACAD_SCALELIST"))
-        {
+        // Reject a duplicate by the scale's display name (the dictionary key may
+        // be an unrelated internal identifier, so check the objects directly).
+        if self.scale_object_handle(name).is_some() {
+            return false;
+        }
+        let scalelist_h = match self.scalelist_dict_handle() {
             Some(h) => h,
             None => {
+                let root_h = self.document.header.named_objects_dict_handle;
                 let h = self.document.allocate_handle();
                 let mut d = Dictionary::new();
                 d.handle = h;
@@ -1899,12 +1981,6 @@ impl Scene {
                 h
             }
         };
-        // Reject a duplicate name (case-insensitive).
-        if crate::scene::annotative::as_dict(&self.document, scalelist_h)
-            .is_some_and(|d| d.entries.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
-        {
-            return false;
-        }
         let sh = self.document.allocate_handle();
         let mut s = Scale::new(name, paper, drawing);
         s.handle = sh;
@@ -1922,25 +1998,18 @@ impl Scene {
     /// — the caller guards that.
     pub fn remove_scale(&mut self, name: &str) -> bool {
         use acadrust::objects::ObjectType;
-        let root_h = self.document.header.named_objects_dict_handle;
-        let Some(scalelist_h) = crate::scene::annotative::as_dict(&self.document, root_h)
-            .and_then(|d| d.get("ACAD_SCALELIST"))
-        else {
+        let Some(sh) = self.scale_object_handle(name) else {
             return false;
         };
-        let Some(sh) = crate::scene::annotative::as_dict(&self.document, scalelist_h).and_then(
-            |d| {
-                d.entries
-                    .iter()
-                    .find(|(n, _)| n.eq_ignore_ascii_case(name))
-                    .map(|(_, h)| *h)
-            },
-        ) else {
-            return false;
-        };
+        // Resolve the dictionary before removing the object (the fallback lookup
+        // reads a surviving scale's owner).
+        let dict_h = self.scalelist_dict_handle();
         self.document.objects.remove(&sh);
-        if let Some(ObjectType::Dictionary(sl)) = self.document.objects.get_mut(&scalelist_h) {
-            sl.entries.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+        if let Some(dict_h) = dict_h {
+            if let Some(ObjectType::Dictionary(sl)) = self.document.objects.get_mut(&dict_h) {
+                // Match by handle — the entry key is not necessarily the name.
+                sl.entries.retain(|(_, h)| *h != sh);
+            }
         }
         true
     }
@@ -1949,28 +2018,16 @@ impl Scene {
     /// if the scale is missing or the new name collides with another scale.
     pub fn edit_scale(&mut self, old_name: &str, new_name: &str, paper: f64, drawing: f64) -> bool {
         use acadrust::objects::ObjectType;
-        let root_h = self.document.header.named_objects_dict_handle;
-        let Some(scalelist_h) = crate::scene::annotative::as_dict(&self.document, root_h)
-            .and_then(|d| d.get("ACAD_SCALELIST"))
-        else {
+        let Some(sh) = self.scale_object_handle(old_name) else {
             return false;
         };
-        let Some(sh) = crate::scene::annotative::as_dict(&self.document, scalelist_h).and_then(
-            |d| {
-                d.entries
-                    .iter()
-                    .find(|(n, _)| n.eq_ignore_ascii_case(old_name))
-                    .map(|(_, h)| *h)
-            },
-        ) else {
-            return false;
-        };
-        // A new name that collides with a *different* scale is rejected.
-        if !new_name.eq_ignore_ascii_case(old_name)
-            && crate::scene::annotative::as_dict(&self.document, scalelist_h)
-                .is_some_and(|d| d.entries.iter().any(|(n, _)| n.eq_ignore_ascii_case(new_name)))
-        {
-            return false;
+        // A new name that collides with a *different* scale object is rejected.
+        if !new_name.eq_ignore_ascii_case(old_name) {
+            if let Some(other) = self.scale_object_handle(new_name) {
+                if other != sh {
+                    return false;
+                }
+            }
         }
         if let Some(ObjectType::Scale(s)) = self.document.objects.get_mut(&sh) {
             s.name = new_name.to_string();
@@ -1978,9 +2035,12 @@ impl Scene {
             s.drawing_units = drawing;
             s.is_unit_scale = (paper - drawing).abs() < 1e-10;
         }
-        if let Some(ObjectType::Dictionary(sl)) = self.document.objects.get_mut(&scalelist_h) {
-            if let Some(e) = sl.entries.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case(old_name)) {
-                e.0 = new_name.to_string();
+        // Keep the owning dictionary's entry key in sync, matched by handle.
+        if let Some(dict_h) = self.scalelist_dict_handle() {
+            if let Some(ObjectType::Dictionary(sl)) = self.document.objects.get_mut(&dict_h) {
+                if let Some(e) = sl.entries.iter_mut().find(|(_, h)| *h == sh) {
+                    e.0 = new_name.to_string();
+                }
             }
         }
         true

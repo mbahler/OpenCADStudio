@@ -612,11 +612,14 @@ fn object_handle(doc: &acadrust::CadDocument, name: &str, kind: StyleKind) -> Op
 // ── Annotation-scale manager staging (mirrors the style-manager stage) ──────
 
 /// Snapshot of the drawing's annotation-scale *list* a scale manager can stage:
-/// the `Scale` objects and the `ACAD_SCALELIST` dictionary. The current scale is
-/// deliberately excluded — Set Current takes effect immediately, like the pill.
+/// the `Scale` objects and the `ACAD_SCALELIST` dictionary. Set Current takes
+/// effect immediately (like the pill) and is *not* reverted; `current` is kept
+/// only to repair the header pointer if a staged rename/delete of the current
+/// scale is rolled back, leaving it dangling.
 pub(super) struct ScaleSnapshot {
     scales: Vec<(Handle, ObjectType)>,
     scalelist: Option<(Handle, ObjectType)>,
+    current: String,
 }
 
 /// An in-progress scale-manager transaction (baseline restored on discard).
@@ -625,6 +628,10 @@ pub(super) struct ScaleStage {
     dirty_at_open: bool,
     baseline: ScaleSnapshot,
     changed: bool,
+    /// The manager materialised the fallback scale set into real objects on
+    /// open. Even with no user edit these must be reverted on close, so the
+    /// discard restores the baseline when this is set (not only on `changed`).
+    materialized: bool,
 }
 
 impl OpenCADStudio {
@@ -637,19 +644,20 @@ impl OpenCADStudio {
             .filter(|(_, o)| matches!(o, ObjectType::Scale(_)))
             .map(|(h, o)| (*h, o.clone()))
             .collect();
-        let root_h = doc.header.named_objects_dict_handle;
-        let scalelist_h =
-            crate::scene::annotative::as_dict(doc, root_h).and_then(|d| d.get("ACAD_SCALELIST"));
+        let scalelist_h = self.tabs[i].scene.scalelist_dict_handle();
         let scalelist = scalelist_h.and_then(|h| doc.objects.get(&h).map(|o| (h, o.clone())));
-        ScaleSnapshot { scales, scalelist }
+        let current = doc.header.current_annotation_scale.clone();
+        ScaleSnapshot {
+            scales,
+            scalelist,
+            current,
+        }
     }
 
     fn restore_scale_state(&mut self, snap: &ScaleSnapshot) {
         let i = self.active_tab;
         let root_h = self.tabs[i].scene.document.header.named_objects_dict_handle;
-        let cur_scalelist_h =
-            crate::scene::annotative::as_dict(&self.tabs[i].scene.document, root_h)
-                .and_then(|d| d.get("ACAD_SCALELIST"));
+        let cur_scalelist_h = self.tabs[i].scene.scalelist_dict_handle();
         let doc = &mut self.tabs[i].scene.document;
         doc.objects.retain(|_, o| !matches!(o, ObjectType::Scale(_)));
         if let Some(h) = cur_scalelist_h {
@@ -670,6 +678,24 @@ impl OpenCADStudio {
                 root.entries.push(("ACAD_SCALELIST".to_string(), h));
             }
         }
+        // Repair a dangling current-scale pointer. A staged rename/delete of the
+        // current scale rewrote the header outside this snapshot; if the live
+        // name no longer resolves against the restored list, fall back to the
+        // snapshot's name. A Set Current to a still-valid scale is preserved.
+        let cur = self.tabs[i]
+            .scene
+            .document
+            .header
+            .current_annotation_scale
+            .clone();
+        let resolves = self.tabs[i]
+            .scene
+            .scale_list()
+            .iter()
+            .any(|(n, _, _)| n.eq_ignore_ascii_case(&cur));
+        if !resolves {
+            self.tabs[i].scene.document.header.current_annotation_scale = snap.current.clone();
+        }
         self.tabs[i].scene.bump_geometry();
     }
 
@@ -681,6 +707,7 @@ impl OpenCADStudio {
             dirty_at_open,
             baseline,
             changed: false,
+            materialized: false,
         });
     }
 
@@ -689,6 +716,14 @@ impl OpenCADStudio {
     pub(super) fn scale_stage_mark(&mut self) {
         if let Some(s) = self.scale_stage.as_mut() {
             s.changed = true;
+        }
+    }
+
+    /// Flag that the manager materialised the fallback scale set on open, so
+    /// the discard reverts it even when the user made no edit.
+    pub(super) fn scale_stage_materialized(&mut self) {
+        if let Some(s) = self.scale_stage.as_mut() {
+            s.materialized = true;
         }
     }
 
@@ -713,6 +748,9 @@ impl OpenCADStudio {
             dirty_at_open: true,
             baseline: edited,
             changed: false,
+            // The materialised set is now committed as the new baseline, so it
+            // no longer needs reverting on close.
+            materialized: false,
         });
     }
 
@@ -722,7 +760,9 @@ impl OpenCADStudio {
         let Some(stage) = self.scale_stage.take() else {
             return;
         };
-        if stage.changed {
+        // Revert on a real edit *or* when only the fallback set was materialised
+        // (opened but not applied) — otherwise those 12 scales would leak in.
+        if stage.changed || stage.materialized {
             self.restore_scale_state(&stage.baseline);
             self.tabs[self.active_tab].dirty = stage.dirty_at_open;
         }

@@ -661,12 +661,11 @@ pub(super) struct OpenCADStudio {
 
     // ── Annotation-scale Manager ──────────────────────────────────────────
     scale_manager_selected: String,
-    scale_manager_name_buf: String,
     scale_manager_paper_buf: String,
     scale_manager_drawing_buf: String,
-    /// The editor holds an unsaved *new* scale (created only on Apply) rather
-    /// than editing the selected one. Reset when a row is selected.
-    scale_manager_new: bool,
+    /// The scale row being renamed inline (double-click), + its edit buffer.
+    scale_rename: Option<String>,
+    scale_rename_buf: String,
     /// Open transaction for the scale manager — restored if the window closes
     /// without Apply, mirroring the style managers' staging.
     scale_stage: Option<crate::app::style_ops::ScaleStage>,
@@ -1472,8 +1471,16 @@ pub enum Message {
     ScaleManagerOpen,
     /// Select a scale row in the manager (loads it into the editor).
     ScaleManagerSelect(String),
-    /// Add a new scale from the editor fields.
+    /// Add a new scale to the list (staged) and select it for editing.
     ScaleManagerNew,
+    /// Duplicate the selected scale under a unique name (staged).
+    ScaleManagerCopy,
+    /// Begin inline rename of a scale row (double-click).
+    ScaleRenameStart(String),
+    /// Edit the inline-rename buffer.
+    ScaleRenameEdit(String),
+    /// Commit the inline rename.
+    ScaleRenameCommit,
     /// Delete the selected scale.
     ScaleManagerDelete,
     /// Set the selected scale as the current annotation scale.
@@ -1481,7 +1488,6 @@ pub enum Message {
     /// Apply the editor fields to the selected scale (rename / re-ratio).
     ScaleManagerApply,
     /// Annotation-scale manager editor field edits.
-    ScaleManagerNameBuf(String),
     ScaleManagerPaperBuf(String),
     ScaleManagerDrawingBuf(String),
     /// Toggle the leftmost hamburger's Model/layout list dropdown.
@@ -2260,10 +2266,10 @@ impl OpenCADStudio {
             // Layout Manager
             layout_manager_selected: "Model".to_string(),
             scale_manager_selected: String::new(),
-            scale_manager_name_buf: String::new(),
             scale_manager_paper_buf: String::new(),
             scale_manager_drawing_buf: String::new(),
-            scale_manager_new: false,
+            scale_rename: None,
+            scale_rename_buf: String::new(),
             scale_stage: None,
             layout_manager_rename_buf: String::new(),
             plotstyle_panel_aci: 1,

@@ -497,7 +497,9 @@ pub(super) fn on_text_style_dialog_open(&mut self) -> Task<Message> {
                 Task::none()
     }
 
-    pub(super) fn on_text_style_apply(&mut self) -> Task<Message> {
+    /// Write the editor buffers into the selected text style (staged, no
+    /// commit), so edits survive switching to another style as well as Apply.
+    pub(super) fn stage_textstyle_bufs(&mut self) {
                 let i = self.active_tab;
                 let name = self.textstyle_selected.clone();
                 let font = self.textstyle_font.clone();
@@ -520,6 +522,10 @@ pub(super) fn on_text_style_dialog_open(&mut self) -> Task<Message> {
                         s.height = h.max(0.0);
                     }
                 }
+    }
+
+    pub(super) fn on_text_style_apply(&mut self) -> Task<Message> {
+                self.stage_textstyle_bufs();
                 self.style_stage_commit();
                 Task::none()
     }
@@ -838,7 +844,9 @@ pub(super) fn on_text_style_dialog_open(&mut self) -> Task<Message> {
                 Task::none()
     }
 
-    pub(super) fn on_mleader_style_apply(&mut self) -> Task<Message> {
+    /// Write the editor buffers into the selected multileader style (staged, no
+    /// commit), so edits survive switching to another style as well as Apply.
+    pub(super) fn stage_mleaderstyle_bufs(&mut self) {
                 let i = self.active_tab;
                 let (ld, lg, asz, th, sf, bg, fsa, ssa, mp, dt, lc, tc) = (
                     self.mls_landing_distance.parse::<f64>().ok(),
@@ -920,6 +928,10 @@ pub(super) fn on_text_style_dialog_open(&mut self) -> Task<Message> {
                         s.block_content_scale_z = v;
                     }
                 }
+    }
+
+    pub(super) fn on_mleader_style_apply(&mut self) -> Task<Message> {
+                self.stage_mleaderstyle_bufs();
                 self.style_stage_commit();
                 Task::none()
     }

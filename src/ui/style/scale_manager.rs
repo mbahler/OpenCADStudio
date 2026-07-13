@@ -7,8 +7,15 @@
 
 use crate::app::Message;
 use crate::ui::style::style_manager::{hdivider, tb_button, vsep, BG, BORDER, DIM, LIST, TB, TEXT};
-use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
+use iced::widget::{
+    column, container, mouse_area, row, scrollable, text, text_input, Space,
+};
 use iced::{Background, Border, Color, Element, Fill, Theme};
+
+/// Inline-rename text-input id, so the rename-start handler can focus it.
+pub fn rename_input_id() -> iced::widget::Id {
+    iced::widget::Id::new("scale-rename-input")
+}
 
 const INPUT_BG: Color = Color {
     r: 0.10,
@@ -55,7 +62,8 @@ pub fn view_window<'a, 'b>(
     scales: &'b [(String, String)],
     selected: &'b str,
     current: &'b str,
-    name_buf: &'a str,
+    rename_active: Option<&'b str>,
+    rename_buf: &'a str,
     paper_buf: &'a str,
     drawing_buf: &'a str,
 ) -> Element<'a, Message> {
@@ -63,6 +71,7 @@ pub fn view_window<'a, 'b>(
     let toolbar = container(
         row![
             tb_button("New", Message::ScaleManagerNew, false),
+            tb_button("Copy", Message::ScaleManagerCopy, false),
             tb_button("Delete", Message::ScaleManagerDelete, false),
             Space::new().width(Fill),
             tb_button("Set Current", Message::ScaleManagerSetCurrent, false),
@@ -82,6 +91,18 @@ pub fn view_window<'a, 'b>(
     let rows: Vec<Element<'_, Message>> = scales
         .iter()
         .map(|(name, ratio)| {
+            // The row being renamed shows an inline text field; a single click
+            // selects, a double click starts renaming.
+            if rename_active == Some(name.as_str()) {
+                return text_input("", rename_buf)
+                    .id(rename_input_id())
+                    .on_input(Message::ScaleRenameEdit)
+                    .on_submit(Message::ScaleRenameCommit)
+                    .size(11)
+                    .padding([4, 8])
+                    .width(Fill)
+                    .into();
+            }
             let is_sel = name.as_str() == selected;
             let is_cur = name.eq_ignore_ascii_case(current);
             let check = crate::ui::icons::check_cell(is_cur, CURRENT_CHECK);
@@ -92,26 +113,17 @@ pub fn view_window<'a, 'b>(
             ]
             .spacing(4)
             .align_y(iced::Center);
-            button(label)
-                .on_press(Message::ScaleManagerSelect(name.clone()))
-                .style(move |_: &Theme, st| button::Style {
-                    background: Some(Background::Color(if is_sel {
-                        ACTIVE
-                    } else if matches!(st, button::Status::Hovered) {
-                        Color {
-                            r: 0.20,
-                            g: 0.20,
-                            b: 0.20,
-                            a: 1.0,
-                        }
-                    } else {
-                        Color::TRANSPARENT
-                    })),
-                    text_color: TEXT,
-                    ..Default::default()
-                })
-                .width(Fill)
+            let cell = container(label)
                 .padding([4, 8])
+                .width(Fill)
+                .style(move |_: &Theme| container::Style {
+                    background: is_sel.then_some(Background::Color(ACTIVE)),
+                    text_color: Some(TEXT),
+                    ..Default::default()
+                });
+            mouse_area(cell)
+                .on_press(Message::ScaleManagerSelect(name.clone()))
+                .on_double_click(Message::ScaleRenameStart(name.clone()))
                 .into()
         })
         .collect();
@@ -164,11 +176,10 @@ pub fn view_window<'a, 'b>(
     let editor = container(
         column![
             text("Scale").size(10).color(DIM),
-            field("Name", "e.g. 1:50", name_buf, Message::ScaleManagerNameBuf),
             field("Paper units", "1", paper_buf, Message::ScaleManagerPaperBuf),
             field("Drawing units", "50", drawing_buf, Message::ScaleManagerDrawingBuf),
             Space::new().height(6),
-            text("New starts a blank scale; edit the fields and click Apply to save it. Changes are discarded if you close without Apply.")
+            text("Double-click a scale to rename it; edit its paper : drawing ratio here. New / Copy add a scale. Changes are kept only if you click Apply before closing.")
                 .size(10)
                 .color(DIM),
         ]
