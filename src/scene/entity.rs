@@ -1651,25 +1651,44 @@ impl Scene {
         // render-side `boundary`, the points arrive in local render space
         // (world_offset already subtracted), so add `world_origin` back —
         // otherwise the boundary wire lands `world_offset` away from the fill.
-        let verts: Vec<Vector2> = if let Some(wcs) = &model.boundary_wcs {
-            wcs.iter()
-                .filter(|v| v[0].is_finite() && v[1].is_finite())
-                .map(|&[x, y]| Vector2::new(x, y))
-                .collect()
-        } else {
+        // Build one DXF boundary path per ring. The command layer separates
+        // the outer boundary from its holes with NaN sentinels in
+        // `boundary_wcs`; split on those so nested hatches (e.g. a small
+        // rectangle inside a big one) persist with real holes instead of a
+        // single self-intersecting polyline.
+        if let Some(wcs) = &model.boundary_wcs {
+            let mut ring: Vec<Vector2> = Vec::new();
+            let mut push_ring = |r: &mut Vec<Vector2>| {
+                if !r.is_empty() {
+                    let edge = PolylineEdge::new(std::mem::take(r), true);
+                    let mut path = BoundaryPath::external();
+                    path.add_edge(BoundaryEdge::Polyline(edge));
+                    dxf.paths.push(path);
+                }
+            };
+            for &[x, y] in wcs.iter() {
+                if x.is_finite() && y.is_finite() {
+                    ring.push(Vector2::new(x, y));
+                } else {
+                    push_ring(&mut ring);
+                }
+            }
+            push_ring(&mut ring);
+        }
+        if dxf.paths.is_empty() {
             let wx = model.world_origin[0];
             let wy = model.world_origin[1];
-            model
+            let verts: Vec<Vector2> = model
                 .boundary
                 .iter()
                 .filter(|v| v[0].is_finite() && v[1].is_finite())
                 .map(|&[x, y]| Vector2::new(x as f64 + wx, y as f64 + wy))
-                .collect()
-        };
-        let edge = PolylineEdge::new(verts, true);
-        let mut path = BoundaryPath::external();
-        path.add_edge(BoundaryEdge::Polyline(edge));
-        dxf.paths.push(path);
+                .collect();
+            let edge = PolylineEdge::new(verts, true);
+            let mut path = BoundaryPath::external();
+            path.add_edge(BoundaryEdge::Polyline(edge));
+            dxf.paths.push(path);
+        }
         if let Some(entry) = crate::scene::model::hatch_patterns::find(&model.name) {
             dxf.pattern = crate::scene::model::hatch_patterns::build_dxf_pattern(entry);
         }

@@ -70,6 +70,92 @@ fn point_in_polygon(p: [f32; 2], poly: &[[f32; 2]]) -> bool {
     inside
 }
 
+/// Shoelace-area magnitude of a polygon. Used to pick the smallest enclosing
+/// outline when a click falls inside several nested boundaries.
+fn polygon_area(poly: &[[f32; 2]]) -> f32 {
+    let n = poly.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut a = 0.0_f64;
+    let mut j = n - 1;
+    for i in 0..n {
+        a += (poly[j][0] as f64) * (poly[i][1] as f64)
+            - (poly[i][0] as f64) * (poly[j][1] as f64);
+        j = i;
+    }
+    (a * 0.5).abs() as f32
+}
+
+/// True when every vertex of `inner` lies inside `outer`. Sufficient to
+/// recognise a closed hatch outline as nested inside another for the common
+/// rectangle / closed-polyline case.
+fn polygon_contains_polygon(outer: &[[f32; 2]], inner: &[[f32; 2]]) -> bool {
+    if inner.len() < 3 {
+        return false;
+    }
+    inner.iter().all(|&v| point_in_polygon(v, outer))
+}
+
+/// Resolve the hatch boundary for a "pick inside" click.
+///
+/// The outer ring is the *smallest* outline containing the click point — the
+/// innermost region the point belongs to. Any other outline fully enclosed by
+/// that ring but which does **not** itself contain the point becomes a hole.
+/// This yields the intuitive result for nested boundaries (a small rectangle
+/// inside a big one), independent of draw order:
+///   * click inside the small shape → hatch just that shape,
+///   * click in the gap → hatch the ring (big minus small).
+fn resolve_hatch_rings(
+    outlines: &[Vec<[f32; 2]>],
+    p: [f32; 2],
+) -> Option<Vec<Vec<[f64; 2]>>> {
+    let mut containing: Vec<(usize, f32)> = outlines
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| point_in_polygon(p, o))
+        .map(|(i, o)| (i, polygon_area(o)))
+        .collect();
+    if containing.is_empty() {
+        return None;
+    }
+    // Innermost (smallest-area) outline containing the point is the fill.
+    containing.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let outer_idx = containing[0].0;
+    let outer = &outlines[outer_idx];
+
+    let mut rings: Vec<Vec<[f64; 2]>> =
+        vec![outer.iter().map(|&[x, y]| [x as f64, y as f64]).collect()];
+    for (i, o) in outlines.iter().enumerate() {
+        if i == outer_idx {
+            continue;
+        }
+        // A nested outline the click is NOT inside becomes a hole.
+        if polygon_contains_polygon(outer, o) && !point_in_polygon(p, o) {
+            rings.push(o.iter().map(|&[x, y]| [x as f64, y as f64]).collect());
+        }
+    }
+    Some(rings)
+}
+
+/// Pack one or more rings (outer boundary + optional holes) into the Hatch
+/// model storage: the `boundary` f32 ring list (NaN-separated) plus the exact
+/// `boundary_wcs` (NaN-separated) used for persistence. The first vertex of the
+/// first ring anchors the shared origin.
+fn pack_rings(rings: &[Vec<[f64; 2]>]) -> (Vec<[f32; 2]>, [f64; 2], Vec<[f64; 2]>) {
+    let mut wcs: Vec<[f64; 2]> = Vec::new();
+    let mut first = true;
+    for ring in rings {
+        if !first {
+            wcs.push([f64::NAN, f64::NAN]);
+        }
+        first = false;
+        wcs.extend(ring.iter().copied());
+    }
+    let (rel, origin) = rte_boundary(wcs.iter().map(|&[x, y]| (x, y)));
+    (rel, origin, wcs)
+}
+
 /// Split an absolute boundary into the `(f32 offsets, f64 origin)` pair that
 /// `HatchModel` expects: the origin anchors on the first vertex in full f64 so a
 /// typed coordinate (issue #311) and large/UTM positions keep their precision,
@@ -107,8 +193,8 @@ impl HatchCommand {
         }
     }
 
-    fn make_hatch(&self, boundary_wcs: Vec<[f64; 2]>) -> HatchModel {
-        let (rel, origin) = rte_boundary(boundary_wcs.iter().map(|&[x, y]| (x, y)));
+    fn make_hatch(&self, rings: Vec<Vec<[f64; 2]>>) -> HatchModel {
+        let (rel, origin, wcs) = pack_rings(&rings);
         // Default: ANSI31 from catalog; fallback to a single 45° family.
         let pat_name = "ANSI31";
         let families = crate::scene::model::hatch_patterns::find(pat_name)
@@ -139,7 +225,7 @@ impl HatchCommand {
             angle_offset: 0.0,
             scale: 1.0,
             world_origin: origin,
-            boundary_wcs: Some(std::sync::Arc::new(boundary_wcs)),
+            boundary_wcs: Some(std::sync::Arc::new(wcs)),
             vp_scissor: None,
             draw_depth: 0.0,
         }
@@ -191,15 +277,16 @@ impl CadCommand for HatchCommand {
             Mode::PickInside => {
                 // Hit-test against the f32 outline catalog (screen-space).
                 let xy = [pt.x as f32, pt.y as f32];
-                for outline in &self.outlines {
-                    if point_in_polygon(xy, outline) {
+                match resolve_hatch_rings(&self.outlines, xy) {
+                    Some(rings) => {
                         self.missed = false;
-                        let wcs = outline.iter().map(|&[x, y]| [x as f64, y as f64]).collect();
-                        return CmdResult::CommitHatch(self.make_hatch(wcs));
+                        return CmdResult::CommitHatch(self.make_hatch(rings));
+                    }
+                    None => {
+                        self.missed = true;
+                        CmdResult::NeedPoint
                     }
                 }
-                self.missed = true;
-                CmdResult::NeedPoint
             }
             Mode::Manual => {
                 // Keep the typed/snapped point exact (issue #311).
@@ -217,7 +304,7 @@ impl CadCommand for HatchCommand {
                     return CmdResult::Cancel;
                 }
                 let wcs = self.manual_pts.iter().map(|p| [p.x, p.y]).collect();
-                CmdResult::CommitHatch(self.make_hatch(wcs))
+                CmdResult::CommitHatch(self.make_hatch(vec![wcs]))
             }
         }
     }
@@ -285,8 +372,8 @@ impl GradientCommand {
         }
     }
 
-    fn make_hatch(&self, boundary_wcs: Vec<[f64; 2]>) -> HatchModel {
-        let (rel, origin) = rte_boundary(boundary_wcs.iter().map(|&[x, y]| (x, y)));
+    fn make_hatch(&self, rings: Vec<Vec<[f64; 2]>>) -> HatchModel {
+        let (rel, origin, wcs) = pack_rings(&rings);
         HatchModel {
             boundary: std::sync::Arc::new(rel),
             pattern: HatchPattern::Gradient {
@@ -298,7 +385,7 @@ impl GradientCommand {
             angle_offset: 0.0,
             scale: 1.0,
             world_origin: origin,
-            boundary_wcs: Some(std::sync::Arc::new(boundary_wcs)),
+            boundary_wcs: Some(std::sync::Arc::new(wcs)),
             vp_scissor: None,
             draw_depth: 0.0,
         }
@@ -350,15 +437,16 @@ impl CadCommand for GradientCommand {
             Mode::PickInside => {
                 // Hit-test against the f32 outline catalog (screen-space).
                 let xy = [pt.x as f32, pt.y as f32];
-                for outline in &self.outlines {
-                    if point_in_polygon(xy, outline) {
+                match resolve_hatch_rings(&self.outlines, xy) {
+                    Some(rings) => {
                         self.missed = false;
-                        let wcs = outline.iter().map(|&[x, y]| [x as f64, y as f64]).collect();
-                        return CmdResult::CommitHatch(self.make_hatch(wcs));
+                        return CmdResult::CommitHatch(self.make_hatch(rings));
+                    }
+                    None => {
+                        self.missed = true;
+                        CmdResult::NeedPoint
                     }
                 }
-                self.missed = true;
-                CmdResult::NeedPoint
             }
             Mode::Manual => {
                 // Keep the typed/snapped point exact (issue #311).
@@ -376,7 +464,7 @@ impl CadCommand for GradientCommand {
                     return CmdResult::Cancel;
                 }
                 let wcs = self.manual_pts.iter().map(|p| [p.x, p.y]).collect();
-                CmdResult::CommitHatch(self.make_hatch(wcs))
+                CmdResult::CommitHatch(self.make_hatch(vec![wcs]))
             }
         }
     }
@@ -458,13 +546,11 @@ impl CadCommand for BoundaryCommand {
     fn on_point(&mut self, pt: DVec3) -> CmdResult {
         // Hit-test against the f32 outline catalog (screen-space).
         let xy = [pt.x as f32, pt.y as f32];
-        for outline in &self.outlines {
-            if point_in_polygon(xy, outline) {
+        match resolve_hatch_rings(&self.outlines, xy) {
+            Some(rings) => {
                 self.missed = false;
                 // Store as a Hatch entity (solid fill) so it is selectable.
-                let wcs: Vec<[f64; 2]> =
-                    outline.iter().map(|&[x, y]| [x as f64, y as f64]).collect();
-                let (rel, origin) = rte_boundary(wcs.iter().map(|&[x, y]| (x, y)));
+                let (rel, origin, wcs) = pack_rings(&rings);
                 let model = HatchModel {
                     boundary: std::sync::Arc::new(rel),
                     pattern: HatchPattern::Solid,
@@ -477,11 +563,13 @@ impl CadCommand for BoundaryCommand {
                     vp_scissor: None,
                     draw_depth: 0.0,
                 };
-                return CmdResult::CommitHatch(model);
+                CmdResult::CommitHatch(model)
+            }
+            None => {
+                self.missed = true;
+                CmdResult::NeedPoint
             }
         }
-        self.missed = true;
-        CmdResult::NeedPoint
     }
 
     fn on_enter(&mut self) -> CmdResult {
@@ -497,3 +585,66 @@ impl CadCommand for BoundaryCommand {
 inventory::submit!(crate::command::CommandRegistration { names: &["BOUNDARY"] });  // BoundaryCommand
 inventory::submit!(crate::command::CommandRegistration { names: &["GRADIENT"] });  // GradientCommand
 inventory::submit!(crate::command::CommandRegistration { names: &["HATCH"] });  // HatchCommand
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<[f32; 2]> {
+        vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+    }
+
+    // Two nested rectangles, regardless of draw order, the resolution must be
+    // deterministic and independent of which was drawn first.
+    fn nested(draw_order: bool) -> Vec<Vec<[f32; 2]>> {
+        let big = rect(-10.0, -10.0, 10.0, 10.0);
+        let small = rect(-5.0, -5.0, 5.0, 5.0);
+        if draw_order {
+            vec![big, small]
+        } else {
+            vec![small, big]
+        }
+    }
+
+    #[test]
+    fn click_inside_small_hatches_only_small() {
+        for order in [true, false] {
+            let rings = resolve_hatch_rings(&nested(order), [0.0, 0.0]).unwrap();
+            // Exactly one ring (no hole) and it is the small rectangle.
+            assert_eq!(rings.len(), 1, "order {order}");
+            assert_eq!(rings[0].len(), 4);
+            assert!((rings[0][0][0] - (-5.0)).abs() < 1e-9, "order {order}");
+        }
+    }
+
+    #[test]
+    fn click_between_hatches_ring_with_hole() {
+        for order in [true, false] {
+            let rings = resolve_hatch_rings(&nested(order), [8.0, 0.0]).unwrap();
+            // Outer ring + the small rectangle as a hole.
+            assert_eq!(rings.len(), 2, "order {order}");
+            // Outer is the big rectangle.
+            assert!((rings[0][0][0] - (-10.0)).abs() < 1e-9, "order {order}");
+            // Hole is the small rectangle.
+            assert!((rings[1][0][0] - (-5.0)).abs() < 1e-9, "order {order}");
+        }
+    }
+
+    #[test]
+    fn click_outside_returns_none() {
+        assert!(resolve_hatch_rings(&nested(true), [50.0, 50.0]).is_none());
+    }
+
+    #[test]
+    fn three_nested_levels() {
+        let a = rect(-30.0, -30.0, 30.0, 30.0);
+        let b = rect(-15.0, -15.0, 15.0, 15.0);
+        let c = rect(-5.0, -5.0, 5.0, 5.0);
+        // Click in the middle ring (between b and c).
+        let rings = resolve_hatch_rings(&[a.clone(), b.clone(), c.clone()], [10.0, 0.0]).unwrap();
+        assert_eq!(rings.len(), 2, "middle ring fill with inner hole");
+        // Click inside the innermost.
+        let rings = resolve_hatch_rings(&[a, b, c], [0.0, 0.0]).unwrap();
+        assert_eq!(rings.len(), 1, "innermost fill has no hole");
+    }
+}
