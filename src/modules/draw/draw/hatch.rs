@@ -100,12 +100,14 @@ fn polygon_contains_polygon(outer: &[[f32; 2]], inner: &[[f32; 2]]) -> bool {
 /// Resolve the hatch boundary for a "pick inside" click.
 ///
 /// The outer ring is the *smallest* outline containing the click point — the
-/// innermost region the point belongs to. Any other outline fully enclosed by
-/// that ring but which does **not** itself contain the point becomes a hole.
-/// This yields the intuitive result for nested boundaries (a small rectangle
-/// inside a big one), independent of draw order:
-///   * click inside the small shape → hatch just that shape,
-///   * click in the gap → hatch the ring (big minus small).
+/// innermost region the point belongs to. Its holes are that ring's **direct
+/// children**: outlines nested one level inside it with no other outline in
+/// between. Deeper (grandchild) outlines belong to those children's own fills,
+/// so they are left out — otherwise even-odd rasterisation would flip the
+/// innermost island back on for 3+ nesting levels. The result is intuitive and
+/// draw-order independent:
+///   * click inside the innermost shape → hatch just that shape,
+///   * click in a gap → hatch that ring, with the next level in as holes.
 fn resolve_hatch_rings(
     outlines: &[Vec<[f32; 2]>],
     p: [f32; 2],
@@ -130,8 +132,22 @@ fn resolve_hatch_rings(
         if i == outer_idx {
             continue;
         }
-        // A nested outline the click is NOT inside becomes a hole.
-        if polygon_contains_polygon(outer, o) && !point_in_polygon(p, o) {
+        // Candidate hole: fully nested inside the fill outline. (An outline the
+        // click sits in cannot qualify — it would have been the smaller fill.)
+        if !polygon_contains_polygon(outer, o) || point_in_polygon(p, o) {
+            continue;
+        }
+        // Only DIRECT children become holes. If another outline sits strictly
+        // between `outer` and `o` (inside `outer`, and enclosing `o`), then `o`
+        // belongs to that intermediate region's own fill; flagging it here would
+        // re-fill it under even-odd once nesting reaches three levels.
+        let has_intermediate = outlines.iter().enumerate().any(|(k, x)| {
+            k != i
+                && k != outer_idx
+                && polygon_contains_polygon(outer, x)
+                && polygon_contains_polygon(x, o)
+        });
+        if !has_intermediate {
             rings.push(o.iter().map(|&[x, y]| [x as f64, y as f64]).collect());
         }
     }
@@ -646,5 +662,19 @@ mod tests {
         // Click inside the innermost.
         let rings = resolve_hatch_rings(&[a, b, c], [0.0, 0.0]).unwrap();
         assert_eq!(rings.len(), 1, "innermost fill has no hole");
+    }
+
+    #[test]
+    fn click_outer_band_only_direct_child_is_hole() {
+        let a = rect(-30.0, -30.0, 30.0, 30.0);
+        let b = rect(-15.0, -15.0, 15.0, 15.0);
+        let c = rect(-5.0, -5.0, 5.0, 5.0);
+        // Click in the outermost band (between a and b): fill = a with only its
+        // direct child b as a hole. The grandchild c must be excluded — adding
+        // it would flip the innermost square back on under even-odd fill.
+        let rings = resolve_hatch_rings(&[a, b, c], [20.0, 0.0]).unwrap();
+        assert_eq!(rings.len(), 2, "outer band = a with b as its only hole");
+        assert!((rings[0][0][0] - (-30.0)).abs() < 1e-9, "outer ring is a");
+        assert!((rings[1][0][0] - (-15.0)).abs() < 1e-9, "hole is direct child b");
     }
 }
