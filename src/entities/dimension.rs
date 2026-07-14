@@ -2607,13 +2607,18 @@ fn format_engineering(inches: f64, dec: usize) -> String {
 }
 
 fn format_architectural(inches: f64, dimfrac: i16, zin: i16) -> String {
-    let sign = if inches < 0.0 { "-" } else { "" };
-    let abs = inches.abs();
-    let feet = (abs / 12.0).trunc();
-    let rem_in_total = abs - feet * 12.0;
-    let whole = rem_in_total.trunc();
-    let frac = rem_in_total - whole;
-    let frac_str = fraction_string(frac, dimfrac);
+    let denom = arch_denom(dimfrac);
+    // Round to the nearest 1/denom inch *first*, in integer ticks, so a fraction
+    // that rounds up to a whole inch carries into the inches — and on into the
+    // feet — instead of printing an un-reduced "11 1/1". A 3ft object that
+    // measures 35.9999" (float) now reads 3'-0", not 2'-11 1".
+    let ticks = (inches.abs() * denom as f64).round() as u64;
+    let sign = if inches < 0.0 && ticks != 0 { "-" } else { "" };
+    let per_foot = 12 * denom;
+    let feet = ticks / per_foot;
+    let rem = ticks % per_foot;
+    let whole = rem / denom;
+    let frac_str = reduce_fraction(rem % denom, denom);
 
     // DIMZIN feet/inch suppression:
     //   0 suppress zero feet & zero inches, 1 include both,
@@ -2621,21 +2626,21 @@ fn format_architectural(inches: f64, dimfrac: i16, zin: i16) -> String {
     //   3 suppress zero feet / include zero inches.
     let suppress_zero_feet = zin == 0 || zin == 3;
     let suppress_zero_inches = zin == 0 || zin == 2;
-    let feet_zero = feet.abs() < 0.5;
-    let inches_zero = whole.abs() < 0.5 && frac_str.is_empty();
+    let feet_zero = feet == 0;
+    let inches_zero = whole == 0 && frac_str.is_empty();
     let show_feet = !feet_zero || !suppress_zero_feet;
     let show_inches = !inches_zero || !suppress_zero_inches;
 
     let feet_part = if show_feet {
-        format!("{:.0}'", feet)
+        format!("{}'", feet)
     } else {
         String::new()
     };
     let inch_part = if show_inches {
         if frac_str.is_empty() {
-            format!("{:.0}\"", whole)
+            format!("{}\"", whole)
         } else {
-            format!("{:.0} {}\"", whole, frac_str)
+            format!("{} {}\"", whole, frac_str)
         }
     } else {
         String::new()
@@ -2650,40 +2655,43 @@ fn format_architectural(inches: f64, dimfrac: i16, zin: i16) -> String {
 }
 
 fn format_fractional(value: f64, dimfrac: i16) -> String {
-    let sign = if value < 0.0 { "-" } else { "" };
-    let abs = value.abs();
-    let whole = abs.trunc();
-    let frac = abs - whole;
-    let frac_str = fraction_string(frac, dimfrac);
+    let denom = arch_denom(dimfrac);
+    // Round on the fraction grid first (same carry reasoning as architectural).
+    let ticks = (value.abs() * denom as f64).round() as u64;
+    let sign = if value < 0.0 && ticks != 0 { "-" } else { "" };
+    let whole = ticks / denom;
+    let frac_str = reduce_fraction(ticks % denom, denom);
     if frac_str.is_empty() {
-        format!("{}{:.0}", sign, whole)
-    } else if whole == 0.0 {
+        format!("{}{}", sign, whole)
+    } else if whole == 0 {
         format!("{}{}", sign, frac_str)
     } else {
-        format!("{}{:.0} {}", sign, whole, frac_str)
+        format!("{}{} {}", sign, whole, frac_str)
     }
 }
 
-fn fraction_string(frac: f64, dimfrac: i16) -> String {
-    // DIMFRAC denominator: AutoCAD encodes this on DIMSTYLE via DIMLUNIT
-    // pairing — the value we accept is the *power-of-2* exponent (1..=6 ish).
-    // Pick a sensible cap so the printed fraction stays readable.
-    let exp = (dimfrac.clamp(0, 8) as u32).max(2) + 2; // 2..=10 → 4..=1024
-    let denom = 1u64 << exp;
-    let numer = (frac * denom as f64).round() as i64;
-    if numer <= 0 {
+/// Power-of-two denominator for architectural / fractional output. DIMFRAC is
+/// the exponent-ish knob AutoCAD pairs with DIMLUNIT; clamp it to a readable
+/// range (16ths … 1024ths).
+fn arch_denom(dimfrac: i16) -> u64 {
+    let exp = (dimfrac.clamp(0, 8) as u32).max(2) + 2; // 4..=10 → 16..=1024
+    1u64 << exp
+}
+
+/// Reduce a power-of-two fraction numer/denom to display form. Empty for a zero
+/// numerator. Callers strip the whole units first, so `numer < denom` and the
+/// reduced denominator is always ≥ 2 — the carry that used to leak out as a bare
+/// "1/1" is handled upstream now.
+fn reduce_fraction(mut n: u64, mut d: u64) -> String {
+    if n == 0 {
         return String::new();
     }
-    let mut n = numer as u64;
-    let mut d = denom;
     while n % 2 == 0 && d % 2 == 0 {
         n /= 2;
         d /= 2;
     }
-    if n == 0 {
-        String::new()
-    } else if d == 1 {
-        format!("{}", n) // whole-number overflow back to caller
+    if d == 1 {
+        format!("{}", n)
     } else {
         format!("{}/{}", n, d)
     }
@@ -3110,5 +3118,42 @@ mod dimtad_tests {
             "outside must clear the object side, got {}",
             below.y
         );
+    }
+}
+
+#[cfg(test)]
+mod arch_format_tests {
+    use super::{format_architectural, format_fractional};
+
+    // A 3ft object that measures 35.99" (float noise) must carry the rounded
+    // fraction up through inches into feet — not print "2'-11 1"". (Regression
+    // for the fraction that reduced to 1/1 and leaked out as a bare "1".)
+    #[test]
+    fn arch_carries_fraction_up_to_feet() {
+        assert_eq!(format_architectural(35.99, 0, 1), "3'-0\"");
+        assert_eq!(format_architectural(36.0, 0, 1), "3'-0\"");
+        // An exact 15/16 must still render as a fraction, no spurious carry.
+        assert_eq!(format_architectural(35.9375, 0, 1), "2'-11 15/16\"");
+    }
+
+    // Carry that stops at inches (11.999" → 12" → 1'-0", not "0'-11 1"").
+    #[test]
+    fn arch_carries_fraction_up_to_inches() {
+        assert_eq!(format_architectural(11.999, 0, 1), "1'-0\"");
+    }
+
+    #[test]
+    fn arch_normal_values_unchanged() {
+        assert_eq!(format_architectural(30.5, 0, 1), "2'-6 1/2\"");
+        assert_eq!(format_architectural(0.0, 0, 1), "0'-0\"");
+        assert_eq!(format_architectural(-30.25, 0, 1), "-2'-6 1/4\"");
+    }
+
+    // Same carry bug lived in the plain fractional formatter.
+    #[test]
+    fn fractional_carries_up() {
+        assert_eq!(format_fractional(35.9999, 0), "36");
+        assert_eq!(format_fractional(11.999, 0), "12");
+        assert_eq!(format_fractional(6.5, 0), "6 1/2");
     }
 }
