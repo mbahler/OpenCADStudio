@@ -303,8 +303,8 @@ Status of every standard CAD command in Open CAD Studio:
 | `QSAVE` | — | Quick save | ✅ |
 | `SAVEALL` | — | Save all open drawings | ✅ |
 | `PLOT` | — | Print / plot | ✅ |
-| `EXPORT` | — | Export | ✅ |
-| `EXPORTPDF` | — | Export to PDF | ✅ |
+| `EXPORT [path]` | — | Export to PDF (save dialog, or straight to `path`) | ✅ |
+| `EXPORTPDF [path]` | — | Export to PDF (save dialog, or straight to `path`) | ✅ |
 | `PAGESETUP` | — | Page setup | ✅ |
 | `PLOTSTYLE` | — | Plot style | ✅ |
 | `PURGE` | PU | Purge unused items | ✅ |

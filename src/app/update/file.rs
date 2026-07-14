@@ -1119,7 +1119,10 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 }
     }
 
-    pub(super) fn on_plot_export_path_some(&mut self, path: std::path::PathBuf) -> Task<Message> {
+    pub(in crate::app) fn on_plot_export_path_some(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> Task<Message> {
                 let i = self.active_tab;
                 let scene = &self.tabs[i].scene;
                 let wires = scene.entity_wires();
@@ -1222,10 +1225,12 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     &path,
                     self.active_plot_style.as_ref(),
                 ) {
-                    Ok(()) => self.command_line.push_info(&format!(
-                        "Exported: {}",
-                        path.file_name().unwrap_or_default().to_string_lossy()
-                    )),
+                    // Full path, not just the file name — when the export was
+                    // driven by EXPORTPDF <path> the user needs to see where
+                    // the file actually landed. (#369)
+                    Ok(()) => self
+                        .command_line
+                        .push_info(&format!("Exported: {}", path.display())),
                     Err(e) => self.command_line.push_error(&format!("Export failed: {e}")),
                 }
                 Task::none()

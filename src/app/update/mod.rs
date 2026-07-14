@@ -3535,7 +3535,18 @@ impl OpenCADStudio {
                     Message::PlotExportPath,
                 )
             }
-            Message::PlotExportPath(None) => Task::none(),
+            // None means the save dialog was cancelled — or never opened at
+            // all (a broken XDG portal / missing zenity on Linux resolves to
+            // None too, and rfd only reports that through `log`, which is
+            // opt-in). Either way say something instead of silently doing
+            // nothing. (#369)
+            Message::PlotExportPath(None) => {
+                self.command_line.push_info(
+                    "PDF export canceled — no file chosen. \
+                     If no dialog appeared, use EXPORTPDF <path>.",
+                );
+                Task::none()
+            }
             Message::PlotExportPath(Some(path)) => self.on_plot_export_path_some(path),
 
             Message::PlotFormat(f) => {
@@ -3559,7 +3570,14 @@ impl OpenCADStudio {
                     Message::PlotWindowExportPath,
                 )
             }
-            Message::PlotWindowExportPath(None) => Task::none(),
+            // Same silent-None trap as PlotExportPath above. (#369)
+            Message::PlotWindowExportPath(None) => {
+                self.command_line.push_info(
+                    "PDF export canceled — no file chosen. \
+                     If no dialog appeared, use EXPORTPDF <path>.",
+                );
+                Task::none()
+            }
             Message::PlotWindowExportPath(Some(path)) => self.on_plot_window_export_path_some(path),
 
             // ── Print to system printer ───────────────────────────────────────
