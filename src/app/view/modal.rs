@@ -777,7 +777,7 @@ fn save_as_dialog_window<'a>(filename: &'a str, format: &'a str) -> Element<'a, 
     items.push(
         row![
             Space::new().width(Fill),
-            btn("Continue", Message::SaveDialogConfirm, BTN_OK, BTN_HOV),
+            btn("Save as...", Message::SaveDialogConfirm, BTN_OK, BTN_HOV),
             Space::new().width(8),
             btn("Cancel", Message::SaveDialogCancel, BTN_GREY, BTN_GHOV),
         ]
