@@ -2554,6 +2554,19 @@ impl Scene {
             if epoch == self.geometry_epoch {
                 return v;
             }
+            // Skip the whole-document annotative scan when nothing annotative
+            // changed since (PSLTSCALE toggles route through a full delta, which
+            // fails this check and forces the recompute below).
+            if self.category_cache_valid(epoch, |h| {
+                self.document
+                    .get_entity(h)
+                    .map(|e| crate::scene::annotative::is_annotative(&self.document, e))
+                    .unwrap_or(false)
+            }) {
+                self.annotation_affects_wires
+                    .set(Some((self.geometry_epoch, v)));
+                return v;
+            }
         }
         let v = self.document.header.paper_space_linetype_scaling
             || self
@@ -4082,6 +4095,65 @@ impl Scene {
             }
         }
 
+        // Incremental path: if the cache is only a few edits behind, patch just
+        // the changed handles into the existing quadtree (which supports
+        // insert/remove/update, out-of-root items falling into overflow) instead
+        // of re-walking every entity. Resolve each change against the document
+        // first, then apply under one borrow.
+        enum IdxOp {
+            Remove(Handle),
+            SetBounded(Handle, [f64; 4]),
+            SetUnbounded(Handle),
+        }
+        let cached_epoch = self.entity_index_cache.borrow().as_ref().map(|c| c.0);
+        if let Some(ce) = cached_epoch {
+            if let Some(deltas) = self.replay_since(ce) {
+                let mut ops: Vec<IdxOp> = Vec::with_capacity(deltas.len());
+                for (h, kind) in &deltas {
+                    match kind {
+                        ChangeKind::Removed => ops.push(IdxOp::Remove(*h)),
+                        ChangeKind::Added | ChangeKind::Modified => {
+                            match self.document.get_entity(*h) {
+                                None => ops.push(IdxOp::Remove(*h)),
+                                Some(e) if is_unindexable_entity(e) => {
+                                    ops.push(IdxOp::Remove(*h))
+                                }
+                                Some(e) => match entity_world_aabb_f64(e) {
+                                    Some(ab) => ops.push(IdxOp::SetBounded(*h, ab)),
+                                    None => ops.push(IdxOp::SetUnbounded(*h)),
+                                },
+                            }
+                        }
+                    }
+                }
+                let mut cache = self.entity_index_cache.borrow_mut();
+                if let Some((epoch, idx)) = cache.as_mut() {
+                    for op in ops {
+                        match op {
+                            IdxOp::Remove(h) => {
+                                idx.tree.remove(h);
+                                idx.unbounded_handles.retain(|x| *x != h);
+                            }
+                            IdxOp::SetBounded(h, ab) => {
+                                idx.tree.update(h, ab);
+                                idx.unbounded_handles.retain(|x| *x != h);
+                            }
+                            IdxOp::SetUnbounded(h) => {
+                                idx.tree.remove(h);
+                                idx.unbounded_handles.retain(|x| *x != h);
+                                idx.unbounded_handles.push(h);
+                            }
+                        }
+                    }
+                    *epoch = self.geometry_epoch;
+                    drop(cache);
+                    return std::cell::Ref::map(self.entity_index_cache.borrow(), |c| {
+                        &c.as_ref().unwrap().1
+                    });
+                }
+            }
+        }
+
         let mut items: Vec<(Handle, [f64; 4])> = Vec::new();
         let mut unbounded: Vec<Handle> = Vec::new();
         let mut union: Option<[f64; 4]> = None;
@@ -4457,6 +4529,59 @@ mod journal_tests {
         let recent = s.geometry_epoch;
         s.bump_entities(&[(h(9999), ChangeKind::Added)]);
         assert!(s.replay_since(recent).is_some());
+    }
+
+    // Differential oracle: the incrementally-patched entity index must always
+    // equal a from-scratch rebuild after any add / move / erase.
+    #[test]
+    fn entity_index_incremental_matches_full_rebuild() {
+        use acadrust::entities::Line;
+        use acadrust::types::Vector3;
+
+        fn line(a: (f64, f64), b: (f64, f64)) -> EntityType {
+            EntityType::Line(Line::from_points(
+                Vector3::new(a.0, a.1, 0.0),
+                Vector3::new(b.0, b.1, 0.0),
+            ))
+        }
+        // Set of handles the index reports over the whole plane (bounded via the
+        // quadtree + always-surfaced unbounded).
+        fn indexed(s: &Scene) -> HashSet<Handle> {
+            let idx = s.entity_index();
+            let mut set: HashSet<Handle> =
+                idx.tree.query_rect([-1e9, -1e9, 1e9, 1e9]).into_iter().collect();
+            set.extend(idx.unbounded_handles.iter().copied());
+            set
+        }
+        fn full_rebuild(s: &Scene) -> HashSet<Handle> {
+            *s.entity_index_cache.borrow_mut() = None;
+            indexed(s)
+        }
+
+        let mut s = Scene::new();
+        let h1 = s.add_entity(line((0.0, 0.0), (10.0, 10.0)));
+        let h2 = s.add_entity(line((5.0, 5.0), (20.0, 3.0)));
+        // Prime the index (full build), then each edit must keep it == rebuild.
+        let _ = indexed(&s);
+
+        // Add
+        let h3 = s.add_entity(line((100.0, 100.0), (140.0, 90.0)));
+        assert_eq!(indexed(&s), full_rebuild(&s), "after add");
+
+        // Modify (move h1 far away)
+        {
+            let e = line((900.0, 900.0), (950.0, 970.0));
+            let mut e = e;
+            e.common_mut().handle = h1;
+            s.update_entity(e);
+        }
+        assert_eq!(indexed(&s), full_rebuild(&s), "after modify");
+
+        // Erase h2
+        s.erase_entities(&[h2]);
+        assert_eq!(indexed(&s), full_rebuild(&s), "after erase");
+        assert!(indexed(&s).contains(&h3) && indexed(&s).contains(&h1));
+        assert!(!indexed(&s).contains(&h2));
     }
 
     #[test]
