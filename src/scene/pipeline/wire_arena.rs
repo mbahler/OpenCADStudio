@@ -50,6 +50,12 @@ const HEADROOM_NUM: u64 = 3;
 const HEADROOM_DEN: u64 = 2;
 const MIN_INST_CAP: u64 = 4096;
 const MIN_CONST_CAP: u64 = 1024;
+/// wgpu caps a single buffer at 256 MB. An arena keeps ONE instance buffer per
+/// batch, so a batch whose instances exceed this can't be an arena — build
+/// returns None and the caller falls back to the chunked batched path. The
+/// buffer (with headroom) is also clamped here so it never exceeds the limit.
+const MAX_INSTANCES: u64 = 268_435_456 / std::mem::size_of::<WireInstance>() as u64;
+const MAX_CONSTS: u64 = 268_435_456 / std::mem::size_of::<WireConst>() as u64;
 
 struct Slab {
     inst_off: u32,
@@ -73,18 +79,29 @@ pub struct WireArena {
     /// Tombstoned instances (blanked, not reclaimed) — past half the tail a patch
     /// bails so the caller compacts with a full rebuild.
     tombstoned: u32,
+    /// Whether this arena's wires are 3D mesh/solid edges (`is_3d_mesh_edge` on
+    /// the draw batch): the draw loop hides them in clean-shaded modes and draws
+    /// them black in filled-with-edges modes. The regular and mesh-edge subsets
+    /// of the resident set each get their own arena so both patch incrementally.
+    mesh_edge: bool,
 }
 
 fn handle_of(w: &WireModel) -> Option<Handle> {
     crate::scene::Scene::handle_from_wire_name(&w.name)
 }
 
-/// True if the whole set is arena-eligible: a single batch that draws with no
-/// viewport scissor — no mesh/solid fill and no per-wire scissor.
+/// True if the set can use the arena: no per-wire scissor (paper viewports). Mesh
+/// fills no longer disqualify it — the render layer splits the set into a regular
+/// and a mesh-edge subset, one arena each.
 pub fn is_arena_eligible(wires: &[WireModel]) -> bool {
-    wires
-        .iter()
-        .all(|w| w.fill_tris.is_empty() && w.vp_scissor.is_none())
+    wires.iter().all(|w| w.vp_scissor.is_none())
+}
+
+/// True when `w`'s edge segments belong to a mesh/solid whose fill is drawn in a
+/// separate pass — such wires need the draw loop's mesh-edge treatment, so they
+/// go in their own arena. `mesh_names` are the entities that emit a fill.
+pub fn is_mesh_edge(w: &WireModel, mesh_names: &rustc_hash::FxHashSet<u64>) -> bool {
+    !w.points.is_empty() && handle_of(w).map_or(false, |h| mesh_names.contains(&h.value()))
 }
 
 /// True when appending a new entity at the tail could change the image, so the
@@ -95,7 +112,7 @@ pub fn is_arena_eligible(wires: &[WireModel]) -> bool {
 ///     Surface) are excluded from `draw_depth_map`, so their fallback edge wires
 ///     get draw_depth 0.0. Two coincident opaque such wires share a z-bias and
 ///     resolve by submission order, which a tail relocation would flip.
-fn append_unsafe(wires: &[WireModel], depth_map: &FxHashMap<u64, f32>) -> bool {
+fn append_unsafe(wires: &[&WireModel], depth_map: &FxHashMap<u64, f32>) -> bool {
     wires.iter().any(|w| {
         w.color[3] < 0.999
             || handle_of(w).map_or(true, |h| !depth_map.contains_key(&h.value()))
@@ -116,13 +133,13 @@ pub fn build_handle_index(wires: &[WireModel]) -> std::sync::Arc<FxHashMap<u64, 
 }
 
 /// Group `wires` (draw-order sorted, entity-contiguous) into per-handle ranges.
-fn handle_ranges(wires: &[WireModel]) -> Option<Vec<(Handle, usize, usize)>> {
+fn handle_ranges(wires: &[&WireModel]) -> Option<Vec<(Handle, usize, usize)>> {
     let mut out: Vec<(Handle, usize, usize)> = Vec::new();
     let mut i = 0;
     while i < wires.len() {
-        let h = handle_of(&wires[i])?;
+        let h = handle_of(wires[i])?;
         let mut j = i + 1;
-        while j < wires.len() && handle_of(&wires[j]) == Some(h) {
+        while j < wires.len() && handle_of(wires[j]) == Some(h) {
             j += 1;
         }
         out.push((h, i, j));
@@ -189,13 +206,11 @@ impl WireArena {
     pub fn build(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        wires: &[WireModel],
+        wires: &[&WireModel],
         depth_map: &FxHashMap<u64, f32>,
         const_bgl: &wgpu::BindGroupLayout,
+        mesh_edge: bool,
     ) -> Option<Self> {
-        if !is_arena_eligible(wires) {
-            return None;
-        }
         let ranges = handle_ranges(wires)?;
 
         // const slot 0 = blank tombstone target.
@@ -205,9 +220,12 @@ impl WireArena {
         for (h, i, j) in ranges {
             let inst_off = instances.len() as u32;
             let const_off = consts_cpu.len() as u32;
-            for w in &wires[i..j] {
+            for &w in &wires[i..j] {
                 let wire_id = consts_cpu.len() as u32;
-                let dd = wire_draw_depth(w, depth_map);
+                // 3D mesh outline edges are occluded by true depth and must NOT
+                // take the draw-order z-bias (or hidden back edges peek through
+                // the shaded fill) — matching WireGpu::from_run.
+                let dd = if mesh_edge { 0.0 } else { wire_draw_depth(w, depth_map) };
                 let (mut insts, cst) = emit_wire_native(w, wire_id, w.color, dd);
                 instances.append(&mut insts);
                 consts_cpu.push(cst);
@@ -225,9 +243,17 @@ impl WireArena {
 
         let inst_tail = instances.len() as u32;
         let const_tail = consts_cpu.len() as u32;
-        let inst_cap = ((inst_tail as u64 * HEADROOM_NUM / HEADROOM_DEN).max(MIN_INST_CAP)) as u32;
-        let const_cap =
-            ((const_tail as u64 * HEADROOM_NUM / HEADROOM_DEN).max(MIN_CONST_CAP)) as u32;
+        // A batch bigger than one buffer can't be an arena — let the caller chunk
+        // it via the batched path.
+        if inst_tail as u64 > MAX_INSTANCES || const_tail as u64 > MAX_CONSTS {
+            return None;
+        }
+        let inst_cap = ((inst_tail as u64 * HEADROOM_NUM / HEADROOM_DEN)
+            .max(MIN_INST_CAP)
+            .min(MAX_INSTANCES)) as u32;
+        let const_cap = ((const_tail as u64 * HEADROOM_NUM / HEADROOM_DEN)
+            .max(MIN_CONST_CAP)
+            .min(MAX_CONSTS)) as u32;
         let inst_buf = alloc_inst(device, inst_cap as u64);
         let const_buf = alloc_const(device, const_cap as u64);
         if inst_tail > 0 {
@@ -247,6 +273,7 @@ impl WireArena {
             consts_cpu,
             slabs,
             tombstoned: 0,
+            mesh_edge,
         })
     }
 
@@ -265,12 +292,9 @@ impl WireArena {
         &mut self,
         queue: &wgpu::Queue,
         changes: &[(Handle, ChangeKind)],
-        wires: &[WireModel],
+        wires: &[&WireModel],
         depth_map: &FxHashMap<u64, f32>,
     ) -> bool {
-        if !is_arena_eligible(wires) {
-            return false;
-        }
         let Some(ranges) = handle_ranges(wires) else {
             return false;
         };
@@ -282,7 +306,9 @@ impl WireArena {
         for &(h, kind) in changes {
             let new_range = range_of.get(&h).copied();
 
-            // Removed / now-hidden ⇒ tombstone the slab.
+            // Removed / now-hidden ⇒ tombstone the slab. A handle not in THIS
+            // arena's subset (it belongs to the other batch) simply isn't in its
+            // slabs, so this is a no-op for it.
             if matches!(kind, ChangeKind::Removed) || new_range.is_none() {
                 if let Some(slab) = self.slabs.remove(&h) {
                     let blanks = vec![blank_instance(); slab.inst_len as usize];
@@ -298,9 +324,9 @@ impl WireArena {
             // Emit into fresh, run-local const slots (patched to absolute below).
             let mut insts: Vec<WireInstance> = Vec::new();
             let mut csts: Vec<WireConst> = Vec::new();
-            for w in run {
+            for &w in run {
                 let wire_id = csts.len() as u32;
-                let dd = wire_draw_depth(w, depth_map);
+                let dd = if self.mesh_edge { 0.0 } else { wire_draw_depth(w, depth_map) };
                 let (mut wi, c) = emit_wire_native(w, wire_id, w.color, dd);
                 insts.append(&mut wi);
                 csts.push(c);
@@ -339,9 +365,11 @@ impl WireArena {
             }
 
             // Layout changed ⇒ append at the tail. Unsafe to relocate when the set
-            // resolves overlap by submission order (transparency, or a wire with
-            // no draw-order depth); fall back to a full rebuild instead.
-            if append_unsafe {
+            // resolves overlap by submission order: transparency, a wire with no
+            // draw-order depth, or the mesh-edge arena (all its wires are forced
+            // to depth 0, so coincident edges resolve by submission order). Fall
+            // back to a full rebuild instead.
+            if append_unsafe || self.mesh_edge {
                 return false;
             }
             if self.inst_tail + inst_len > self.inst_cap
@@ -383,7 +411,13 @@ impl WireArena {
             // depth map and re-upload the whole (small) const buffer; the instance
             // buffer is untouched.
             for (h, slab) in &self.slabs {
-                let dd = depth_map.get(&h.value()).copied().unwrap_or(0.0);
+                // Mesh-edge wires keep depth 0 (no draw-order bias); regular wires
+                // take the re-normalised map value.
+                let dd = if self.mesh_edge {
+                    0.0
+                } else {
+                    depth_map.get(&h.value()).copied().unwrap_or(0.0)
+                };
                 for k in 0..slab.const_len {
                     self.consts_cpu[(slab.const_off + k) as usize].draw_depth = dd;
                 }
@@ -406,7 +440,7 @@ impl WireArena {
             instance_buffer: self.inst_buf.clone(),
             instance_count: self.inst_tail,
             vp_scissor: None,
-            is_3d_mesh_edge: false,
+            is_3d_mesh_edge: self.mesh_edge,
             const_bind_group: Some(self.const_bind_group.clone()),
         }]
     }

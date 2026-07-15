@@ -154,7 +154,12 @@ pub struct Pipeline {
     /// edit patches one entity's slab in place instead of rebuilding every wire.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) wire_arena: Option<wire_arena::WireArena>,
-    /// The Model content id `wire_arena` currently mirrors (`u64::MAX` = none).
+    /// Second arena for the mesh/solid EDGE wires (drawn with the mesh-edge skip /
+    /// black treatment); the resident set is split into this + `wire_arena` so
+    /// both patch incrementally. Shares `wire_arena_id`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) wire_arena_mesh: Option<wire_arena::WireArena>,
+    /// The Model content id both arenas currently mirror (`u64::MAX` = none).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) wire_arena_id: u64,
     /// Pixel scissor rects [x, y, w, h] for viewport-clipped wires. Recomputed each frame.
@@ -1319,6 +1324,8 @@ impl Pipeline {
             gpu_wires: std::sync::Arc::new(vec![]),
             #[cfg(not(target_arch = "wasm32"))]
             wire_arena: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            wire_arena_mesh: None,
             #[cfg(not(target_arch = "wasm32"))]
             wire_arena_id: u64::MAX,
             wire_pixel_scissors: vec![],

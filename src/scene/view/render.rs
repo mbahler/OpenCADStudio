@@ -369,38 +369,81 @@ impl shader::Primitive for Primitive {
                 // 2D/3D sets fall through to the shared batched path below.
                 let mut arena_served = false;
                 #[cfg(not(target_arch = "wasm32"))]
+                let _perf = std::env::var_os("OCS_PERF").is_some();
+                #[cfg(not(target_arch = "wasm32"))]
+                let _t0 = std::time::Instant::now();
+                #[cfg(not(target_arch = "wasm32"))]
+                let mut _patched = false;
+                #[cfg(not(target_arch = "wasm32"))]
                 if crate::scene::wire_gpu_patch_enabled()
                     && inner.wire_const_bgl.is_some()
                     && crate::scene::pipeline::wire_arena::is_arena_eligible(&vp.wires)
                 {
-                    use crate::scene::pipeline::wire_arena;
-                    // In-place patch from the base the GPU holds, else rebuild.
-                    let patched = if let (Some(arena), Some((base, changes))) =
-                        (inner.wire_arena.as_mut(), vp.wire_patch.as_ref())
-                    {
-                        inner.wire_arena_id == *base
-                            && !changes.is_empty()
-                            && arena.patch(queue, changes, &vp.wires[..], &vp.draw_depths)
-                    } else {
-                        false
-                    };
-                    if !patched {
-                        let bgl = inner.wire_const_bgl.as_ref().unwrap();
-                        inner.wire_arena = wire_arena::WireArena::build(
-                            device,
-                            queue,
-                            &vp.wires[..],
-                            &vp.draw_depths,
-                            bgl,
-                        );
+                    use crate::scene::pipeline::wire_arena::{self, WireArena};
+                    // Split the resident set into the regular 2D wires and the
+                    // mesh/solid EDGE wires (which need the mesh-edge draw
+                    // treatment), one arena each, so both patch incrementally.
+                    // Fill-only wires (no segments) are drawn in the face3d pass,
+                    // not here, so they go in neither.
+                    let mesh_names: rustc_hash::FxHashSet<u64> = vp
+                        .wires
+                        .iter()
+                        .filter(|w| !w.fill_tris.is_empty() && !w.fill_tris_low.is_empty())
+                        .filter_map(|w| w.name.parse::<u64>().ok())
+                        .collect();
+                    let regular: Vec<&crate::scene::WireModel> = vp
+                        .wires
+                        .iter()
+                        .filter(|w| {
+                            !w.points.is_empty() && !wire_arena::is_mesh_edge(w, &mesh_names)
+                        })
+                        .collect();
+                    let mesh: Vec<&crate::scene::WireModel> = vp
+                        .wires
+                        .iter()
+                        .filter(|w| wire_arena::is_mesh_edge(w, &mesh_names))
+                        .collect();
+                    let bgl = inner.wire_const_bgl.as_ref().unwrap();
+                    let base_ok = vp
+                        .wire_patch
+                        .as_ref()
+                        .map_or(false, |(base, changes)| {
+                            inner.wire_arena_id == *base && !changes.is_empty()
+                        });
+                    let changes = vp.wire_patch.as_ref().map(|(_, c)| c);
+
+                    // Each batch: patch from the shared base if possible, else
+                    // rebuild just that batch. They advance together.
+                    let reg_ok = base_ok
+                        && inner.wire_arena.as_mut().map_or(false, |a| {
+                            a.patch(queue, changes.unwrap(), &regular, &vp.draw_depths)
+                        });
+                    if !reg_ok {
+                        inner.wire_arena =
+                            WireArena::build(device, queue, &regular, &vp.draw_depths, bgl, false);
                     }
-                    if let Some(arena) = inner.wire_arena.as_ref() {
-                        inner.gpu_wires = std::sync::Arc::new(arena.wire_gpus());
-                        inner.wire_handle_index =
-                            wire_arena::build_handle_index(&vp.wires[..]);
+                    let mesh_ok = base_ok
+                        && inner.wire_arena_mesh.as_mut().map_or(false, |a| {
+                            a.patch(queue, changes.unwrap(), &mesh, &vp.draw_depths)
+                        });
+                    if !mesh_ok {
+                        inner.wire_arena_mesh =
+                            WireArena::build(device, queue, &mesh, &vp.draw_depths, bgl, true);
+                    }
+                    _patched = reg_ok && mesh_ok;
+
+                    if let (Some(reg), Some(me)) =
+                        (inner.wire_arena.as_ref(), inner.wire_arena_mesh.as_ref())
+                    {
+                        let mut gpus = reg.wire_gpus();
+                        gpus.extend(me.wire_gpus());
+                        inner.gpu_wires = std::sync::Arc::new(gpus);
+                        inner.wire_handle_index = wire_arena::build_handle_index(&vp.wires[..]);
                         inner.wire_arena_id = vp.wire_content_id;
                         arena_served = true;
                     } else {
+                        inner.wire_arena = None;
+                        inner.wire_arena_mesh = None;
                         inner.wire_arena_id = u64::MAX;
                     }
                 }
@@ -436,6 +479,24 @@ impl shader::Primitive for Primitive {
                 inner.wire_handle_index = built.1;
                 } // end !arena_served
                 inner.cached_wire_id = vp.wire_content_id;
+                #[cfg(not(target_arch = "wasm32"))]
+                if _perf {
+                    let gi: u32 = inner.gpu_wires.iter().map(|w| w.instance_count).sum();
+                    let outcome = if !arena_served {
+                        "shared-fullupload"
+                    } else if _patched {
+                        "arena-patch"
+                    } else {
+                        "arena-build"
+                    };
+                    eprintln!(
+                        "[perf] wire {:>7.1}ms  {:<18} wires={} gpu_instances={}",
+                        _t0.elapsed().as_secs_f64() * 1000.0,
+                        outcome,
+                        vp.wires.len(),
+                        gi,
+                    );
+                }
             }
             // Selection xray overlay — rebuilt when the selection changes or the
             // underlying wires changed. A pick bumps only selection_generation,
