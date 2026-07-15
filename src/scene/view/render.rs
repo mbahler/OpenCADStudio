@@ -990,6 +990,25 @@ impl Scene {
                 return verts.clone();
             }
         }
+        // A new content id (every geometry edit) misses the cache — but if no
+        // text-bearing entity changed since the last build, the glyphs are
+        // identical, so reuse them instead of re-walking every wire.
+        {
+            let reuse = {
+                let last = self.last_sdf_text.borrow();
+                match &*last {
+                    Some((epoch, arc)) if self.text_unchanged(*epoch) => Some(arc.clone()),
+                    _ => None,
+                }
+            };
+            if let Some(arc) = reuse {
+                self.sdf_text_cache
+                    .borrow_mut()
+                    .insert(wire_content_id, arc.clone());
+                *self.last_sdf_text.borrow_mut() = Some((self.geometry_epoch, arc.clone()));
+                return arc;
+            }
+        }
         let mut out: Vec<crate::scene::pipeline::text_gpu::TextVertex> = Vec::new();
         for w in wires {
             if !w.text_verts.is_empty() {
@@ -997,12 +1016,15 @@ impl Scene {
             }
         }
         let verts = Arc::new(out);
-        let mut cache = self.sdf_text_cache.borrow_mut();
-        // Ids change on rebuild, so old keys die naturally; cap bounds churn.
-        if cache.len() > 8 {
-            cache.clear();
+        {
+            let mut cache = self.sdf_text_cache.borrow_mut();
+            // Ids change on rebuild, so old keys die naturally; cap bounds churn.
+            if cache.len() > 8 {
+                cache.clear();
+            }
+            cache.insert(wire_content_id, verts.clone());
         }
-        cache.insert(wire_content_id, verts.clone());
+        *self.last_sdf_text.borrow_mut() = Some((self.geometry_epoch, verts.clone()));
         verts
     }
 

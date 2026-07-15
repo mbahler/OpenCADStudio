@@ -129,7 +129,14 @@ const GEOMETRY_JOURNAL_CAP: usize = 256;
 pub(crate) fn wire_gpu_patch_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("OCS_WIRE_GPU_PATCH").is_some())
+    // On by default; `OCS_WIRE_GPU_PATCH=0` (or off / false / no) reverts to the
+    // batched full-upload path as a kill-switch.
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("OCS_WIRE_GPU_PATCH").ok().as_deref(),
+            Some("0") | Some("off") | Some("false") | Some("no")
+        )
+    })
 }
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn wire_gpu_patch_enabled() -> bool {
@@ -726,6 +733,13 @@ pub struct Scene {
     sdf_text_cache: RefCell<
         HashMap<u64, std::sync::Arc<Vec<crate::scene::pipeline::text_gpu::TextVertex>>>,
     >,
+    /// `(geometry_epoch, gathered text)` of the most recent SDF-text build. When a
+    /// new content id misses the cache but the journal shows no text-bearing
+    /// entity changed since this epoch, the same glyphs are reused instead of
+    /// re-walking every wire — an edit on plain geometry never rebuilds the text.
+    last_sdf_text: RefCell<
+        Option<(u64, std::sync::Arc<Vec<crate::scene::pipeline::text_gpu::TextVertex>>)>,
+    >,
     /// pane_grid layout tree for the Model tab — the source of truth for the
     /// tile split layout, resize and focus. `model_tiles` (the renderer's
     /// per-pane data: camera / render-mode / grid) is kept in lock-step with
@@ -1025,6 +1039,7 @@ impl Scene {
             }]),
             active_model_tile: std::cell::Cell::new(0),
             sdf_text_cache: RefCell::new(HashMap::default()),
+            last_sdf_text: RefCell::new(None),
             // One pane mapped to tile 0 — matches the single default tile above.
             model_panes: iced::widget::pane_grid::State::new(0).0,
             selection: Rc::new(RefCell::new(SelectionState::default())),
@@ -1292,6 +1307,33 @@ impl Scene {
             Some(deltas) => deltas
                 .iter()
                 .all(|&(h, k)| k != ChangeKind::Removed && !in_category(h)),
+        }
+    }
+
+    /// True when no text-bearing entity changed since `last_epoch`, so cached SDF
+    /// glyphs stay valid. Text comes from Text / MText / Dimension / MultiLeader /
+    /// Leader / Table / attributes and from block references (their baked text
+    /// moves with the instance) — an edit to any of those, or any removal,
+    /// invalidates it; a plain line / arc / polyline edit does not.
+    fn text_unchanged(&self, last_epoch: u64) -> bool {
+        match self.replay_since(last_epoch) {
+            Some(deltas) => deltas.iter().all(|&(h, k)| {
+                k != ChangeKind::Removed
+                    && !matches!(
+                        self.document.get_entity(h),
+                        Some(
+                            EntityType::Text(_)
+                                | EntityType::MText(_)
+                                | EntityType::Dimension(_)
+                                | EntityType::MultiLeader(_)
+                                | EntityType::Leader(_)
+                                | EntityType::Table(_)
+                                | EntityType::AttributeEntity(_)
+                                | EntityType::Insert(_)
+                        )
+                    )
+            }),
+            None => false,
         }
     }
 
@@ -2761,6 +2803,10 @@ impl Scene {
         // each entity's wires in one contiguous run, so a violation means our
         // move-and-reassemble model doesn't hold and we must full-rebuild.
         let mut old_runs: HashMap<Handle, Vec<WireModel>> = HashMap::default();
+        // The assembled draw order (one entry per entity, in the order they were
+        // laid out). Lets an all-Modified edit — which never reorders — reassemble
+        // by walking just these (~10k) handles instead of the whole document.
+        let mut old_order: Vec<Handle> = Vec::new();
         {
             let mut cur: Option<Handle> = None;
             let mut run: Vec<WireModel> = Vec::new();
@@ -2773,6 +2819,7 @@ impl Scene {
                         }
                     }
                     cur = Some(h);
+                    old_order.push(h);
                 }
                 run.push(w);
             }
@@ -2782,6 +2829,11 @@ impl Scene {
                 }
             }
         }
+        // An all-Modified edit keeps the layout (no entity added / removed), so
+        // the draw order is exactly `old_order` — skip the whole-document scan.
+        let structural = deltas
+            .iter()
+            .any(|(_, k)| !matches!(k, ChangeKind::Modified));
 
         // Re-tessellate the changed entities, replicating the full build's exact
         // context (anno derivation, empty selection, no cull / no LOD). Faded
@@ -2834,22 +2886,33 @@ impl Scene {
             }
         }
 
-        // Reassemble in document order, then apply the identical draw-order sort
-        // wires_for_block_culled uses. With a fully-populated memo the full build
-        // also emits in document order (every entity is a hit), so a stable sort
-        // by rank yields byte-identical output — this is what the oracle test
-        // pins.
+        // Reassemble, then apply the identical draw-order sort
+        // wires_for_block_culled uses. Emission order IS the final order when the
+        // block has no SortEntitiesTable (the sort below no-ops), so it must match
+        // a from-scratch build: document order. An all-Modified edit never reorders
+        // — reuse the recorded `old_order` (~10k handles) instead of walking the
+        // whole document (~800k). Add/Remove change positions, so fall back to the
+        // document scan. Either way a leftover run (a kept handle we couldn't
+        // place) means an inconsistency we don't patch.
         let mut new_vec: Vec<WireModel> = Vec::new();
-        for e in self.document.entities() {
-            let h = e.common().handle;
-            if let Some(run) = new_runs.remove(&h) {
-                new_vec.extend(run);
-            } else if let Some(run) = old_runs.remove(&h) {
-                new_vec.extend(run);
+        if structural {
+            for e in self.document.entities() {
+                let h = e.common().handle;
+                if let Some(run) = new_runs.remove(&h) {
+                    new_vec.extend(run);
+                } else if let Some(run) = old_runs.remove(&h) {
+                    new_vec.extend(run);
+                }
+            }
+        } else {
+            for h in old_order {
+                if let Some(run) = new_runs.remove(&h) {
+                    new_vec.extend(run);
+                } else if let Some(run) = old_runs.remove(&h) {
+                    new_vec.extend(run);
+                }
             }
         }
-        // A leftover run means its entity vanished from the document without a
-        // Removed delta — an inconsistency we don't try to patch.
         if !new_runs.is_empty() || !old_runs.is_empty() {
             return None;
         }
