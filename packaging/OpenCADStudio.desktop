@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Open CAD Studio
 Comment=A CAD application for 2D/3D drawing and design
-Exec=OpenCADStudio %f
+Exec=OpenCADStudio %F
 Icon=io.github.HakanSeven12.OpenCadStudio
 Terminal=false
 Type=Application

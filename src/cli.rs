@@ -24,13 +24,19 @@ use clap::Parser;
     long_about = None,
 )]
 pub struct Cli {
-    /// CAD file to open at startup (.dwg / .dxf). Also used by the OS file
-    /// association when a drawing is double-clicked.
-    pub file: Option<PathBuf>,
+    /// CAD files to open at startup (.dwg / .dxf). Also how the OS file
+    /// association launches us when drawings are double-clicked — selecting
+    /// several hands them all to one launch, so this takes a list.
+    pub files: Vec<PathBuf>,
 
     /// Start with a new empty drawing, ignoring any file argument.
     #[arg(long)]
     pub new: bool,
+
+    /// Always start a new editor process, even when one is already running.
+    /// Without this, opening a drawing hands it to the running editor as a tab.
+    #[arg(long)]
+    pub new_instance: bool,
 
     /// Open read-only: editing is allowed but saving is disabled.
     #[arg(long)]
@@ -78,8 +84,8 @@ pub struct Cli {
 /// because the iced daemon's boot closure takes no arguments.
 #[derive(Debug, Default, Clone)]
 pub struct GuiConfig {
-    /// File to open on launch (`None` for a blank session).
-    pub file: Option<PathBuf>,
+    /// Files to open on launch (empty for a blank session).
+    pub files: Vec<PathBuf>,
     /// Open a fresh drawing tab on launch instead of the welcome screen.
     pub new: bool,
     /// Saving disabled for this session.

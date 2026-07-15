@@ -503,7 +503,7 @@ mod linux_impl {
             "[Desktop Entry]\n\
              Name=Open CAD Studio\n\
              Comment=A CAD application for 2D/3D drawing and design\n\
-             Exec={exec} %f\n\
+             Exec={exec} %F\n\
              Icon={APP_ID}\n\
              Terminal=false\n\
              Type=Application\n\

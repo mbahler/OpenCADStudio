@@ -542,6 +542,94 @@ mod tests {
     }
 
     #[test]
+    fn handing_over_an_already_open_drawing_switches_to_its_tab() {
+        // Double-clicking a drawing that is already open should land on the tab
+        // showing it, not load a second copy of the same file.
+        use crate::app::Message;
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+
+        let path = std::env::temp_dir().join("ocs_already_open.dwg");
+        std::fs::write(&path, b"x").unwrap();
+        let canon = std::fs::canonicalize(&path).unwrap();
+
+        // Two tabs, the second holding the drawing; leave the first active.
+        app.tabs
+            .push(crate::app::document::DocumentTab::new_drawing(99));
+        let target = app.tabs.len() - 1;
+        app.tabs[target].current_path = Some(canon.clone());
+        app.active_tab = 0;
+
+        let _ = app.update(Message::OpenExternal(canon.clone()));
+        assert_eq!(app.active_tab, target, "should have switched to the tab");
+        assert!(
+            app.opening.is_none(),
+            "an already-open drawing must not start a load"
+        );
+        assert!(app.pending_opens.is_empty(), "and must not queue one either");
+
+        // The same file spelled differently (a `..` hop) is still the same file.
+        let indirect = canon.parent().unwrap().join("..").join(
+            canon
+                .strip_prefix(canon.parent().unwrap().parent().unwrap())
+                .unwrap(),
+        );
+        app.active_tab = 0;
+        let _ = app.update(Message::OpenExternal(indirect));
+        assert_eq!(
+            app.active_tab, target,
+            "an unresolved spelling of the same path must still match the tab"
+        );
+        assert!(app.opening.is_none(), "still no second load");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_second_handoff_queues_instead_of_displacing_the_first() {
+        // `opening` is one slot, and `on_file_opened` drops any result that
+        // arrives once it is clear — so without the queue, two drawings handed
+        // over at the same moment (select several files in a file manager: one
+        // process each, all arriving together) would leave one tab and silently
+        // lose the rest.
+        use crate::app::Message;
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+
+        // Any existing file will do: OpenRecent only stats it, and the actual
+        // load is an async Task this test drops.
+        let dir = std::env::temp_dir();
+        let (a, b) = (dir.join("ocs_si_a.dwg"), dir.join("ocs_si_b.dwg"));
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"x").unwrap();
+
+        let _ = app.update(Message::OpenExternal(a.clone()));
+        assert!(
+            app.opening.is_some(),
+            "first handoff should start an open, not queue"
+        );
+        assert!(app.pending_opens.is_empty(), "nothing to queue yet");
+
+        let _ = app.update(Message::OpenExternal(b.clone()));
+        assert_eq!(
+            app.pending_opens.len(),
+            1,
+            "second handoff arriving mid-open must queue, not be dropped"
+        );
+        assert_eq!(app.pending_opens.front(), Some(&b));
+
+        // A drawing that fails to parse must still release the queue behind it.
+        let _ = app.update(Message::FileOpened(Err("boom".into())));
+        assert!(
+            app.pending_opens.is_empty(),
+            "a failed open must drain the queue, not strand it"
+        );
+
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
     fn save_then_open_round_trips() {
         let mut app = OpenCADStudio::new_for_test();
         let path = std::env::temp_dir().join("ocs_automation_test.dxf");

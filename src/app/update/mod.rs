@@ -272,6 +272,45 @@ impl OpenCADStudio {
                 }
             }
 
+            Message::OpenExternal(path) => {
+                // A second launch forwarded this drawing. Route it through
+                // `OpenRecent` so the redirect and a cold start share one path:
+                // it stats the file and reports a missing one visibly, instead
+                // of a boot that appears to do nothing.
+                //
+                // Raising is best-effort and cannot be made reliable from here.
+                // `gain_focus` reaches winit's `focus_window`, which on Wayland
+                // has an empty body — it is `request_user_attention` that walks
+                // the xdg-activation path, and it mints its token without a seat
+                // serial, which a compositor may refuse to honour. So expect an
+                // attention mark rather than a raise on Wayland; X11 does raise.
+                // A real raise needs the activation token from the launching
+                // process, and neither iced 0.14 nor winit 0.30 can apply one to
+                // an existing window.
+                let raise = match self.main_window {
+                    Some(id) => Task::batch([
+                        iced::window::gain_focus(id),
+                        iced::window::request_user_attention(
+                            id,
+                            Some(iced::window::UserAttention::Critical),
+                        ),
+                    ]),
+                    None => Task::none(),
+                };
+                // Already open → go to that tab rather than load a second copy
+                // of the same drawing. Checked before the queue: switching is
+                // instant and needs no load slot.
+                if let Some(idx) = self.tab_showing(&path) {
+                    return Task::batch([raise, self.update(Message::TabSwitch(idx))]);
+                }
+                if self.opening.is_some() {
+                    self.pending_opens.push_back(path);
+                    raise
+                } else {
+                    Task::batch([raise, self.update(Message::OpenRecent(path))])
+                }
+            }
+
             Message::RecentRemove(path) => {
                 self.remove_recent(&path);
                 Task::none()
@@ -318,7 +357,7 @@ impl OpenCADStudio {
                     self.command_line
                         .push_info(&format!("Open cancelled: \"{}\"", p.name));
                 }
-                Task::none()
+                self.drain_pending_open()
             }
 
             Message::FileOpened(Ok((name, path, doc, caches))) => {
@@ -332,7 +371,9 @@ impl OpenCADStudio {
                 if was_open && e != "Cancelled" {
                     self.command_line.push_error(&format!("Open failed: {e}"));
                 }
-                Task::none()
+                // A drawing that fails to parse must not strand the ones queued
+                // behind it.
+                self.drain_pending_open()
             }
 
             Message::ImagePick => {

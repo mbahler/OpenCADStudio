@@ -685,6 +685,13 @@ pub(super) struct OpenCADStudio {
     /// `Some` while a CAD file is loading — drives the modal overlay.
     /// Cleared when the load finishes, errors, or the user cancels.
     pub(super) opening: Option<OpenProgress>,
+    /// Drawings handed to us by other launches while `opening` was busy.
+    /// `opening` is a single slot that a second `OpenPathPicked` would
+    /// overwrite, and `on_file_opened` drops any result arriving once it is
+    /// clear — so overlapping opens silently lose documents. Selecting several
+    /// drawings in a file manager produces exactly that (one process per file,
+    /// all arriving at once), which makes this queue load-bearing, not polish.
+    pub(super) pending_opens: std::collections::VecDeque<PathBuf>,
 
     // ── Unsaved-changes dialog ────────────────────────────────────────────
     /// Set when the user tries to close a tab or quit while there are unsaved changes.
@@ -1230,6 +1237,9 @@ pub enum Message {
     /// Open a path from the Start tab's recent-documents list (skips the
     /// file picker; the path is already known).
     OpenRecent(PathBuf),
+    /// A second launch handed us a drawing to open (single instance). Queued
+    /// behind any open already in flight — see `pending_opens`.
+    OpenExternal(PathBuf),
     /// Open a URL in the system browser (start-page intro video, links).
     OpenUrl(String),
     /// Select which section a narrow (tabbed) Start page shows.
@@ -2260,6 +2270,7 @@ impl OpenCADStudio {
             plot_dialog: crate::ui::window::plot::PlotDialogState::default(),
             plot_prev: None,
             opening: None,
+            pending_opens: std::collections::VecDeque::new(),
             pending_close: None,
             save_dialog_format: "DWG 2018".to_string(),
             save_dialog_filename: "drawing.dwg".to_string(),
@@ -2500,16 +2511,23 @@ impl OpenCADStudio {
             Message::UpdateCheckResult,
         );
         let focus_cmd = s.focus_cmd_input();
-        // Startup configuration from the command line (see `cli`). A file
-        // argument — also how the OS file association launches us when a .dwg
-        // is double-clicked — opens via `OpenRecent`, which existence-checks
-        // the path and reports a clean error if it is bogus. `--new` opens a
-        // fresh drawing tab instead of the welcome screen. `--read-only`
-        // disables saving. `--script` queues command lines to run once up.
+        // Startup configuration from the command line (see `cli`). File
+        // arguments — also how the OS file association launches us when
+        // drawings are double-clicked — go through `OpenExternal`, the same
+        // door a second launch hands files to: it existence-checks each path,
+        // skips one already open, and queues the rest behind the load in
+        // flight. Handing them straight to `OpenRecent` would let each
+        // overwrite the single `opening` slot and silently drop all but one.
+        // `--new` opens a fresh drawing tab instead of the welcome screen.
+        // `--read-only` disables saving. `--script` queues command lines.
         let cfg = crate::cli::gui_config();
         s.read_only = cfg.read_only;
-        let cli_open: Task<Message> = if let Some(p) = cfg.file {
-            Task::done(Message::OpenRecent(p))
+        let cli_open: Task<Message> = if !cfg.files.is_empty() {
+            Task::batch(
+                cfg.files
+                    .into_iter()
+                    .map(|p| Task::done(Message::OpenExternal(p))),
+            )
         } else if cfg.new {
             Task::done(Message::TabNew)
         } else {

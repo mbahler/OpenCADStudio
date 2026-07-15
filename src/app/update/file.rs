@@ -350,6 +350,35 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 }
     }
 
+    /// Index of a tab already showing `path`, or `None`.
+    ///
+    /// Compares resolved paths, so the same drawing reached through a symlink,
+    /// a `..` segment or a different relative spelling is recognised as the one
+    /// already open rather than loaded a second time. A path that cannot be
+    /// resolved (deleted since) matches nothing and falls through to the normal
+    /// open, which reports the miss.
+    pub(in crate::app) fn tab_showing(&self, path: &std::path::Path) -> Option<usize> {
+        let want = std::fs::canonicalize(path).ok()?;
+        self.tabs.iter().position(|t| {
+            t.current_path
+                .as_deref()
+                .and_then(|p| std::fs::canonicalize(p).ok())
+                .is_some_and(|p| p == want)
+        })
+    }
+
+    /// Start the next drawing a second launch handed us, if any.
+    ///
+    /// Must be called from EVERY path that clears `opening` — completion, error
+    /// and cancel alike. Draining only the success path would strand the queue
+    /// forever the first time a file fails to parse.
+    pub(in crate::app) fn drain_pending_open(&mut self) -> Task<Message> {
+        match self.pending_opens.pop_front() {
+            Some(p) => Task::done(Message::OpenExternal(p)),
+            None => Task::none(),
+        }
+    }
+
     pub(super) fn on_file_opened(&mut self, name: String, path: std::path::PathBuf, doc: acadrust::CadDocument, caches: crate::scene::DerivedCaches) -> Task<Message> {
                 // If the user clicked Cancel while the parser was running, the
                 // overlay state was cleared and we silently drop the result.
@@ -558,7 +587,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 self.tabs[i].dirty = false;
                 self.tabs[i].history = crate::app::document::HistoryState::default();
                 self.refresh_selected_grips();
-                Task::none()
+                self.drain_pending_open()
     }
 
     pub(super) fn on_wblock_save_result_some(&mut self, block_name: String, path: std::path::PathBuf) -> Task<Message> {
