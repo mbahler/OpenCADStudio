@@ -951,8 +951,38 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
     // DXF code 44 — multiplier on the default 5/3-em baseline-to-baseline gap.
     let line_h = entity_h * ls_factor * (5.0 / 3.0) * base_font.line_spacing();
     let h = entity_h;
+    // How far the first line's glyphs actually reach above the baseline, when
+    // that is further than the cap height.
+    //
+    // Ordinary letters stop at the cap, so this is `h` for almost all text and
+    // nothing below moves. A symbol font is the exception: its glyphs are drawn
+    // to straddle the cap box — the diameter sign's stroke overhangs it top and
+    // bottom by design — and anchoring such a line by the nominal cap alone hung
+    // it above where the drawing puts it.
+    let first_line_ascent = sub_lines
+        .first()
+        .map(|line| {
+            line.atoms
+                .iter()
+                .filter_map(|atom| {
+                    let AtomKind::Word(text) = &atom.kind else {
+                        return None;
+                    };
+                    let font = resolve_font(&atom.state, &base_font_name);
+                    text_local_bounds(
+                        &font,
+                        text,
+                        atom.state.height_mul * entity_h,
+                        atom.state.width_mul * base_wf.abs(),
+                        atom.state.oblique_rad,
+                    )
+                    .map(|b| b.ink_max[1])
+                })
+                .fold(h, f32::max)
+        })
+        .unwrap_or(h);
     let v_offset = match opts.v_anchor {
-        MTextVAnchor::Top => -h,
+        MTextVAnchor::Top => -first_line_ascent,
         MTextVAnchor::Middle => ((n_lines - 1.0) * line_h - h) * 0.5,
         MTextVAnchor::Bottom => (n_lines - 1.0) * line_h,
         MTextVAnchor::MiddleOfTopLine => -h * 0.5,
@@ -1336,3 +1366,79 @@ mod adapter_tests {
     }
 }
 
+
+#[cfg(test)]
+mod v_anchor_tests {
+    use super::*;
+
+    /// The highest point the layout actually DRAWS, in entity-local units.
+    /// `glyph_boxes` are the cap box the editor's caret rides on, not the ink,
+    /// so they cannot answer this.
+    fn ink_top(l: &MTextLayout) -> f32 {
+        l.strokes
+            .iter()
+            .flat_map(|s| {
+                s.strokes
+                    .iter()
+                    .flatten()
+                    .map(move |p| s.origin[1] as f32 + p[1])
+            })
+            .fold(f32::MIN, f32::max)
+    }
+
+    fn layout_at_top(value: &str, height: f32) -> MTextLayout {
+        let style = ResolvedTextStyle {
+            font_name: "txt".to_string(),
+            width_factor: 1.0,
+            oblique_angle: 0.0,
+            is_backward: false,
+            is_upside_down: false,
+        };
+        layout_mtext(&MTextRenderOpts {
+            value,
+            insertion: [0.0, 0.0, 0.0],
+            height,
+            rect_w: 0.0,
+            rotation: 0.0,
+            style: &style,
+            attach_h_anchor: 0.0,
+            v_anchor: MTextVAnchor::Top,
+            line_spacing_factor: 1.0,
+            vertical_text: false,
+            want_glyph_boxes: true,
+        })
+    }
+
+    /// The top of what a line draws sits at the insertion point.
+    ///
+    /// For ordinary letters that is the cap height and nothing moves. A symbol
+    /// font's glyphs straddle the cap box on purpose — the diameter sign's
+    /// stroke overhangs it — and anchoring by the nominal cap hung the glyph
+    /// above where the drawing expects it, by the size of the overhang.
+    #[test]
+    fn a_glyph_that_overhangs_the_cap_still_starts_at_the_insertion_point() {
+        // The benchmark's own case: a diameter sign at height 3, whose stroke
+        // reaches 11.2117 of 9 cap units — 3.7372 in world units, not 3.
+        let top = ink_top(&layout_at_top("{\\Fgdt.shx;n}", 3.0));
+        assert!(
+            top.abs() < 0.05,
+            "the glyph draws down from {top}, not from the insertion point"
+        );
+    }
+
+    /// …and plain text must not move: its letters stop at the cap, so the top
+    /// anchor stays the cap height exactly as before.
+    #[test]
+    fn plain_text_still_hangs_from_its_cap_height() {
+        for s in ["ABC", "abc", "Hello world"] {
+            let top = ink_top(&layout_at_top(s, 3.0));
+            assert!(top <= 0.05, "{s:?} drew above the insertion point ({top})");
+            // An all-lowercase line stops at its x-height and must NOT be
+            // pulled up to meet the insertion point.
+            assert!(
+                top > -3.0,
+                "{s:?} was pushed down to {top}; the cap should still anchor it"
+            );
+        }
+    }
+}
