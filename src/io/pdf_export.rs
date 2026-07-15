@@ -322,6 +322,13 @@ fn build_pdf(
         flush_line(&mut ops, &segment);
     }
 
+    // Text (SDF glyph quads) — re-emitted as vector strokes / fills. Text now
+    // renders on-screen only as textured SDF quads (`wire.text_verts`), which
+    // this CPU exporter can't sample, so without this pass all text — including
+    // dimension text — is missing from the PDF (issue #385). Drawn after the
+    // wires (on top) and under the same rotation/scale/clip CTM.
+    emit_text(&mut ops, wires, ox, oy);
+
     if needs_state {
         ops.push(Op::RestoreGraphicsState);
     }
@@ -507,6 +514,164 @@ fn emit_hatch(ops: &mut Vec<Op>, hatch: &HatchModel, ox: f32, oy: f32) {
     });
 }
 
+// ── Text (SDF glyph quads → vector strokes / fills) ────────────────────────
+
+/// Absolute world XY of a glyph vertex (double-single high + low parts folded).
+#[cfg(not(target_arch = "wasm32"))]
+fn glyph_world_xy(v: &crate::scene::pipeline::text_gpu::TextVertex) -> [f32; 2] {
+    [v.pos[0] + v.pos_low[0], v.pos[1] + v.pos_low[1]]
+}
+
+/// Adapt a text colour to the white sheet, mirroring the wire/hatch passes:
+/// near-white / near-yellow (colour-7-on-white) → black, near-cyan → dark blue.
+#[cfg(not(target_arch = "wasm32"))]
+fn adapt_text_color([r, g, b]: [f32; 3]) -> [f32; 3] {
+    let is_light = r > 0.80 && g > 0.80 && b > 0.80;
+    let is_yellow = r > 0.80 && g > 0.70 && b < 0.30;
+    let is_cyan = r < 0.30 && g > 0.70 && b > 0.70;
+    if is_light || is_yellow {
+        [0.0, 0.0, 0.0]
+    } else if is_cyan {
+        [0.0, 0.15, 0.50]
+    } else {
+        [r, g, b]
+    }
+}
+
+/// Re-emit every wire's SDF text as vector geometry.
+///
+/// Each visible glyph rides on `wire.text_verts` as one 6-vertex quad (two
+/// triangles) whose corners are the glyph's atlas `plane` rect run through the
+/// text transform. We recover the glyph's outline / fill from the atlas by the
+/// quad's `uv_min` and map it into that quad by affine interpolation of the
+/// plane rect — so a stroke (LFF) font emits polylines and a filled TrueType
+/// glyph emits filled triangles, exactly where the SDF quad sits.
+#[cfg(not(target_arch = "wasm32"))]
+fn emit_text(ops: &mut Vec<Op>, wires: &[WireModel], ox: f32, oy: f32) {
+    use crate::scene::text::sdf_atlas;
+
+    if wires.iter().all(|w| w.text_verts.is_empty()) {
+        return;
+    }
+    // Snapshot the atlas' baked-glyph geometry once; drop the lock before use.
+    let (table, solid_key) = {
+        let Ok(atlas) = sdf_atlas::text_atlas().lock() else {
+            return;
+        };
+        (atlas.export_table(), sdf_atlas::uv_key(atlas.solid_uv()))
+    };
+
+    const MM_TO_PT: f32 = 2.834645;
+    // Match the wire pass: screen-px weight → true physical points.
+    const LW_PX_TO_PT: f32 = MM_TO_PT / ((96.0 / 25.4) * 2.0);
+
+    for wire in wires {
+        let verts = &wire.text_verts;
+        if verts.is_empty() {
+            continue;
+        }
+        let lw_pt = (wire.line_weight_px * LW_PX_TO_PT).max(0.1);
+
+        let mut gi = 0;
+        while gi + 6 <= verts.len() {
+            let quad = &verts[gi..gi + 6];
+            gi += 6;
+
+            let a = quad[0].color[3];
+            if a < 0.01 {
+                continue;
+            }
+            let [r, g, b] =
+                adapt_text_color([quad[0].color[0], quad[0].color[1], quad[0].color[2]]);
+
+            // Quad corners in world XY: verts run [bl, br, tr, bl, tr, tl].
+            let bl = glyph_world_xy(&quad[0]);
+            let br = glyph_world_xy(&quad[1]);
+            let tr = glyph_world_xy(&quad[2]);
+            let tl = glyph_world_xy(&quad[5]);
+            // `tl` carries uv = (uv_min.x, uv_min.y) — the atlas tile key.
+            let key = sdf_atlas::uv_key([quad[5].uv[0], quad[5].uv[1]]);
+
+            let point = |wx: f32, wy: f32| Point::new(Mm(wx + ox), Mm(wy + oy));
+
+            if let Some(ge) = table.get(&key) {
+                // Affine basis of the quad: plane_min → bl, +x → br, +y → tl.
+                let (pmin, pmax) = (ge.plane_min, ge.plane_max);
+                let (sx, sy) = (pmax[0] - pmin[0], pmax[1] - pmin[1]);
+                if sx.abs() < 1e-9 || sy.abs() < 1e-9 {
+                    continue;
+                }
+                let map = |p: [f32; 2]| -> Point {
+                    let u = (p[0] - pmin[0]) / sx;
+                    let v = (p[1] - pmin[1]) / sy;
+                    let wx = bl[0] + u * (br[0] - bl[0]) + v * (tl[0] - bl[0]);
+                    let wy = bl[1] + u * (br[1] - bl[1]) + v * (tl[1] - bl[1]);
+                    point(wx, wy)
+                };
+
+                if !ge.fill_tris.is_empty() {
+                    // Filled TrueType glyph: one filled triangle per triple.
+                    ops.push(Op::SetFillColor {
+                        col: Color::Rgb(Rgb { r, g, b, icc_profile: None }),
+                    });
+                    for tri in ge.fill_tris.chunks_exact(3) {
+                        ops.push(Op::DrawPolygon {
+                            polygon: Polygon {
+                                rings: vec![PolygonRing {
+                                    points: tri
+                                        .iter()
+                                        .map(|&p| LinePoint { p: map(p), bezier: false })
+                                        .collect(),
+                                }],
+                                mode: PaintMode::Fill,
+                                winding_order: WindingOrder::NonZero,
+                            },
+                        });
+                    }
+                } else {
+                    // Stroke (LFF pen) font or hollow glyph: polylines.
+                    ops.push(Op::SetOutlineColor {
+                        col: Color::Rgb(Rgb { r, g, b, icc_profile: None }),
+                    });
+                    ops.push(Op::SetOutlineThickness { pt: Pt(lw_pt) });
+                    for stroke in &ge.strokes {
+                        if stroke.len() < 2 {
+                            continue;
+                        }
+                        ops.push(Op::DrawLine {
+                            line: Line {
+                                points: stroke
+                                    .iter()
+                                    .map(|&p| LinePoint { p: map(p), bezier: false })
+                                    .collect(),
+                                is_closed: false,
+                            },
+                        });
+                    }
+                }
+            } else if key == solid_key {
+                // Decoration bar (underline / overline / strike): the quad is a
+                // solid-texel rectangle — fill it directly from its corners.
+                ops.push(Op::SetFillColor {
+                    col: Color::Rgb(Rgb { r, g, b, icc_profile: None }),
+                });
+                ops.push(Op::DrawPolygon {
+                    polygon: Polygon {
+                        rings: vec![PolygonRing {
+                            points: [bl, br, tr, tl]
+                                .iter()
+                                .map(|&c| LinePoint { p: point(c[0], c[1]), bezier: false })
+                                .collect(),
+                        }],
+                        mode: PaintMode::Fill,
+                        winding_order: WindingOrder::NonZero,
+                    },
+                });
+            }
+        }
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -535,5 +700,85 @@ mod tests {
         // A valid PDF is produced (starts with the PDF header) and is non-trivial.
         assert!(bytes.starts_with(b"%PDF"), "not a PDF");
         assert!(bytes.len() > 200, "suspiciously small: {}", bytes.len());
+    }
+
+    // Build a WireModel carrying the SDF glyph quads for `text` in the embedded
+    // "txt" stroke font, laid out into the process-wide atlas emit_text reads.
+    fn text_wire(text: &str, origin: [f64; 3]) -> WireModel {
+        use crate::scene::pipeline::text_gpu::push_glyph_vertices;
+        use crate::scene::text::{glyph_quads::layout_glyph_quads, sdf_atlas};
+        let quads = {
+            let mut atlas = sdf_atlas::text_atlas().lock().unwrap();
+            layout_glyph_quads(&mut atlas, 10.0, 0.0, 1.0, 0.0, 1.0, "txt", false, text)
+        };
+        assert!(!quads.is_empty(), "stroke glyphs laid out for {text:?}");
+        let mut verts = Vec::new();
+        push_glyph_vertices(&mut verts, &quads, origin, 1.0, [1.0, 0.0, 0.0, 1.0], 0.0);
+        WireModel {
+            text_verts: verts,
+            ..WireModel::solid("t".into(), Vec::new(), WireModel::WHITE, false)
+        }
+    }
+
+    // Regression for #385: SDF text (`text_verts`) must be re-emitted as vector
+    // draw ops. Before the fix the exporter ignored `text_verts` entirely, so a
+    // text-only wire produced no glyph geometry — dimensions/text vanished.
+    #[test]
+    fn sdf_text_emits_vector_ops_within_glyph_bounds() {
+        let origin = [100.0, 50.0, 0.0];
+        let wire = text_wire("AB", origin);
+
+        // World bbox of the glyph quads — every emitted point must land inside.
+        let (mut nx, mut ny, mut xx, mut xy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for v in &wire.text_verts {
+            let (x, y) = (v.pos[0] + v.pos_low[0], v.pos[1] + v.pos_low[1]);
+            nx = nx.min(x);
+            xx = xx.max(x);
+            ny = ny.min(y);
+            xy = xy.max(y);
+        }
+
+        let mut ops: Vec<Op> = Vec::new();
+        emit_text(&mut ops, std::slice::from_ref(&wire), 0.0, 0.0);
+
+        let lines = ops
+            .iter()
+            .filter(|o| matches!(o, Op::DrawLine { .. }))
+            .count();
+        assert!(lines > 0, "stroke text emitted no polylines (ops: {})", ops.len());
+
+        // Mapped points (Pt = mm × 2.834645, ox/oy = 0) sit within the bbox.
+        const MM_TO_PT: f32 = 2.834645;
+        let eps = 1.0; // mm slack for the SDF plane spread past the ink.
+        for o in &ops {
+            if let Op::DrawLine { line } = o {
+                for lp in &line.points {
+                    let (x, y) = (lp.p.x.0 / MM_TO_PT, lp.p.y.0 / MM_TO_PT);
+                    assert!(
+                        x >= nx - eps && x <= xx + eps && y >= ny - eps && y <= xy + eps,
+                        "glyph point ({x},{y}) outside bbox [{nx},{ny},{xx},{xy}]"
+                    );
+                }
+            }
+        }
+    }
+
+    // End-to-end: a page whose only content is SDF text produces a larger PDF
+    // than the same page with the text stripped — proving text reaches the file.
+    #[test]
+    fn text_grows_the_pdf_vs_no_text() {
+        let wire = text_wire("HELLO", [20.0, 20.0, 0.0]);
+        let mut blank = wire.clone();
+        blank.text_verts.clear();
+
+        let with_text = build_pdf(&[wire], &[], &[], 210.0, 297.0, 0.0, 0.0, 0, 1.0, None, None);
+        let no_text = build_pdf(&[blank], &[], &[], 210.0, 297.0, 0.0, 0.0, 0, 1.0, None, None);
+        assert!(with_text.starts_with(b"%PDF"));
+        assert!(
+            with_text.len() > no_text.len(),
+            "text did not add content: {} !> {}",
+            with_text.len(),
+            no_text.len()
+        );
     }
 }

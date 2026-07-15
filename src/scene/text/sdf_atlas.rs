@@ -113,6 +113,31 @@ pub struct AtlasEntry {
     pub advance: f32,
 }
 
+/// A glyph's vector geometry recovered for CPU export (PDF / print), where the
+/// SDF atlas texture can't be sampled. All coordinates are in the 9-unit glyph
+/// space; `plane_min`/`plane_max` is the same tile rect the render quad spans,
+/// so the exporter can map the geometry into a rendered quad by affine interp.
+#[derive(Clone, Debug)]
+pub struct GlyphExport {
+    pub plane_min: [f32; 2],
+    pub plane_max: [f32; 2],
+    /// Outline / centreline polylines (glyph units).
+    pub strokes: Vec<Vec<[f32; 2]>>,
+    /// Fill triangulation (glyph units, flat triples). Non-empty only for a
+    /// filled TrueType glyph — the exporter fills these and ignores `strokes`;
+    /// empty means "stroke `strokes`" (LFF pen font, or a hollow TTF glyph).
+    pub fill_tris: Vec<[f32; 2]>,
+}
+
+/// Pack a glyph quad's `uv_min` corner into a stable hash key for the export
+/// table below. The two f32 UVs are exact copies of the baked `AtlasEntry`
+/// values (via `GlyphQuad`), so bit-equality is a reliable identity as long as
+/// the atlas hasn't been re-scaled by a growth since the quads were built —
+/// which, for an export of an already-viewed drawing, it hasn't.
+pub fn uv_key(uv_min: [f32; 2]) -> u64 {
+    ((uv_min[0].to_bits() as u64) << 32) | uv_min[1].to_bits() as u64
+}
+
 /// A single-channel SDF glyph atlas plus a shelf packer.
 pub struct GlyphAtlas {
     width: u32,
@@ -228,6 +253,34 @@ impl GlyphAtlas {
             .and_then(|tile| self.pack(tile));
         self.entries.insert(key, entry);
         entry
+    }
+
+    /// Snapshot every baked glyph's vector geometry, keyed by its tile
+    /// `uv_min` ([`uv_key`]). CPU exporters (PDF / print) walk a text run's SDF
+    /// glyph quads, look each quad's `uv_min` up here, and re-emit the glyph as
+    /// vector strokes / fills instead of sampling the SDF texture. Re-resolves
+    /// each entry's outline through `Face` (the same source `get_or_insert`
+    /// baked from), so it reflects the current TEXTFILL mode.
+    pub fn export_table(&self) -> HashMap<u64, GlyphExport> {
+        let mut out = HashMap::with_capacity(self.entries.len());
+        for ((family, ch, bold), entry) in &self.entries {
+            let Some(entry) = entry else { continue };
+            let face = Face::resolve(family);
+            let Some(g) = face.glyph(*ch) else { continue };
+            // Bold LFF glyphs bake with a wider pen but the same centrelines;
+            // the exporter widens the pen itself, so the geometry is shared.
+            let _ = bold;
+            out.insert(
+                uv_key(entry.uv_min),
+                GlyphExport {
+                    plane_min: entry.plane_min,
+                    plane_max: entry.plane_max,
+                    strokes: g.strokes.clone(),
+                    fill_tris: g.fill_tris.clone(),
+                },
+            );
+        }
+        out
     }
 
     /// Grow the atlas taller (keeping the width, so packed X positions and their
