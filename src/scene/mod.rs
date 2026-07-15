@@ -121,6 +121,21 @@ struct GeometryDelta {
 /// and does a one-time full rebuild — the safe fallback, not a correctness hole.
 const GEOMETRY_JOURNAL_CAP: usize = 256;
 
+/// Whether the persistent per-entity GPU wire arena (`OCS_WIRE_GPU_PATCH`) is
+/// enabled — patches one entity's instance slab on an edit instead of rebuilding
+/// the whole wire buffer. Opt-in while it is validated visually. Always off on
+/// wasm (WebGL2 has the fat self-contained instance, no arena).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn wire_gpu_patch_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("OCS_WIRE_GPU_PATCH").is_some())
+}
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn wire_gpu_patch_enabled() -> bool {
+    false
+}
+
 /// Resolve a viewport's paper-to-model scale ratio from its two
 /// DXF-derived sources.
 ///
@@ -983,6 +998,13 @@ pub struct Scene {
     /// a full re-tessellation. Diagnostics + a hook for the oracle test to prove
     /// the fast path is actually exercised (not silently always falling back).
     resident_patch_hits: std::cell::Cell<u64>,
+    /// Handoff for the GPU wire arena (`OCS_WIRE_GPU_PATCH`): when the MODEL
+    /// resident set was brought up to date by an incremental patch, this records
+    /// `(prev_gen, new_gen, changed handles)` so the render layer can patch just
+    /// those entities' instance slabs instead of re-uploading every wire. The
+    /// render layer matches `new_gen` against the viewport's content id and
+    /// `prev_gen` against what the GPU currently holds; a mismatch just rebuilds.
+    model_wire_gpu_patch: RefCell<Option<(u64, u64, Arc<Vec<(Handle, ChangeKind)>>)>>,
 }
 
 impl Scene {
@@ -1067,6 +1089,7 @@ impl Scene {
             geometry_deltas: RefCell::new(std::collections::VecDeque::new()),
             geometry_journal_floor: std::cell::Cell::new(0),
             resident_patch_hits: std::cell::Cell::new(0),
+            model_wire_gpu_patch: RefCell::new(None),
         }
     }
 
@@ -2654,6 +2677,11 @@ impl Scene {
         let arc = Arc::new(wires);
         let gen = WIRE_CONTENT_GEN.fetch_add(1, Ordering::Relaxed);
         self.last_model_wire_gen.set(gen);
+        // A full rebuild of the Model set — the GPU arena must rebuild too, not
+        // apply a stale patch, so clear any pending handoff.
+        if block == self.model_space_block_handle() {
+            *self.model_wire_gpu_patch.borrow_mut() = None;
+        }
         let mut sets = self.resident_wire_sets.borrow_mut();
         // Evict stale entries (older epochs / abandoned keys) so switching
         // spaces or re-scaling a viewport can't accumulate dead full sets.
@@ -2664,6 +2692,21 @@ impl Scene {
         }
         sets.insert(key, (cur_epoch, gen, Arc::clone(&arc)));
         arc
+    }
+
+    /// The GPU wire-arena handoff for a viewport whose content id is `gen`:
+    /// `(prev_gen, changed handles)` when the Model set reached `gen` via an
+    /// incremental resident patch, else `None`. Read (not consumed) so every
+    /// Model tile applies the same patch; gen-matching keeps it from applying to
+    /// a viewport that rebuilt independently.
+    pub(crate) fn model_wire_patch_for(
+        &self,
+        gen: u64,
+    ) -> Option<(u64, Arc<Vec<(Handle, ChangeKind)>>)> {
+        match &*self.model_wire_gpu_patch.borrow() {
+            Some((prev, new, changes)) if *new == gen => Some((*prev, Arc::clone(changes))),
+            _ => None,
+        }
     }
 
     /// Bring the resident set for `key` up to the current epoch by replaying only
@@ -2696,9 +2739,11 @@ impl Scene {
         let deltas = self.replay_since(cached_epoch)?;
 
         // Take ownership of the cached assembly (guaranteed unique above).
-        let owned: Vec<WireModel> = {
-            let arc = self.resident_wire_sets.borrow_mut().remove(&key)?.2;
-            Arc::try_unwrap(arc).ok()?
+        // `prev_gen` is the content id the GPU currently holds for this set — the
+        // base the wire-arena patch replays from.
+        let (prev_gen, owned) = {
+            let removed = self.resident_wire_sets.borrow_mut().remove(&key)?;
+            (removed.1, Arc::try_unwrap(removed.2).ok()?)
         };
 
         // Group into per-entity runs. Bail if any wire isn't named with a handle
@@ -2818,6 +2863,13 @@ impl Scene {
             .set(self.resident_patch_hits.get() + 1);
         let gen = WIRE_CONTENT_GEN.fetch_add(1, Ordering::Relaxed);
         self.last_model_wire_gen.set(gen);
+        // Hand the exact changed handles to the GPU wire arena so it patches just
+        // those entities' slabs. Only for the Model set (the arena is model-only);
+        // the render layer verifies prev_gen against what the GPU actually holds.
+        if wire_gpu_patch_enabled() && block == self.model_space_block_handle() {
+            *self.model_wire_gpu_patch.borrow_mut() =
+                Some((prev_gen, gen, Arc::new(deltas.clone())));
+        }
         let cur_epoch = self.geometry_epoch;
         let mut sets = self.resident_wire_sets.borrow_mut();
         sets.retain(|_, (e, ..)| *e == cur_epoch);

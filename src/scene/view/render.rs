@@ -105,6 +105,11 @@ pub struct ViewportData {
     /// when only the camera moved. Non-tile and preview/interim frames carry a
     /// fresh id each time → always re-upload.
     pub(in crate::scene) wire_content_id: u64,
+    /// GPU wire-arena handoff (`OCS_WIRE_GPU_PATCH`): `(prev_gen, changed)` when
+    /// this Model set reached `wire_content_id` by an incremental resident patch,
+    /// so `prepare` can patch just those entities' slabs. `None` ⇒ full build.
+    pub(in crate::scene) wire_patch:
+        Option<(u64, Arc<Vec<(acadrust::Handle, crate::scene::ChangeKind)>>)>,
     /// Selected handles only (no hover) — solid meshes tint these blue.
     pub(in crate::scene) selected_handles: Arc<rustc_hash::FxHashSet<acadrust::Handle>>,
     /// Currently hovered handle — solid meshes tint it orange.
@@ -357,6 +362,48 @@ impl shader::Primitive for Primitive {
             // independent of the `cur_key` block so a preview/interim wire change
             // still uploads even when the camera didn't move.
             if vp.wire_content_id != inner.cached_wire_id {
+                // Persistent per-entity wire arena (OCS_WIRE_GPU_PATCH): patch
+                // just the changed entities' instance slabs instead of rebuilding
+                // the whole wire buffer. Only for the scissor-free, mesh-free
+                // (single-batch) Model set; scissored paper viewports and mixed
+                // 2D/3D sets fall through to the shared batched path below.
+                let mut arena_served = false;
+                #[cfg(not(target_arch = "wasm32"))]
+                if crate::scene::wire_gpu_patch_enabled()
+                    && inner.wire_const_bgl.is_some()
+                    && crate::scene::pipeline::wire_arena::is_arena_eligible(&vp.wires)
+                {
+                    use crate::scene::pipeline::wire_arena;
+                    // In-place patch from the base the GPU holds, else rebuild.
+                    let patched = if let (Some(arena), Some((base, changes))) =
+                        (inner.wire_arena.as_mut(), vp.wire_patch.as_ref())
+                    {
+                        inner.wire_arena_id == *base
+                            && !changes.is_empty()
+                            && arena.patch(queue, changes, &vp.wires[..], &vp.draw_depths)
+                    } else {
+                        false
+                    };
+                    if !patched {
+                        let bgl = inner.wire_const_bgl.as_ref().unwrap();
+                        inner.wire_arena = wire_arena::WireArena::build(
+                            device,
+                            queue,
+                            &vp.wires[..],
+                            &vp.draw_depths,
+                            bgl,
+                        );
+                    }
+                    if let Some(arena) = inner.wire_arena.as_ref() {
+                        inner.gpu_wires = std::sync::Arc::new(arena.wire_gpus());
+                        inner.wire_handle_index =
+                            wire_arena::build_handle_index(&vp.wires[..]);
+                        inner.wire_arena_id = vp.wire_content_id;
+                        arena_served = true;
+                    } else {
+                        inner.wire_arena_id = u64::MAX;
+                    }
+                }
                 // Share one copy of the resident wire buffers across every slot
                 // (and every pane — one MultiPipeline backs them all) rendering
                 // this content id: build on a cache miss, then hand out Arc
@@ -364,6 +411,7 @@ impl shader::Primitive for Primitive {
                 // Model tiles, upload the wire vertices once between them.
                 // `.cloned()` releases the immutable cache borrow before the
                 // miss branch takes a mutable one.
+                if !arena_served {
                 let cached = pipeline.wire_buffer_cache.get(&vp.wire_content_id).cloned();
                 let built = match cached {
                     Some(entry) => entry,
@@ -386,6 +434,7 @@ impl shader::Primitive for Primitive {
                 };
                 inner.gpu_wires = built.0;
                 inner.wire_handle_index = built.1;
+                } // end !arena_served
                 inner.cached_wire_id = vp.wire_content_id;
             }
             // Selection xray overlay — rebuilt when the selection changes or the
@@ -1239,6 +1288,7 @@ impl Scene {
             geometry_epoch: self.geometry_epoch,
             camera_generation: self.camera_generation,
             wire_content_id,
+            wire_patch: self.model_wire_patch_for(wire_content_id),
             selected_handles: Arc::new(self.selected.iter().copied().collect()),
             hover_handle: self.hover_highlight,
             selection_generation: self.selection_generation,
