@@ -137,6 +137,7 @@ impl CadCommand for MlineCommand {
         pts.push([pt.x, pt.y, pt.z]);
         Some(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: "mline_preview".into(),
             points: pts,

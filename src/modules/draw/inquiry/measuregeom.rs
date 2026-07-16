@@ -68,6 +68,7 @@ impl MeasureGeomCommand {
     fn preview_wire(name: &str, pts: Vec<[f32; 3]>) -> WireModel {
         WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: name.to_string(),
             points: pts,

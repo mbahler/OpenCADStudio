@@ -140,6 +140,7 @@ impl CadCommand for TableCommand {
             let z = pt.z;
             Some(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                 name: "table_preview".into(),
                 points: vec![

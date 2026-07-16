@@ -590,6 +590,7 @@ impl LeaderTess for Leader {
         if verts.len() < 2 {
             return WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                 name,
                 points: vec![],
@@ -693,6 +694,7 @@ impl LeaderTess for Leader {
 
         WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name,
             points,

@@ -66,6 +66,7 @@ impl CadCommand for ZoomWindowCommand {
         // Draw a rectangle preview
         Some(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: "zoom_window_preview".into(),
             points: vec![

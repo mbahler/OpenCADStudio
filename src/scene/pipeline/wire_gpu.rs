@@ -258,22 +258,30 @@ fn wire_distances(wire: &WireModel) -> (Vec<f32>, f32, f32) {
     let n = wire.points.len();
     let mut dists = vec![0.0_f32; n];
     let mut has_break = false;
+    // Accumulate arc-length in f64 from double-single deltas (high + low). An
+    // f32-high-only delta `q[0] - p[0]` quantises ~0.1 at UTM coordinates
+    // (−1.2M), which shifts the dash phase and drifts parallel lines out of sync
+    // — the reason MLINE elements were CPU-dashed. `points_low` may be empty for
+    // non-RTE wires → treat the low half as zero (same as the old behaviour).
+    let mut acc = 0.0_f64;
     for i in 1..n {
         let p = wire.points[i - 1];
         let q = wire.points[i];
         if !p[0].is_finite() || !q[0].is_finite() {
             has_break = true;
             // plinegen=false: reset to 0 at the first real point after a NaN separator.
-            dists[i] = if !wire.plinegen && !p[0].is_finite() && q[0].is_finite() {
-                0.0
-            } else {
-                dists[i - 1]
-            };
+            if !wire.plinegen && !p[0].is_finite() && q[0].is_finite() {
+                acc = 0.0;
+            }
+            dists[i] = acc as f32;
         } else {
-            let dx = q[0] - p[0];
-            let dy = q[1] - p[1];
-            let dz = q[2] - p[2];
-            dists[i] = dists[i - 1] + (dx * dx + dy * dy + dz * dz).sqrt();
+            let pl = wire.points_low.get(i - 1).copied().unwrap_or([0.0; 3]);
+            let ql = wire.points_low.get(i).copied().unwrap_or([0.0; 3]);
+            let dx = (q[0] as f64 - p[0] as f64) + (ql[0] as f64 - pl[0] as f64);
+            let dy = (q[1] as f64 - p[1] as f64) + (ql[1] as f64 - pl[1] as f64);
+            let dz = (q[2] as f64 - p[2] as f64) + (ql[2] as f64 - pl[2] as f64);
+            acc += (dx * dx + dy * dy + dz * dz).sqrt();
+            dists[i] = acc as f32;
         }
     }
 
@@ -293,6 +301,20 @@ fn wire_distances(wire: &WireModel) -> (Vec<f32>, f32, f32) {
     // use (see `WireModel::dash_from_start`).
     if wire.dash_from_start {
         return (dists, 0.0, 0.0);
+    }
+
+    // Shared "A"-type for MLINE elements: the caller fixes the begin/end
+    // solid-dash length (`dash_align_end`, derived once from the multiline's
+    // centre-line length) so every parallel element runs the SAME interior phase
+    // — the shader's interior walk depends on `align_end`, not on the wire's own
+    // length — while `align_total` stays this wire's own length, so each element
+    // still ends on a dash at its own endpoint.
+    if let Some(ae) = wire.dash_align_end {
+        if total <= pat_len {
+            // Shorter than one full period → solid (matches the per-wire path).
+            return (dists, total, total);
+        }
+        return (dists, ae.clamp(1e-4, total * 0.5), total);
     }
 
     // Align only a proper alternating pattern that BEGINS with a dash followed

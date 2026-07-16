@@ -226,6 +226,20 @@ pub fn tessellate(
             m.vertices[0].position.y,
             m.vertices[0].position.z,
         ];
+        // Centre-line (vertex path) length — the shared "A"-type reference so
+        // every parallel element uses the same end-dash length and thus the same
+        // interior phase (perpendicular dashes line up). f64 deltas so it stays
+        // precise at UTM coordinates.
+        let ref_total: f32 = {
+            let mut acc = 0.0_f64;
+            for w in m.vertices.windows(2) {
+                let dx = w[1].position.x - w[0].position.x;
+                let dy = w[1].position.y - w[0].position.y;
+                let dz = w[1].position.z - w[0].position.z;
+                acc += (dx * dx + dy * dy + dz * dz).sqrt();
+            }
+            acc as f32
+        };
         let mut out: Vec<WireModel> = Vec::with_capacity(lines.len());
         let mut snap_attached = false;
         for l in lines {
@@ -261,9 +275,29 @@ pub fn tessellate(
             // Selection forces a plain solid highlight, so skip dashing then.
             let clt = if selected {
                 None
-            } else {
+            } else if let Some(doc_seg) =
                 crate::io::linetypes::document_lt_segments(document, &l.linetype)
-                    .or_else(|| crate::io::linetypes::complex_lt(&l.linetype).cloned())
+            {
+                // In-document linetype: CPU-expand (apply_along) only when it
+                // embeds TEXT glyphs that must be laid out along the curve. Pure
+                // dash / space / dot (and undrawn shape) elements fall through to
+                // the GPU dash shader below — cheaper (one WireModel + pattern
+                // instead of N CPU segments) and now UTM-precise, so they stay in
+                // phase with any glyph-bearing sibling element.
+                if doc_seg
+                    .segments
+                    .iter()
+                    .any(|s| matches!(s, crate::io::linetypes::LtSegment::Text { .. }))
+                {
+                    Some(doc_seg)
+                } else {
+                    None
+                }
+            } else {
+                // Not in the document: bundled-catalog linetype (may embed
+                // text / shape) → keep the CPU path; `resolve_pattern` below can't
+                // see it, so GPU-dashing would drop the pattern to solid.
+                crate::io::linetypes::complex_lt(&l.linetype).cloned()
             };
 
             let mut elem_wires: Vec<WireModel> = if let Some(clt) = clt {
@@ -288,6 +322,10 @@ pub fn tessellate(
                     wcolor,
                     selected,
                     line_weight_px,
+                    // Shared "A"-type reference: this text-bearing element aligns
+                    // with the GPU-dashed sibling elements (same centre-line
+                    // reference) instead of tiling independently from the start.
+                    Some(ref_total),
                 );
                 for wm in &mut w {
                     wm.aci = aci;
@@ -312,8 +350,32 @@ pub fn tessellate(
                         lt_scale,
                     )
                 };
+                // Shared "A"-type: derive the begin/end solid-dash length ONCE
+                // from the multiline centre-line (`ref_total`) so every parallel
+                // element runs the same interior phase and its dashes line up
+                // perpendicular; `align_total` stays each element's own length in
+                // the shader so each still ends on a dash. Dash-first patterns
+                // only (`+dash, -gap, …`); shorter-than-a-period lines fall back
+                // to the per-wire path (solid).
+                let dash_align_end = if pattern_length > 1e-6
+                    && pattern[0] > 0.0
+                    && pattern[1] < 0.0
+                    && ref_total > pattern_length
+                {
+                    let a = pattern[0];
+                    let p = pattern_length;
+                    let k = ((ref_total - a) / p).round().max(1.0);
+                    Some(((ref_total - k * p + a) * 0.5).max(1e-4))
+                } else {
+                    None
+                };
                 elem_wires.push(WireModel {
+                    // MLINE dashes: A-type aligned, but the end-dash length is
+                    // shared across all parallel elements (`dash_align_end`) so
+                    // their interiors stay in phase (perpendicular dashes line up)
+                    // while each still ends on a dash at its own endpoint.
                     dash_from_start: false,
+                    dash_align_end,
                     text_verts: Vec::new(),
                     name: name.clone(),
                     points: pts,
@@ -589,6 +651,7 @@ pub fn tessellate(
                                     }
                                     wires.push(WireModel {
                                         dash_from_start: false,
+                                        dash_align_end: None,
                                         text_verts: Vec::new(),
                                         name: name.clone(),
                                         points: vec![],
@@ -623,6 +686,7 @@ pub fn tessellate(
                                     }
                                     wires.push(WireModel {
                                         dash_from_start: false,
+                                        dash_align_end: None,
                                         text_verts: Vec::new(),
                                         name: name.clone(),
                                         points: fp,
@@ -664,6 +728,7 @@ pub fn tessellate(
                         }
                         wires.push(WireModel {
                             dash_from_start: false,
+                            dash_align_end: None,
                             text_verts: Vec::new(),
                             name: name.clone(),
                             points: pts,
@@ -686,6 +751,7 @@ pub fn tessellate(
                     }
                     wires.push(WireModel {
                         dash_from_start: false,
+                        dash_align_end: None,
                         text_verts: sdf_verts,
                         name,
                         points: Vec::new(),
@@ -738,6 +804,7 @@ pub fn tessellate(
                         };
                         out.push(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                             name: name.clone(),
                             points: bin.pts,
@@ -772,6 +839,7 @@ pub fn tessellate(
                         };
                         out.push(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                             name: name.clone(),
                             points: Vec::new(),
@@ -803,6 +871,7 @@ pub fn tessellate(
                 if !sdf_verts.is_empty() {
                     out.push(WireModel {
                         dash_from_start: false,
+                        dash_align_end: None,
                         text_verts: sdf_verts,
                         name: name.clone(),
                         points: Vec::new(),
@@ -827,6 +896,7 @@ pub fn tessellate(
                 if out.is_empty() {
                     out.push(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                         name,
                         points: Vec::new(),
@@ -873,6 +943,7 @@ pub fn tessellate(
                             .collect();
                         return vec![WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                             name,
                             points: vec![
@@ -918,6 +989,7 @@ pub fn tessellate(
                         .collect();
                     return vec![WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                         name,
                         points,
@@ -952,6 +1024,7 @@ pub fn tessellate(
                         .collect();
                     return vec![WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                         name,
                         points,
@@ -1005,6 +1078,7 @@ pub fn tessellate(
                     };
                     out.push(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                         name: name.clone(),
                         points: local_pts,
@@ -1038,6 +1112,7 @@ pub fn tessellate(
                     };
                     out.push(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                         name: name.clone(),
                         points: Vec::new(),
@@ -1062,6 +1137,7 @@ pub fn tessellate(
                 if out.is_empty() {
                     out.push(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                         name,
                         points: Vec::new(),
@@ -1096,6 +1172,7 @@ pub fn tessellate(
                     .collect();
                 return vec![WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                     name,
                     points: local_pts,
@@ -1161,6 +1238,7 @@ pub fn tessellate(
         snap_pts.into_iter().map(|(p, h)| (p.as_dvec3(), h)).collect();
     vec![WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
         name,
         points,

@@ -160,6 +160,7 @@ impl CadCommand for DimContinueCommand {
         let dim_line_pt2 = pt + perp * (dim_line_perp - pt.dot(perp));
         Some(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: "dimcont_preview".into(),
             points: vec![

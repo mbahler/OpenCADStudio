@@ -101,6 +101,7 @@ impl CadCommand for DimTeditCommand {
         let d = 0.2_f32;
         Some(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: "dimtedit_preview".into(),
             // Marker box in the XY drawing plane (Z is elevation, ~0). The old

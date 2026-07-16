@@ -109,6 +109,7 @@ impl CadCommand for ImageCommand {
 
         Some(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: "image_preview".into(),
             points: vec![p0, p1, p2, p3, p0],

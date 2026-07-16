@@ -86,6 +86,7 @@ impl CadCommand for DimJogLineCommand {
         let d = 0.3_f32;
         Some(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: "dimjog_preview".into(),
             // Jog zigzag in the XY drawing plane (Z is elevation, ~0). The old

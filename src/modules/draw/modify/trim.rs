@@ -3060,6 +3060,7 @@ fn collect_runs(pts: &[[f64; 2]], take: &dyn Fn([f64; 2]) -> bool, out: &mut Vec
 fn preview_wire(points: Vec<[f32; 3]>, color: [f32; 4], name: &str) -> WireModel {
     WireModel {
         dash_from_start: false,
+        dash_align_end: None,
         text_verts: Vec::new(),
         name: name.into(),
         points,

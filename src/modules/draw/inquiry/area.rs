@@ -70,6 +70,7 @@ impl CadCommand for AreaCommand {
         pts.push(f(self.points[0]));
         Some(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: "area_preview".into(),
             points: pts,

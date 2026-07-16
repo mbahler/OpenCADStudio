@@ -482,6 +482,7 @@ pub(crate) fn tessellate_entity(
         );
         let marker = WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: h.value().to_string(),
             points: vec![],
@@ -693,6 +694,9 @@ pub(crate) fn tessellate_entity(
                 entity_color,
                 sel,
                 base.line_weight_px,
+                // Single (non-MLINE) entity: keep the from-start tiling (no shared
+                // A-type reference — there are no sibling elements to align with).
+                None,
             );
             if !wires.is_empty() {
                 for w in &mut wires {
@@ -856,6 +860,7 @@ fn lod_stub_wire(
     let stored_color = if selected { WireModel::SELECTED } else { color };
     WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
         name,
         // Diagonal of the entity's 3D AABB so depth tests against
@@ -920,6 +925,7 @@ fn lod_stub_wire_3d(
     let stored_color = if selected { WireModel::SELECTED } else { color };
     WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
         name,
         points,

@@ -1400,6 +1400,7 @@ impl MultiLeaderTess for MultiLeader {
         let mut wires: Vec<WireModel> = Vec::new();
         wires.push(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: name.clone(),
             points,
@@ -1684,6 +1685,7 @@ impl MultiLeaderTess for MultiLeader {
                     }
                     wires.push(WireModel {
                         dash_from_start: false,
+                        dash_align_end: None,
                         text_verts: sdf_verts,
                         name: name.clone(),
                         points: vec![],
@@ -1748,6 +1750,7 @@ impl MultiLeaderTess for MultiLeader {
                     ];
                     wires.push(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                         name: name.clone(),
                         points: vec![],
@@ -1780,6 +1783,7 @@ impl MultiLeaderTess for MultiLeader {
                     ];
                     wires.push(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                         name,
                         points: frame_points,

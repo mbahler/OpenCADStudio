@@ -1353,6 +1353,7 @@ fn tessellate_dimension_inner(
             if !ext1.is_empty() {
                 wires.push(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                     name: name.clone(),
                     points: ext1,
@@ -1376,6 +1377,7 @@ fn tessellate_dimension_inner(
             if !ext2.is_empty() {
                 wires.push(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                     name: name.clone(),
                     points: ext2,
@@ -1399,6 +1401,7 @@ fn tessellate_dimension_inner(
         } else {
             wires.push(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                 name: name.clone(),
                 points: geom.ext_lines,
@@ -1423,6 +1426,7 @@ fn tessellate_dimension_inner(
 
     wires.push(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
         name: name.clone(),
         points: geom.dim_lines,
@@ -1463,6 +1467,7 @@ fn tessellate_dimension_inner(
                 };
                 wires.push(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                     name: name.clone(),
                     points: vec![],

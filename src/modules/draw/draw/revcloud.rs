@@ -90,6 +90,7 @@ impl CadCommand for RevCloudCommand {
         ]);
         Some(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: "revcloud_preview".into(),
             points: preview_pts,

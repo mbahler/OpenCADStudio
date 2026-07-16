@@ -122,6 +122,7 @@ fn ordinate_elbow(feature: DVec3, leader: DVec3, is_x: bool) -> DVec3 {
 fn preview_wire(points: Vec<Vec3>) -> WireModel {
     WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
         name: "dimordinate_preview".into(),
         points: points.into_iter().map(|p| [p.x, p.y, p.z]).collect(),

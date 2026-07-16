@@ -219,6 +219,7 @@ fn v3(pt: DVec3) -> Vector3 {
 fn preview_wire(points: Vec<DVec3>) -> WireModel {
     WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
         name: "dimlinear_preview".to_string(),
         points: points

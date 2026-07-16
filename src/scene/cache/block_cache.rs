@@ -827,6 +827,7 @@ impl Batches {
                 let color = crate::scene::view::render::adapt_to_bg(b.color, bg_color);
                 WireModel {
                     dash_from_start: false,
+                    dash_align_end: None,
                     text_verts: b.text_verts,
                     name: name.to_string(),
                     points: b.points,

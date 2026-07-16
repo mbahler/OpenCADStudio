@@ -187,6 +187,7 @@ impl CadCommand for AlignedDimensionCommand {
         let p2 = p2.as_vec3();
         Some(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: "dimaligned_preview".into(),
             points: vec![[p1.x, p1.y, p1.z], [p2.x, p2.y, p2.z]],
@@ -235,6 +236,7 @@ fn preview_aligned(p1: DVec3, p2: DVec3, dim_pt: DVec3) -> WireModel {
     let d2 = d2.as_vec3();
     WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
         name: "dimaligned_preview".into(),
         points: vec![

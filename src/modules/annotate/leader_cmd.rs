@@ -164,6 +164,7 @@ fn preview_wire(pts: &[Vec3]) -> WireModel {
     }
     WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
         name: "leader_preview".into(),
         points,

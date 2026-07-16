@@ -18,6 +18,55 @@ use crate::scene::model::wire_model::WireModel;
 /// Returns one `WireModel` per continuous stroke. Pass the entity's `name`,
 /// `color`, `selected` flag, and `line_weight_px` so the WireModels inherit
 /// the entity's visual properties.
+/// Build the "A"-type segment list for one path: a solid begin/end dash of
+/// length `align_end`, and between them the pattern's interior tiled to fill the
+/// rest — starting at the element AFTER the first dash (so embedded text lands
+/// in the same gaps the GPU dash shader phases to). Length-carrying elements are
+/// truncated to fit exactly; zero-length glyphs (Dot / Text / Shape) pass
+/// through at their interior position. Returns `None` if the interior would
+/// exceed a sane repeat count (caller keeps the from-start tiling).
+fn atype_segments(scaled: &[LtSeg], align_end: f32, total: f32) -> Option<Vec<LtSeg>> {
+    let pat_len: f32 = scaled
+        .iter()
+        .map(|s| match s {
+            LtSeg::Dash(l) | LtSeg::Space(l) => *l,
+            _ => 0.0,
+        })
+        .sum();
+    if pat_len < 1e-10 || scaled.len() < 2 {
+        return None;
+    }
+    let ae = align_end.clamp(1e-4, total * 0.5);
+    let interior = total - 2.0 * ae;
+    if interior / pat_len > 50_000.0 {
+        return None; // too many repeats to materialise — keep cycling walk
+    }
+    let mut segs: Vec<LtSeg> = Vec::new();
+    segs.push(LtSeg::Dash(ae));
+    if interior > 1e-6 {
+        let mut filled = 0.0f32;
+        let mut idx = 1usize; // element after the leading dash (the gap)
+        while filled < interior - 1e-6 {
+            match &scaled[idx % scaled.len()] {
+                LtSeg::Dash(l) => {
+                    let take = l.min(interior - filled);
+                    segs.push(LtSeg::Dash(take));
+                    filled += take;
+                }
+                LtSeg::Space(l) => {
+                    let take = l.min(interior - filled);
+                    segs.push(LtSeg::Space(take));
+                    filled += take;
+                }
+                other => segs.push(other.clone()), // Dot / Text / Shape (0-length)
+            }
+            idx += 1;
+        }
+    }
+    segs.push(LtSeg::Dash(ae));
+    Some(segs)
+}
+
 pub fn apply_along(
     name: &str,
     path_pts: &[[f32; 3]],
@@ -26,6 +75,12 @@ pub fn apply_along(
     color: [f32; 4],
     selected: bool,
     line_weight_px: f32,
+    // Shared "A"-type reference length (the MLINE centre-line). `Some` end-aligns
+    // the pattern: a solid begin/end dash whose length is derived from `ref_total`
+    // (so every parallel element shares one interior phase and its dashes line up)
+    // while this element still ends on a dash at its own endpoint. `None` tiles
+    // the pattern from the start vertex (legacy phase, unchanged).
+    ref_total: Option<f32>,
 ) -> Vec<WireModel> {
     if path_pts.len() < 2 || lt.segments.is_empty() {
         return vec![];
@@ -67,6 +122,26 @@ pub fn apply_along(
         return vec![];
     }
 
+    // "A"-type end alignment (MLINE): with a shared reference length, replace the
+    // from-start tiling with a solid begin/end dash and a phased interior so this
+    // element lines up with its siblings and ends on a dash. Dash-first patterns
+    // only; align_end is derived from `ref_total` (shared) but the trailing dash
+    // lands at this element's own end (`path_len`).
+    let atype_segs: Option<Vec<LtSeg>> = ref_total.and_then(|rt| {
+        let a = match scaled.first() {
+            Some(LtSeg::Dash(a)) if *a > 0.0 => *a,
+            _ => return None,
+        };
+        if rt <= pattern_len || path_len <= pattern_len {
+            return None;
+        }
+        let k = ((rt - a) / pattern_len).round().max(1.0);
+        let align_end = (rt - k * pattern_len + a) * 0.5;
+        atype_segments(&scaled, align_end, path_len)
+    });
+    let atype_on = atype_segs.is_some();
+    let walk_segs: &[LtSeg] = atype_segs.as_deref().unwrap_or(&scaled);
+
     let mut strokes: Vec<Vec<[f32; 3]>> = Vec::new();
     let mut cur_stroke: Vec<[f32; 3]> = Vec::new();
     // Embedded linetype text (LtSeg::Text) renders as SDF glyph quads collected
@@ -76,7 +151,7 @@ pub fn apply_along(
     let mut elem_idx: usize = 0;
     let mut elem_consumed: f32 = 0.0;
 
-    for i in 0..path_pts.len() - 1 {
+    'path: for i in 0..path_pts.len() - 1 {
         let ps = path_pts[i];
         let pe = path_pts[i + 1];
 
@@ -94,9 +169,18 @@ pub fn apply_along(
         let mut pos = 0.0f32;
 
         while pos < seg_len - 1e-6 {
-            let idx = elem_idx % scaled.len();
+            let idx = if atype_on {
+                // A-type walks a finite, path-sized segment list once (no cycling);
+                // once consumed the whole path is drawn.
+                if elem_idx >= walk_segs.len() {
+                    break 'path;
+                }
+                elem_idx
+            } else {
+                elem_idx % walk_segs.len()
+            };
 
-            match &scaled[idx] {
+            match &walk_segs[idx] {
                 LtSeg::Dash(dash_len) => {
                     let remaining_dash = dash_len - elem_consumed;
                     let remaining_seg = seg_len - pos;
@@ -222,6 +306,7 @@ pub fn apply_along(
         .filter(|s| s.len() >= 2)
         .map(|pts| WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: name.to_string(),
             points: pts,
@@ -258,6 +343,7 @@ pub fn apply_along(
         }
         out.push(WireModel {
             dash_from_start: false,
+            dash_align_end: None,
             text_verts,
             name: name.to_string(),
             points: Vec::new(),
