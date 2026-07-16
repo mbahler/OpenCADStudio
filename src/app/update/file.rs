@@ -1243,8 +1243,8 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     wipeouts.as_slice(),
                     eff_w,
                     eff_h,
-                    draw_ox as f32,
-                    draw_oy as f32,
+                    draw_ox,
+                    draw_oy,
                     rotation_deg,
                     1.0,
                     None,
@@ -1313,8 +1313,8 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 // scale (rotation_deg == 0 adds no further CTM translation).
                 // window_to_sheet's (ox, oy) is the sheet-mm target for the window's
                 // min corner, so: scale * (x0 + offset_x) = ox  =>  offset_x = ox/scale - x0.
-                let offset_x = ((ox / scale) - x0) as f32;
-                let offset_y = ((oy / scale) - y0) as f32;
+                let offset_x = (ox / scale) - x0;
+                let offset_y = (oy / scale) - y0;
                 // Clip rect in pre-scale space (build_pdf's CTM applies `scale` to it,
                 // same as the wires) so the final sheet-mm rect lands at (ox, oy).
                 let clip = Some(((ox / scale) as f32, (oy / scale) as f32, win_w as f32, win_h as f32));
@@ -1359,8 +1359,10 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         Vec<crate::scene::model::hatch_model::HatchModel>,
         f64,
         f64,
-        f32,
-        f32,
+        // Draw offsets stay f64: they cancel an absolute world coordinate that
+        // an f32 cannot hold at UTM scale.
+        f64,
+        f64,
         i32,
     ) {
         let i = self.active_tab;
@@ -1411,8 +1413,8 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
             wipeouts,
             eff_w,
             eff_h,
-            draw_ox as f32,
-            draw_oy as f32,
+            draw_ox,
+            draw_oy,
             rotation_deg,
         )
     }
@@ -2076,8 +2078,10 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         Vec<crate::scene::model::hatch_model::HatchModel>,
         f64,
         f64,
-        f32,
-        f32,
+        // Offsets stay f64 (they cancel a UTM-scale world coordinate); the plot
+        // scale is a small ratio and stays f32.
+        f64,
+        f64,
         f32,
         Option<(f32, f32, f32, f32)>,
     )> {
@@ -2113,8 +2117,8 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
             .collect();
         let hatches: Vec<_> = scene.paper_canvas_hatches().as_ref().clone();
         let wipeouts: Vec<_> = scene.paper_canvas_wipeouts().as_ref().clone();
-        let offset_x = ((ox / scale) - x0) as f32;
-        let offset_y = ((oy / scale) - y0) as f32;
+        let offset_x = (ox / scale) - x0;
+        let offset_y = (oy / scale) - y0;
         let clip = Some((
             (ox / scale) as f32,
             (oy / scale) as f32,

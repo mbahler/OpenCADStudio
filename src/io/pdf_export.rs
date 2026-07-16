@@ -32,8 +32,8 @@ pub fn export_pdf(
     _wipeouts: &[HatchModel],
     _paper_w: f64,
     _paper_h: f64,
-    _offset_x: f32,
-    _offset_y: f32,
+    _offset_x: f64,
+    _offset_y: f64,
     _rotation_deg: i32,
     _scale: f32,
     _clip: Option<(f32, f32, f32, f32)>,
@@ -72,8 +72,8 @@ pub fn export_pdf(
     wipeouts: &[HatchModel],
     paper_w: f64,
     paper_h: f64,
-    offset_x: f32,
-    offset_y: f32,
+    offset_x: f64,
+    offset_y: f64,
     rotation_deg: i32,
     scale: f32,
     clip: Option<(f32, f32, f32, f32)>,
@@ -119,8 +119,11 @@ fn build_pdf(
     wipeouts: &[HatchModel],
     paper_w: f32,
     paper_h: f32,
-    ox: f32,
-    oy: f32,
+    // Absolute-world offsets, kept in f64: at UTM the drawing sits at ~5e5/4.5e6
+    // where an f32 has ~0.03 m / ~0.5 m of resolution, so an f32 offset is itself
+    // already quantised before it can cancel the coordinate it is meant to cancel.
+    ox: f64,
+    oy: f64,
     rotation_deg: i32,
     scale: f32,
     clip: Option<(f32, f32, f32, f32)>,
@@ -306,15 +309,24 @@ fn build_pdf(
             last_dash = Some(dash_arr);
         }
 
-        // Emit segments (NaN = pen-up).
+        // Emit segments (NaN = pen-up). Points are the "high" half of a
+        // double-single pair; fold in the `points_low` residual and cancel the
+        // offset in f64 before narrowing. Dropping the residual (or narrowing
+        // first) snaps a UTM drawing onto the f32 grid — ~3 cm across, ~50 cm
+        // along northing — which is exactly the distortion the plot showed while
+        // low-coordinate drawings came out clean. The result is a sheet-mm value
+        // in single digits, so f32 is lossless from here.
         let mut segment: Vec<LinePoint> = Vec::new();
-        for &[x, y, _z] in &wire.points {
+        for (pi, &[x, y, _z]) in wire.points.iter().enumerate() {
             if x.is_nan() || y.is_nan() {
                 flush_line(&mut ops, &segment);
                 segment.clear();
             } else {
+                let lo = wire.points_low.get(pi).copied().unwrap_or([0.0; 3]);
+                let wx = (x as f64 + lo[0] as f64 + ox) as f32;
+                let wy = (y as f64 + lo[1] as f64 + oy) as f32;
                 segment.push(LinePoint {
-                    p: Point::new(Mm(x + ox), Mm(y + oy)),
+                    p: Point::new(Mm(wx), Mm(wy)),
                     bezier: false,
                 });
             }
@@ -384,7 +396,7 @@ fn flush_line(ops: &mut Vec<Op>, pts: &[LinePoint]) {
 /// Mirrors `scene::paper_canvas::draw_hatch`: solid → fill, pattern → outline,
 /// gradient → solid fill of the averaged colour.
 #[cfg(not(target_arch = "wasm32"))]
-fn emit_hatch(ops: &mut Vec<Op>, hatch: &HatchModel, ox: f32, oy: f32) {
+fn emit_hatch(ops: &mut Vec<Op>, hatch: &HatchModel, ox: f64, oy: f64) {
     if hatch.boundary.is_empty() {
         return;
     }
@@ -411,8 +423,11 @@ fn emit_hatch(ops: &mut Vec<Op>, hatch: &HatchModel, ox: f32, oy: f32) {
             b = 0.50;
         }
     }
-    let world_ox = hatch.world_origin[0] as f32;
-    let world_oy = hatch.world_origin[1] as f32;
+    // `boundary` holds f32 offsets from the f64 `world_origin`, so resolve the
+    // pair in f64 and only narrow once the offset has cancelled — casting
+    // `world_origin` to f32 first re-introduces the ~0.5 m UTM quantisation the
+    // boundary-relative encoding exists to avoid.
+    let (world_ox, world_oy) = (hatch.world_origin[0], hatch.world_origin[1]);
 
     // Split the boundary into rings on every NaN-NaN separator.
     let mut rings: Vec<PolygonRing> = Vec::new();
@@ -426,8 +441,10 @@ fn emit_hatch(ops: &mut Vec<Op>, hatch: &HatchModel, ox: f32, oy: f32) {
             }
             continue;
         }
+        let px = (bx as f64 + world_ox + ox) as f32;
+        let py = (by as f64 + world_oy + oy) as f32;
         current.push(LinePoint {
-            p: Point::new(Mm(bx + world_ox + ox), Mm(by + world_oy + oy)),
+            p: Point::new(Mm(px), Mm(py)),
             bezier: false,
         });
     }
@@ -475,15 +492,19 @@ fn emit_hatch(ops: &mut Vec<Op>, hatch: &HatchModel, ox: f32, oy: f32) {
             }),
         });
         for [a, b_pt] in segments {
+            // `pattern_segments` returns absolute world f64; cancel the offset
+            // before narrowing, as everywhere else in this file.
+            let (ax, ay) = ((a[0] + ox) as f32, (a[1] + oy) as f32);
+            let (bx, by) = ((b_pt[0] + ox) as f32, (b_pt[1] + oy) as f32);
             ops.push(Op::DrawLine {
                 line: Line {
                     points: vec![
                         LinePoint {
-                            p: Point::new(Mm(a[0] + ox), Mm(a[1] + oy)),
+                            p: Point::new(Mm(ax), Mm(ay)),
                             bezier: false,
                         },
                         LinePoint {
-                            p: Point::new(Mm(b_pt[0] + ox), Mm(b_pt[1] + oy)),
+                            p: Point::new(Mm(bx), Mm(by)),
                             bezier: false,
                         },
                     ],
@@ -517,9 +538,16 @@ fn emit_hatch(ops: &mut Vec<Op>, hatch: &HatchModel, ox: f32, oy: f32) {
 // ── Text (SDF glyph quads → vector strokes / fills) ────────────────────────
 
 /// Absolute world XY of a glyph vertex (double-single high + low parts folded).
+///
+/// The fold must happen in f64: the pair exists because the absolute coordinate
+/// does not fit an f32, so `pos + pos_low` evaluated in f32 rounds straight back
+/// to `pos` and throws away the residual it was carrying.
 #[cfg(not(target_arch = "wasm32"))]
-fn glyph_world_xy(v: &crate::scene::pipeline::text_gpu::TextVertex) -> [f32; 2] {
-    [v.pos[0] + v.pos_low[0], v.pos[1] + v.pos_low[1]]
+fn glyph_world_xy(v: &crate::scene::pipeline::text_gpu::TextVertex) -> [f64; 2] {
+    [
+        v.pos[0] as f64 + v.pos_low[0] as f64,
+        v.pos[1] as f64 + v.pos_low[1] as f64,
+    ]
 }
 
 /// Adapt a text colour to the white sheet, mirroring the wire/hatch passes:
@@ -550,8 +578,8 @@ fn adapt_text_color([r, g, b]: [f32; 3]) -> [f32; 3] {
 fn emit_text(
     ops: &mut Vec<Op>,
     wires: &[WireModel],
-    ox: f32,
-    oy: f32,
+    ox: f64,
+    oy: f64,
     scale: f32,
     plot_style: Option<&PlotStyleTable>,
 ) {
@@ -621,18 +649,22 @@ fn emit_text(
             // `tl` carries uv = (uv_min.x, uv_min.y) — the atlas tile key.
             let key = sdf_atlas::uv_key([quad[5].uv[0], quad[5].uv[1]]);
 
-            let point = |wx: f32, wy: f32| Point::new(Mm(wx + ox), Mm(wy + oy));
+            // Cancel the offset in f64, then narrow: the sheet-mm result is a
+            // small number even when the world coordinate is UTM-scale.
+            let point = |wx: f64, wy: f64| Point::new(Mm((wx + ox) as f32), Mm((wy + oy) as f32));
 
             if let Some(ge) = table.get(&key) {
                 // Affine basis of the quad: plane_min → bl, +x → br, +y → tl.
+                // The glyph-space maths is small and stays f32; only the lift into
+                // world coordinates needs f64.
                 let (pmin, pmax) = (ge.plane_min, ge.plane_max);
                 let (sx, sy) = (pmax[0] - pmin[0], pmax[1] - pmin[1]);
                 if sx.abs() < 1e-9 || sy.abs() < 1e-9 {
                     continue;
                 }
                 let map = |p: [f32; 2]| -> Point {
-                    let u = (p[0] - pmin[0]) / sx;
-                    let v = (p[1] - pmin[1]) / sy;
+                    let u = ((p[0] - pmin[0]) / sx) as f64;
+                    let v = ((p[1] - pmin[1]) / sy) as f64;
                     let wx = bl[0] + u * (br[0] - bl[0]) + v * (tl[0] - bl[0]);
                     let wy = bl[1] + u * (br[1] - bl[1]) + v * (tl[1] - bl[1]);
                     point(wx, wy)
