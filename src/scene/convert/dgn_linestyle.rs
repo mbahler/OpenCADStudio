@@ -201,6 +201,15 @@ pub fn offset_host_entity(e: &EntityType, d: f64) -> Option<EntityType> {
     let mut clone = e.clone();
     match &mut clone {
         EntityType::LwPolyline(p) => {
+            // Drop consecutive duplicate vertices first. A zero-length segment
+            // gives `offset_xy` a degenerate normal, which leaves that vertex
+            // un-offset — folding the wall down to the centre line and drawing a
+            // spurious segment that visually links the two walls. (Some DGN pipe
+            // polylines carry trailing duplicate end vertices.)
+            p.vertices.dedup_by(|a, b| {
+                (a.location.x - b.location.x).abs() < 1e-9
+                    && (a.location.y - b.location.y).abs() < 1e-9
+            });
             if p.vertices.len() < 2 {
                 return None;
             }
@@ -215,6 +224,10 @@ pub fn offset_host_entity(e: &EntityType, d: f64) -> Option<EntityType> {
             }
         }
         EntityType::Polyline2D(p) => {
+            p.vertices.dedup_by(|a, b| {
+                (a.location.x - b.location.x).abs() < 1e-9
+                    && (a.location.y - b.location.y).abs() < 1e-9
+            });
             if p.vertices.len() < 2 {
                 return None;
             }

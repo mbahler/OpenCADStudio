@@ -221,6 +221,7 @@ pub fn apply_along(
         .into_iter()
         .filter(|s| s.len() >= 2)
         .map(|pts| WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
             name: name.to_string(),
             points: pts,
@@ -256,6 +257,7 @@ pub fn apply_along(
             xy = xy.max(y);
         }
         out.push(WireModel {
+            dash_from_start: false,
             text_verts,
             name: name.to_string(),
             points: Vec::new(),

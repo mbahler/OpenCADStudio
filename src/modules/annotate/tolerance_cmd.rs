@@ -84,6 +84,7 @@ impl CadCommand for ToleranceCommand {
         }
         let d = 0.15_f32;
         Some(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
             name: "tolerance_preview".into(),
             points: vec![

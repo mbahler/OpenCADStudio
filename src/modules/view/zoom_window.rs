@@ -65,6 +65,7 @@ impl CadCommand for ZoomWindowCommand {
         let max = p1.max(pt);
         // Draw a rectangle preview
         Some(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
             name: "zoom_window_preview".into(),
             points: vec![

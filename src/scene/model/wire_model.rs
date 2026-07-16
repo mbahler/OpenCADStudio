@@ -73,6 +73,12 @@ pub struct WireModel {
     /// When false the linetype pattern restarts at each NaN-separated segment
     /// (DXF PLINEGEN=0).  When true the pattern runs continuously (PLINEGEN=1).
     pub plinegen: bool,
+    /// DGN line-style marker. When false (every standard linetype) the dash
+    /// pattern uses the normal phase: A-type end alignment for dash-first
+    /// patterns, else centred. When true (DGN pipe walls) the pattern is drawn
+    /// from the START vertex with continuous phase and no A-type end forcing —
+    /// DGN line styles are not end-aligned.
+    pub dash_from_start: bool,
     /// Paper-space bounding box [x0, y0, x1, y1] for GPU scissor clipping.
     /// Set only for viewport-projected wires in paper-space layouts.
     pub vp_scissor: Option<[f32; 4]>,
@@ -151,6 +157,7 @@ impl WireModel {
             key_vertices: vec![],
             aabb: Self::UNBOUNDED_AABB,
             plinegen: true,
+            dash_from_start: false,
             vp_scissor: None,
             fill_tris: vec![],
             fill_tris_low: Vec::new(),
@@ -359,6 +366,7 @@ impl Default for WireModel {
             key_vertices: Vec::new(),
             aabb: Self::UNBOUNDED_AABB,
             plinegen: true,
+            dash_from_start: false,
             vp_scissor: None,
             fill_tris: Vec::new(),
             fill_tris_low: Vec::new(),

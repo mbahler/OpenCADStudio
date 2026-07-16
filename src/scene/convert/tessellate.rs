@@ -313,6 +313,7 @@ pub fn tessellate(
                     )
                 };
                 elem_wires.push(WireModel {
+                    dash_from_start: false,
                     text_verts: Vec::new(),
                     name: name.clone(),
                     points: pts,
@@ -587,6 +588,7 @@ pub fn tessellate(
                                         ftl.push(lo);
                                     }
                                     wires.push(WireModel {
+                                        dash_from_start: false,
                                         text_verts: Vec::new(),
                                         name: name.clone(),
                                         points: vec![],
@@ -620,6 +622,7 @@ pub fn tessellate(
                                         fpl.push(lo);
                                     }
                                     wires.push(WireModel {
+                                        dash_from_start: false,
                                         text_verts: Vec::new(),
                                         name: name.clone(),
                                         points: fp,
@@ -660,6 +663,7 @@ pub fn tessellate(
                             low.push(ll);
                         }
                         wires.push(WireModel {
+                            dash_from_start: false,
                             text_verts: Vec::new(),
                             name: name.clone(),
                             points: pts,
@@ -681,6 +685,7 @@ pub fn tessellate(
                         });
                     }
                     wires.push(WireModel {
+                        dash_from_start: false,
                         text_verts: sdf_verts,
                         name,
                         points: Vec::new(),
@@ -732,6 +737,7 @@ pub fn tessellate(
                             (Vec::new(), Vec::new(), Vec::new())
                         };
                         out.push(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
                             name: name.clone(),
                             points: bin.pts,
@@ -765,6 +771,7 @@ pub fn tessellate(
                             (Vec::new(), Vec::new(), Vec::new())
                         };
                         out.push(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
                             name: name.clone(),
                             points: Vec::new(),
@@ -795,6 +802,7 @@ pub fn tessellate(
                 // are empty → the early-return path above).
                 if !sdf_verts.is_empty() {
                     out.push(WireModel {
+                        dash_from_start: false,
                         text_verts: sdf_verts,
                         name: name.clone(),
                         points: Vec::new(),
@@ -818,6 +826,7 @@ pub fn tessellate(
 
                 if out.is_empty() {
                     out.push(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
                         name,
                         points: Vec::new(),
@@ -863,6 +872,7 @@ pub fn tessellate(
                             .map(|[kx, ky, kz]| [kx, ky, kz])
                             .collect();
                         return vec![WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
                             name,
                             points: vec![
@@ -907,6 +917,7 @@ pub fn tessellate(
                         .map(|[x, y, z]| [x, y, z])
                         .collect();
                     return vec![WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
                         name,
                         points,
@@ -940,6 +951,7 @@ pub fn tessellate(
                         .map(|[x, y, z]| [x, y, z])
                         .collect();
                     return vec![WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
                         name,
                         points,
@@ -992,6 +1004,7 @@ pub fn tessellate(
                         (Vec::new(), Vec::new(), Vec::new())
                     };
                     out.push(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
                         name: name.clone(),
                         points: local_pts,
@@ -1024,6 +1037,7 @@ pub fn tessellate(
                         (Vec::new(), Vec::new(), Vec::new())
                     };
                     out.push(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
                         name: name.clone(),
                         points: Vec::new(),
@@ -1047,6 +1061,7 @@ pub fn tessellate(
 
                 if out.is_empty() {
                     out.push(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
                         name,
                         points: Vec::new(),
@@ -1080,6 +1095,7 @@ pub fn tessellate(
                     .map(|[x, y, z]| [x, y, z])
                     .collect();
                 return vec![WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
                     name,
                     points: local_pts,
@@ -1144,6 +1160,7 @@ pub fn tessellate(
     let snap_pts: Vec<(glam::DVec3, SnapHint)> =
         snap_pts.into_iter().map(|(p, h)| (p.as_dvec3(), h)).collect();
     vec![WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
         name,
         points,

@@ -1399,6 +1399,7 @@ impl MultiLeaderTess for MultiLeader {
         // WireModels so the renderer respects per-piece coloring.
         let mut wires: Vec<WireModel> = Vec::new();
         wires.push(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
             name: name.clone(),
             points,
@@ -1682,6 +1683,7 @@ impl MultiLeaderTess for MultiLeader {
                         xy = xy.max(y);
                     }
                     wires.push(WireModel {
+                        dash_from_start: false,
                         text_verts: sdf_verts,
                         name: name.clone(),
                         points: vec![],
@@ -1745,6 +1747,7 @@ impl MultiLeaderTess for MultiLeader {
                         wcs_corners[3],
                     ];
                     wires.push(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
                         name: name.clone(),
                         points: vec![],
@@ -1776,6 +1779,7 @@ impl MultiLeaderTess for MultiLeader {
                         wcs_corners[0],
                     ];
                     wires.push(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
                         name,
                         points: frame_points,

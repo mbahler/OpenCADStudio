@@ -81,6 +81,7 @@ impl CadCommand for MviewCommand {
         let pt = pt.as_vec3();
         let c1 = self.corner1?;
         Some(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
             name: "mview_preview".to_string(),
             points: vec![

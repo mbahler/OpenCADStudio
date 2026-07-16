@@ -89,6 +89,7 @@ impl CadCommand for RevCloudCommand {
             self.points[0].z as f32,
         ]);
         Some(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
             name: "revcloud_preview".into(),
             points: preview_pts,

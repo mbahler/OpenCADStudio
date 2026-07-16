@@ -481,6 +481,7 @@ pub(crate) fn tessellate_entity(
             (ins.insert_point.z) as f32,
         );
         let marker = WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
             name: h.value().to_string(),
             points: vec![],
@@ -729,16 +730,21 @@ pub(crate) fn tessellate_entity(
                     .find(|s| *s > 1e-9)
                     .unwrap_or(1.0);
                 let f = radius / scale;
+                // The wall stroke's dash length (`wall_dashes[0]`) renders as an
+                // equal dash/gap: dash-first `[+dash, -dash]`. Combined with the
+                // `dash_from_start` flag set below, each wall tiles from its own
+                // start vertex with a dash, no A-type end alignment.
                 let native = convert::dgn_linestyle::wall_dashes(document, lt_name);
-                let (wall_pat, wall_pat_len) = if f > 1e-9 && native.len() >= 2 {
-                    let mut pat = [0.0_f32; 8];
-                    let mut plen = 0.0_f32;
-                    for (i, &d) in native.iter().take(8).enumerate() {
-                        let v = (d * f) as f32;
-                        pat[i] = if i % 2 == 0 { v } else { -v };
-                        plen += v;
+                let (wall_pat, wall_pat_len) = if f > 1e-9 && !native.is_empty() {
+                    let dash = (native[0] * f) as f32;
+                    if dash > 1e-6 {
+                        let mut pat = [0.0_f32; 8];
+                        pat[0] = dash;
+                        pat[1] = -dash;
+                        (pat, 2.0 * dash)
+                    } else {
+                        ([0.0_f32; 8], 0.0)
                     }
-                    (pat, plen)
                 } else {
                     ([0.0_f32; 8], 0.0)
                 };
@@ -767,6 +773,10 @@ pub(crate) fn tessellate_entity(
                             if wall_pat_len > 1e-6 {
                                 x.pattern = wall_pat;
                                 x.pattern_length = wall_pat_len;
+                                // DGN: draw the dash from this wall's own start
+                                // vertex, no A-type end forcing. Each wall is a
+                                // separate wire, so the two tile independently.
+                                x.dash_from_start = true;
                             }
                         }
                         rails.append(&mut w);
@@ -790,7 +800,14 @@ pub(crate) fn tessellate_entity(
                     world_per_pixel,
                     bg_color,
                 );
+                // The symbol wires come back named after the anonymous block's
+                // internal entity handle. Re-key them to the host entity (like the
+                // walls above) so the whole DET pipe picks/selects as one entity
+                // instead of the symbols acting as separate phantom entities.
+                let host_name = h.value().to_string();
                 for w in &mut wires {
+                    w.name = host_name.clone();
+                    w.aci = aci;
                     w.aabb = aabb;
                 }
                 bases.extend(wires);
@@ -838,6 +855,7 @@ fn lod_stub_wire(
     // LOD boundary. #19.
     let stored_color = if selected { WireModel::SELECTED } else { color };
     WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
         name,
         // Diagonal of the entity's 3D AABB so depth tests against
@@ -901,6 +919,7 @@ fn lod_stub_wire_3d(
     }
     let stored_color = if selected { WireModel::SELECTED } else { color };
     WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
         name,
         points,

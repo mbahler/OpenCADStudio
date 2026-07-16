@@ -179,6 +179,7 @@ impl CadCommand for DimBaselineCommand {
         let dim_line_pt2 = dim_line_pt2.as_vec3();
         let pt = pt.as_vec3();
         Some(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
             name: "dimbase_preview".into(),
             points: vec![

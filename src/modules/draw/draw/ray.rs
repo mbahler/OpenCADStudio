@@ -84,6 +84,7 @@ impl CadCommand for RayCommand {
         let dir = (pt - base).normalize_or_zero();
         let far = base + dir * DISPLAY_EXTENT;
         Some(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
             name: "ray_preview".into(),
             points: vec![[base.x, base.y, base.z], [far.x, far.y, far.z]],
@@ -175,6 +176,7 @@ impl CadCommand for XLineCommand {
         let far_pos = base + dir * DISPLAY_EXTENT;
         let far_neg = base - dir * DISPLAY_EXTENT;
         Some(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
             name: "xline_preview".into(),
             points: vec![

@@ -130,6 +130,7 @@ fn v3(pt: DVec3) -> Vector3 {
 
 fn preview_wire(points: Vec<Vec3>) -> WireModel {
     WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
         name: "dimangular_preview".to_string(),
         points: points.into_iter().map(|p| [p.x, p.y, p.z]).collect(),

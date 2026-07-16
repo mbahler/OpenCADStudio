@@ -286,6 +286,15 @@ fn wire_distances(wire: &WireModel) -> (Vec<f32>, f32, f32) {
         return (dists, 0.0, 0.0);
     }
 
+    // DGN line styles draw the pattern from the START vertex with continuous
+    // phase and are NOT end-aligned. The raw arc-length distances already put
+    // dist 0 at the first vertex, so a dash-first pattern begins a dash exactly
+    // there. Return before the A-type / centring logic that standard linetypes
+    // use (see `WireModel::dash_from_start`).
+    if wire.dash_from_start {
+        return (dists, 0.0, 0.0);
+    }
+
     // Align only a proper alternating pattern that BEGINS with a dash followed
     // by a gap — every standard linetype does (DASHED/DASHDOT/CENTER/HIDDEN/…).
     // Gap-first, dot-first, single-element, or consecutive-dash patterns keep

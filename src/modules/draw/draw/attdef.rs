@@ -160,6 +160,7 @@ impl CadCommand for AttdefCommand {
         // Show a small cross at the insertion point.
         let d = 0.15_f32;
         Some(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
             name: "attdef_preview".into(),
             points: vec![

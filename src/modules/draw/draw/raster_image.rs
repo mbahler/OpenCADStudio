@@ -108,6 +108,7 @@ impl CadCommand for ImageCommand {
         let p3 = [origin.x, origin.y + world_height, origin.z];
 
         Some(WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
             name: "image_preview".into(),
             points: vec![p0, p1, p2, p3, p0],

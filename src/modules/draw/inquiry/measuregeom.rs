@@ -67,6 +67,7 @@ impl MeasureGeomCommand {
     /// Build a cyan preview wire connecting the picked points and the cursor.
     fn preview_wire(name: &str, pts: Vec<[f32; 3]>) -> WireModel {
         WireModel {
+            dash_from_start: false,
             text_verts: Vec::new(),
             name: name.to_string(),
             points: pts,
