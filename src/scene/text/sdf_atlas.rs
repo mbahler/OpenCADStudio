@@ -42,6 +42,25 @@ pub fn text_atlas() -> &'static Mutex<GlyphAtlas> {
     ATLAS.get_or_init(|| Mutex::new(GlyphAtlas::new(2048, 2048)))
 }
 
+/// Bumped whenever already-baked entries' UVs stop addressing their tile:
+/// `grow_height` rescales every entry's V and `reset` rewinds the packer, but
+/// glyph quads built earlier keep the UVs they were laid out with. Those stale
+/// quads sample the wrong tile on screen and miss the export table entirely
+/// (silently dropping text from the PDF — issue #385 all over again, under
+/// issue #347's grow-the-atlas conditions). The tessellation memo guard folds
+/// this in, so a growth re-lays-out the text instead of leaving stale quads.
+static ATLAS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Current atlas UV generation — see [`ATLAS_GENERATION`]. Anything that caches
+/// glyph quads must treat a change here as "re-lay-out the text".
+pub fn generation() -> u64 {
+    ATLAS_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn bump_generation() {
+    ATLAS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// TEXTFILL system variable — `true` fills TrueType glyphs (default), `false`
 /// draws them hollow (outline only). Global, like the AutoCAD system variable.
 static TEXTFILL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -111,6 +130,33 @@ pub struct AtlasEntry {
     pub plane_max: [f32; 2],
     /// Glyph advance width (9-unit space).
     pub advance: f32,
+}
+
+/// A glyph's vector geometry recovered for CPU export (PDF / print), where the
+/// SDF atlas texture can't be sampled. All coordinates are in the 9-unit glyph
+/// space; `plane_min`/`plane_max` is the same tile rect the render quad spans,
+/// so the exporter can map the geometry into a rendered quad by affine interp.
+#[derive(Clone, Debug)]
+pub struct GlyphExport {
+    pub plane_min: [f32; 2],
+    pub plane_max: [f32; 2],
+    /// Outline / centreline polylines (glyph units).
+    pub strokes: Vec<Vec<[f32; 2]>>,
+    /// Fill triangulation (glyph units, flat triples). Non-empty only for a
+    /// filled TrueType glyph — the exporter fills these and ignores `strokes`;
+    /// empty means "stroke `strokes`" (LFF pen font, or a hollow TTF glyph).
+    pub fill_tris: Vec<[f32; 2]>,
+    /// Baked with the 1.7× bold pen; the exporter widens its own pen to match.
+    pub bold: bool,
+}
+
+/// Pack a glyph quad's `uv_min` corner into a stable hash key for the export
+/// table below. The two f32 UVs are exact copies of the baked `AtlasEntry`
+/// values (via `GlyphQuad`), so bit-equality is a reliable identity as long as
+/// the atlas hasn't been re-scaled by a growth since the quads were built —
+/// which, for an export of an already-viewed drawing, it hasn't.
+pub fn uv_key(uv_min: [f32; 2]) -> u64 {
+    ((uv_min[0].to_bits() as u64) << 32) | uv_min[1].to_bits() as u64
 }
 
 /// A single-channel SDF glyph atlas plus a shelf packer.
@@ -204,6 +250,8 @@ impl GlyphAtlas {
     /// next use (e.g. after TEXTFILL toggles between fill and outline).
     pub fn reset(&mut self) {
         *self = GlyphAtlas::new(self.width, self.height);
+        // The packer rewound, so every previously handed-out UV is now stale.
+        bump_generation();
     }
 
     /// Look up a glyph's atlas placement, baking + packing it on first use.
@@ -230,6 +278,50 @@ impl GlyphAtlas {
         entry
     }
 
+    /// Snapshot every baked glyph's vector geometry, keyed by its tile
+    /// `uv_min` ([`uv_key`]). CPU exporters (PDF / print) walk a text run's SDF
+    /// glyph quads, look each quad's `uv_min` up here, and re-emit the glyph as
+    /// vector strokes / fills instead of sampling the SDF texture. Re-resolves
+    /// each entry's outline through `Face` (the same source `get_or_insert`
+    /// baked from), gated on TEXTFILL so a hollow-on-screen glyph exports hollow.
+    pub fn export_table(&self) -> HashMap<u64, GlyphExport> {
+        let fill_on = textfill();
+        let mut out = HashMap::with_capacity(self.entries.len());
+        // `Face::resolve` reparses a font, so resolve once per family rather than
+        // once per baked glyph — a CJK drawing holds thousands of entries over a
+        // handful of families, and the atlas mutex is held for this whole walk.
+        let mut faces: HashMap<&str, Face> = HashMap::new();
+        for ((family, ch, bold), entry) in &self.entries {
+            let Some(entry) = entry else { continue };
+            let face = faces
+                .entry(family.as_str())
+                .or_insert_with(|| Face::resolve(family));
+            let Some(g) = face.glyph(*ch) else { continue };
+            out.insert(
+                uv_key(entry.uv_min),
+                GlyphExport {
+                    plane_min: entry.plane_min,
+                    plane_max: entry.plane_max,
+                    strokes: g.strokes.clone(),
+                    // `bake_glyph` gates the texture fill on TEXTFILL the same way
+                    // (`textfill() && !g.fill_tris.is_empty()`); `Face::glyph` does
+                    // not, so without this the export ignores TEXTFILL 0 and prints
+                    // solid glyphs where the screen shows outlines.
+                    fill_tris: if fill_on {
+                        g.fill_tris.clone()
+                    } else {
+                        Vec::new()
+                    },
+                    // Bold stroke glyphs bake at a 1.7× pen (`get_or_insert`) but
+                    // share the centrelines, so carry the flag and let the exporter
+                    // widen its own pen by the same factor.
+                    bold: *bold,
+                },
+            );
+        }
+        out
+    }
+
     /// Grow the atlas taller (keeping the width, so packed X positions and their
     /// normalized U stay valid) and rescale every cached entry's V for the new
     /// height. Returns false once the height hits `MAX_ATLAS_PX` — text-heavy
@@ -251,6 +343,8 @@ impl GlyphAtlas {
         self.solid_uv[1] *= sy;
         self.height = new_h;
         self.dirty = true;
+        // Every already-emitted quad's V now addresses the wrong tile.
+        bump_generation();
         true
     }
 

@@ -629,9 +629,46 @@ impl Scene {
             self.ensure_sheet_viewport(&layout);
             self.apply_sheet_viewport_camera()
         };
-        if !restored {
+        if restored {
+            // The pose is the file's and must not move — but nothing has sized
+            // its near/far, so `depth_half_range` stays unset and the
+            // projection falls back to a guess scaled from the zoom distance.
+            // On a drawing whose geometry reaches far off its plane that guess
+            // is far too narrow and the geometry is silently clipped away.
+            self.fit_depth_to_saved_extents();
+        } else {
             self.fit_all();
         }
+    }
+
+    /// Size the camera's near/far from the drawing's own recorded extent,
+    /// leaving its pose alone.
+    ///
+    /// `$EXTMIN`/`$EXTMAX` is untrustworthy for *positioning* — stale after an
+    /// edit, or the 1e20 sentinel when the writer never computed it (see the
+    /// `world_offset` selection notes) — which is why `fit_all` scans entities
+    /// instead. It is the right input *here*: a near/far that is too wide only
+    /// costs a little depth precision, while one that is too narrow deletes
+    /// geometry outright, so erring on the drawing's own claim is the safe
+    /// direction. It also costs nothing — no tessellation pass on open.
+    fn fit_depth_to_saved_extents(&mut self) {
+        // Same bound `model_space_extents`'s header fallback uses; rejects the
+        // sentinel and any garbage that would blow the range up.
+        const SANE_EXTENT: f64 = 1.0e16;
+        let h = &self.document.header;
+        let (lo, hi) = (h.model_space_extents_min, h.model_space_extents_max);
+        let ok = lo.x <= hi.x
+            && lo.y <= hi.y
+            && lo.z <= hi.z
+            && [lo.x, lo.y, lo.z, hi.x, hi.y, hi.z]
+                .iter()
+                .all(|v| v.is_finite() && v.abs() < SANE_EXTENT);
+        if !ok {
+            return;
+        }
+        let min = glam::Vec3::new(lo.x as f32, lo.y as f32, lo.z as f32);
+        let max = glam::Vec3::new(hi.x as f32, hi.y as f32, hi.z as f32);
+        self.camera.borrow_mut().fit_depth_to_bounds(min, max);
     }
 
     pub fn fit_all(&mut self) {

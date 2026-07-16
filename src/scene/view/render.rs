@@ -105,6 +105,11 @@ pub struct ViewportData {
     /// when only the camera moved. Non-tile and preview/interim frames carry a
     /// fresh id each time → always re-upload.
     pub(in crate::scene) wire_content_id: u64,
+    /// GPU wire-arena handoff (`OCS_WIRE_GPU_PATCH`): `(prev_gen, changed)` when
+    /// this Model set reached `wire_content_id` by an incremental resident patch,
+    /// so `prepare` can patch just those entities' slabs. `None` ⇒ full build.
+    pub(in crate::scene) wire_patch:
+        Option<(u64, Arc<Vec<(acadrust::Handle, crate::scene::ChangeKind)>>)>,
     /// Selected handles only (no hover) — solid meshes tint these blue.
     pub(in crate::scene) selected_handles: Arc<rustc_hash::FxHashSet<acadrust::Handle>>,
     /// Currently hovered handle — solid meshes tint it orange.
@@ -357,6 +362,91 @@ impl shader::Primitive for Primitive {
             // independent of the `cur_key` block so a preview/interim wire change
             // still uploads even when the camera didn't move.
             if vp.wire_content_id != inner.cached_wire_id {
+                // Persistent per-entity wire arena (OCS_WIRE_GPU_PATCH): patch
+                // just the changed entities' instance slabs instead of rebuilding
+                // the whole wire buffer. Only for the scissor-free, mesh-free
+                // (single-batch) Model set; scissored paper viewports and mixed
+                // 2D/3D sets fall through to the shared batched path below.
+                let mut arena_served = false;
+                #[cfg(not(target_arch = "wasm32"))]
+                let _perf = std::env::var_os("OCS_PERF").is_some();
+                #[cfg(not(target_arch = "wasm32"))]
+                let _t0 = std::time::Instant::now();
+                #[cfg(not(target_arch = "wasm32"))]
+                let mut _patched = false;
+                #[cfg(not(target_arch = "wasm32"))]
+                if crate::scene::wire_gpu_patch_enabled()
+                    && inner.wire_const_bgl.is_some()
+                    && crate::scene::pipeline::wire_arena::is_arena_eligible(&vp.wires)
+                {
+                    use crate::scene::pipeline::wire_arena::{self, WireArena};
+                    // Split the resident set into the regular 2D wires and the
+                    // mesh/solid EDGE wires (which need the mesh-edge draw
+                    // treatment), one arena each, so both patch incrementally.
+                    // Fill-only wires (no segments) are drawn in the face3d pass,
+                    // not here, so they go in neither.
+                    let mesh_names: rustc_hash::FxHashSet<u64> = vp
+                        .wires
+                        .iter()
+                        .filter(|w| !w.fill_tris.is_empty() && !w.fill_tris_low.is_empty())
+                        .filter_map(|w| w.name.parse::<u64>().ok())
+                        .collect();
+                    let regular: Vec<&crate::scene::WireModel> = vp
+                        .wires
+                        .iter()
+                        .filter(|w| {
+                            !w.points.is_empty() && !wire_arena::is_mesh_edge(w, &mesh_names)
+                        })
+                        .collect();
+                    let mesh: Vec<&crate::scene::WireModel> = vp
+                        .wires
+                        .iter()
+                        .filter(|w| wire_arena::is_mesh_edge(w, &mesh_names))
+                        .collect();
+                    let bgl = inner.wire_const_bgl.as_ref().unwrap();
+                    let base_ok = vp
+                        .wire_patch
+                        .as_ref()
+                        .map_or(false, |(base, changes)| {
+                            inner.wire_arena_id == *base && !changes.is_empty()
+                        });
+                    let changes = vp.wire_patch.as_ref().map(|(_, c)| c);
+
+                    // Each batch: patch from the shared base if possible, else
+                    // rebuild just that batch. They advance together.
+                    let reg_ok = base_ok
+                        && inner.wire_arena.as_mut().map_or(false, |a| {
+                            a.patch(queue, changes.unwrap(), &regular, &vp.draw_depths)
+                        });
+                    if !reg_ok {
+                        inner.wire_arena =
+                            WireArena::build(device, queue, &regular, &vp.draw_depths, bgl, false);
+                    }
+                    let mesh_ok = base_ok
+                        && inner.wire_arena_mesh.as_mut().map_or(false, |a| {
+                            a.patch(queue, changes.unwrap(), &mesh, &vp.draw_depths)
+                        });
+                    if !mesh_ok {
+                        inner.wire_arena_mesh =
+                            WireArena::build(device, queue, &mesh, &vp.draw_depths, bgl, true);
+                    }
+                    _patched = reg_ok && mesh_ok;
+
+                    if let (Some(reg), Some(me)) =
+                        (inner.wire_arena.as_ref(), inner.wire_arena_mesh.as_ref())
+                    {
+                        let mut gpus = reg.wire_gpus();
+                        gpus.extend(me.wire_gpus());
+                        inner.gpu_wires = std::sync::Arc::new(gpus);
+                        inner.wire_handle_index = wire_arena::build_handle_index(&vp.wires[..]);
+                        inner.wire_arena_id = vp.wire_content_id;
+                        arena_served = true;
+                    } else {
+                        inner.wire_arena = None;
+                        inner.wire_arena_mesh = None;
+                        inner.wire_arena_id = u64::MAX;
+                    }
+                }
                 // Share one copy of the resident wire buffers across every slot
                 // (and every pane — one MultiPipeline backs them all) rendering
                 // this content id: build on a cache miss, then hand out Arc
@@ -364,6 +454,7 @@ impl shader::Primitive for Primitive {
                 // Model tiles, upload the wire vertices once between them.
                 // `.cloned()` releases the immutable cache borrow before the
                 // miss branch takes a mutable one.
+                if !arena_served {
                 let cached = pipeline.wire_buffer_cache.get(&vp.wire_content_id).cloned();
                 let built = match cached {
                     Some(entry) => entry,
@@ -386,7 +477,26 @@ impl shader::Primitive for Primitive {
                 };
                 inner.gpu_wires = built.0;
                 inner.wire_handle_index = built.1;
+                } // end !arena_served
                 inner.cached_wire_id = vp.wire_content_id;
+                #[cfg(not(target_arch = "wasm32"))]
+                if _perf {
+                    let gi: u32 = inner.gpu_wires.iter().map(|w| w.instance_count).sum();
+                    let outcome = if !arena_served {
+                        "shared-fullupload"
+                    } else if _patched {
+                        "arena-patch"
+                    } else {
+                        "arena-build"
+                    };
+                    eprintln!(
+                        "[perf] wire {:>7.1}ms  {:<18} wires={} gpu_instances={}",
+                        _t0.elapsed().as_secs_f64() * 1000.0,
+                        outcome,
+                        vp.wires.len(),
+                        gi,
+                    );
+                }
             }
             // Selection xray overlay — rebuilt when the selection changes or the
             // underlying wires changed. A pick bumps only selection_generation,
@@ -880,6 +990,25 @@ impl Scene {
                 return verts.clone();
             }
         }
+        // A new content id (every geometry edit) misses the cache — but if no
+        // text-bearing entity changed since the last build, the glyphs are
+        // identical, so reuse them instead of re-walking every wire.
+        {
+            let reuse = {
+                let last = self.last_sdf_text.borrow();
+                match &*last {
+                    Some((epoch, arc)) if self.text_unchanged(*epoch) => Some(arc.clone()),
+                    _ => None,
+                }
+            };
+            if let Some(arc) = reuse {
+                self.sdf_text_cache
+                    .borrow_mut()
+                    .insert(wire_content_id, arc.clone());
+                *self.last_sdf_text.borrow_mut() = Some((self.geometry_epoch, arc.clone()));
+                return arc;
+            }
+        }
         let mut out: Vec<crate::scene::pipeline::text_gpu::TextVertex> = Vec::new();
         for w in wires {
             if !w.text_verts.is_empty() {
@@ -887,12 +1016,15 @@ impl Scene {
             }
         }
         let verts = Arc::new(out);
-        let mut cache = self.sdf_text_cache.borrow_mut();
-        // Ids change on rebuild, so old keys die naturally; cap bounds churn.
-        if cache.len() > 8 {
-            cache.clear();
+        {
+            let mut cache = self.sdf_text_cache.borrow_mut();
+            // Ids change on rebuild, so old keys die naturally; cap bounds churn.
+            if cache.len() > 8 {
+                cache.clear();
+            }
+            cache.insert(wire_content_id, verts.clone());
         }
-        cache.insert(wire_content_id, verts.clone());
+        *self.last_sdf_text.borrow_mut() = Some((self.geometry_epoch, verts.clone()));
         verts
     }
 
@@ -1239,6 +1371,7 @@ impl Scene {
             geometry_epoch: self.geometry_epoch,
             camera_generation: self.camera_generation,
             wire_content_id,
+            wire_patch: self.model_wire_patch_for(wire_content_id),
             selected_handles: Arc::new(self.selected.iter().copied().collect()),
             hover_handle: self.hover_highlight,
             selection_generation: self.selection_generation,

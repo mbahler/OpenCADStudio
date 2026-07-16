@@ -1,6 +1,6 @@
 [package]
 name = "OpenCADStudio"
-version = "0.8.2"
+version = "0.8.3"
 edition = "2021"
 build = "build.rs"
 
@@ -89,10 +89,11 @@ lyon_tessellation = "1.0.20"
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Com", "Win32_System_Registry", "Win32_Foundation"] }
 
 [patch.crates-io]
-# Tracks HakanSeven12/acadrust main (0.4.x): the plotstyle/material common-
-# entity ordering fix plus the in-flight DWG reader work, ahead of the crates.io
-# release. Drop the patch once those land in a published 0.4 crate.
-acadrust = { git = "https://github.com/HakanSeven12/acadrust", branch = "main" }
+# The `acadrust` crate now tracks the OpenAEC-Foundation/acadifc fork's main
+# (still the `acadrust` package): the in-flight DWG reader work plus the Arc
+# copy-on-write entity storage that makes the undo document clone cheap. Drop the
+# patch once these land in a published 0.4 crate.
+acadrust = { git = "https://github.com/OpenAEC-Foundation/acadifc", branch = "main" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Native enables the plugin host runtime (out-of-process plugins).

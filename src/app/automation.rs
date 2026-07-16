@@ -542,6 +542,317 @@ mod tests {
     }
 
     #[test]
+    fn start_page_runs_tools_that_need_no_drawing_but_still_refuses_the_rest() {
+        // The welcome page's own buttons (Donate / Send Feedback / OCS Web) and
+        // Manage > About route through RibbonToolClick, so a blanket is_start
+        // refusal killed them outright — by definition they are only ever
+        // clickable while is_start holds. `dispatch_command` owns the list of
+        // commands that stand alone; this door must not shadow it. (#388, #389)
+        use crate::app::Message;
+        use crate::modules::ModuleEvent;
+
+        // Fresh app = welcome tab, no drawing.
+        let mut app = OpenCADStudio::new_for_test();
+        assert!(
+            app.tabs[app.active_tab].is_start,
+            "test needs the welcome tab"
+        );
+
+        // ABOUT is safe to drive: it opens a modal. DONATE / WEBVERSION / REPORT
+        // take the same path but shell out to a browser, so they are covered by
+        // the allowlist assertion below rather than by dispatching them here.
+        let start = app.command_line.history.len();
+        let _ = app.update(Message::RibbonToolClick {
+            tool_id: "ABOUT".to_string(),
+            event: ModuleEvent::Command("ABOUT".to_string()),
+        });
+        let out: String = app.command_line.history[start..]
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !out.contains("No drawing open"),
+            "ABOUT needs no drawing and must not be refused on the welcome page: {out:?}"
+        );
+
+        // …but a tool that does need a drawing is still turned away (#299).
+        let start = app.command_line.history.len();
+        let _ = app.update(Message::RibbonToolClick {
+            tool_id: "LINE".to_string(),
+            event: ModuleEvent::Command("LINE".to_string()),
+        });
+        let out: String = app.command_line.history[start..]
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            out.contains("No drawing open"),
+            "LINE must still be refused on the welcome page: {out:?}"
+        );
+        assert!(
+            app.tabs[app.active_tab].active_cmd.is_none(),
+            "LINE must not have started"
+        );
+
+        // A non-command tool event touches the scene, so it stays inert too.
+        let start = app.command_line.history.len();
+        let _ = app.update(Message::RibbonToolClick {
+            tool_id: "LAYERS".to_string(),
+            event: ModuleEvent::ToggleLayers,
+        });
+        let out: String = app.command_line.history[start..]
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            out.contains("No drawing open"),
+            "a scene-touching event must stay inert on the welcome page: {out:?}"
+        );
+
+        // Every welcome-page button must also clear dispatch's own gate, or the
+        // fix above just moves the refusal one door down. Asserted on the source
+        // rather than by dispatching: DONATE / REPORT / WEBVERSION shell out to
+        // a real browser, which a test must not do.
+        let dispatch_src = include_str!("commands/mod.rs");
+        let gate = dispatch_src
+            .split("is_start")
+            .nth(1)
+            .and_then(|s| s.split('{').next())
+            .expect("the is_start gate moved — re-point this test");
+        // DONATE/REPORT/WEBVERSION are the welcome page's own buttons; the rest
+        // are ribbon tools that configure the application, not a drawing.
+        let standalone = [
+            "DONATE",
+            "REPORT",
+            "WEBVERSION",
+            "ABOUT",
+            "CHANGELOG",
+            "CUI",
+            "ALIASEDIT",
+        ];
+        for cmd in standalone {
+            assert!(
+                gate.contains(&format!("\"{cmd}\"")),
+                "{cmd} needs no drawing but is missing from dispatch's standalone \
+                 list, so it is refused on the welcome page"
+            );
+        }
+        // …and each must actually have somewhere to land.
+        let view_src = include_str!("commands/view.rs");
+        for cmd in standalone {
+            assert!(
+                view_src.contains(&format!("\"{cmd}\" =>"))
+                    || view_src.contains(&format!("\"{cmd}\" |")),
+                "{cmd} has no dispatch arm"
+            );
+        }
+    }
+
+    #[test]
+    fn matchprop_matches_text_style_and_height() {
+        // MATCHPROP between text objects must carry the text-specific
+        // properties (style, height) to TEXT and MTEXT destinations, not just
+        // the generic layer/color/linetype set. Regression for #361.
+        use crate::command::StepInput;
+        use acadrust::{EntityType, MText, Text};
+
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+
+        let mut src = Text::new();
+        src.value = "SRC".into();
+        src.height = 5.0;
+        src.style = "BIG".into();
+        let src_h = app.tabs[i].scene.add_entity(EntityType::Text(src));
+
+        let mut dst_text = Text::new();
+        dst_text.value = "DST".into();
+        dst_text.height = 1.0;
+        let dst_text_h = app.tabs[i].scene.add_entity(EntityType::Text(dst_text));
+
+        let mut dst_mtext = MText::new();
+        dst_mtext.value = "DSTM".into();
+        dst_mtext.height = 2.0;
+        let dst_mtext_h = app.tabs[i].scene.add_entity(EntityType::MText(dst_mtext));
+
+        // Drive the interactive command exactly as the viewport does:
+        // phase 1 source pick, phase 2 destination selection.
+        let _ = app.run_command_line("MATCHPROP");
+        assert!(app.tabs[i].active_cmd.is_some(), "MATCHPROP must start");
+        let _ = app.feed_command(StepInput::EntityPick(src_h, glam::DVec3::ZERO));
+        let _ = app.feed_command(StepInput::SelectionComplete(vec![
+            dst_text_h,
+            dst_mtext_h,
+        ]));
+
+        let doc = &app.tabs[i].scene.document;
+        match doc.get_entity(dst_text_h) {
+            Some(EntityType::Text(t)) => {
+                assert_eq!(t.style, "BIG", "TEXT destination must take source style");
+                assert!(
+                    (t.height - 5.0).abs() < 1e-9,
+                    "TEXT destination must take source height, got {}",
+                    t.height
+                );
+            }
+            other => panic!("dest TEXT missing: {other:?}"),
+        }
+        match doc.get_entity(dst_mtext_h) {
+            Some(EntityType::MText(m)) => {
+                assert_eq!(m.style, "BIG", "MTEXT destination must take source style");
+                assert!(
+                    (m.height - 5.0).abs() < 1e-9,
+                    "MTEXT destination must take source height, got {}",
+                    m.height
+                );
+            }
+            other => panic!("dest MTEXT missing: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exportpdf_with_explicit_path_writes_pdf_without_dialog() {
+        // EXPORTPDF <path> must export straight to the given file — no save
+        // dialog — and confirm on the command line. This is the dialog-free
+        // export path added for #369 (Export to PDF silently did nothing when
+        // the native save dialog could not open).
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        app.automation_op(r#"{"op":"run","cmd":"LINE 0,0 100,50"}"#);
+
+        let path = std::env::temp_dir().join(format!("ocs_test_369_{}.pdf", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let start = app.command_line.history.len();
+        let _ = app.run_command_line(&format!("EXPORTPDF {}", path.display()));
+        let out: String = app.command_line.history[start..]
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(out.contains("Exported"), "no export confirmation: {out:?}");
+
+        let bytes = std::fs::read(&path).expect("EXPORTPDF <path> should write the file");
+        assert!(bytes.starts_with(b"%PDF"), "output is not a PDF");
+        assert!(bytes.len() > 200, "suspiciously small PDF: {}", bytes.len());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cancelled_pdf_save_dialog_reports_on_command_line() {
+        // The save dialog resolving to None (cancelled, or it never opened —
+        // e.g. a broken XDG portal) must leave a visible message, not silence.
+        // Regression for #369.
+        use crate::app::Message;
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        for msg in [Message::PlotExportPath(None), Message::PlotWindowExportPath(None)] {
+            let start = app.command_line.history.len();
+            let _ = app.update(msg);
+            let out: String = app.command_line.history[start..]
+                .iter()
+                .map(|e| e.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                out.contains("EXPORTPDF"),
+                "dialog-None must mention the EXPORTPDF fallback: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn handing_over_an_already_open_drawing_switches_to_its_tab() {
+        // Double-clicking a drawing that is already open should land on the tab
+        // showing it, not load a second copy of the same file.
+        use crate::app::Message;
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+
+        let path = std::env::temp_dir().join("ocs_already_open.dwg");
+        std::fs::write(&path, b"x").unwrap();
+        let canon = std::fs::canonicalize(&path).unwrap();
+
+        // Two tabs, the second holding the drawing; leave the first active.
+        app.tabs
+            .push(crate::app::document::DocumentTab::new_drawing(99));
+        let target = app.tabs.len() - 1;
+        app.tabs[target].current_path = Some(canon.clone());
+        app.active_tab = 0;
+
+        let _ = app.update(Message::OpenExternal(canon.clone()));
+        assert_eq!(app.active_tab, target, "should have switched to the tab");
+        assert!(
+            app.opening.is_none(),
+            "an already-open drawing must not start a load"
+        );
+        assert!(app.pending_opens.is_empty(), "and must not queue one either");
+
+        // The same file spelled differently (a `..` hop) is still the same file.
+        let indirect = canon.parent().unwrap().join("..").join(
+            canon
+                .strip_prefix(canon.parent().unwrap().parent().unwrap())
+                .unwrap(),
+        );
+        app.active_tab = 0;
+        let _ = app.update(Message::OpenExternal(indirect));
+        assert_eq!(
+            app.active_tab, target,
+            "an unresolved spelling of the same path must still match the tab"
+        );
+        assert!(app.opening.is_none(), "still no second load");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_second_handoff_queues_instead_of_displacing_the_first() {
+        // `opening` is one slot, and `on_file_opened` drops any result that
+        // arrives once it is clear — so without the queue, two drawings handed
+        // over at the same moment (select several files in a file manager: one
+        // process each, all arriving together) would leave one tab and silently
+        // lose the rest.
+        use crate::app::Message;
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+
+        // Any existing file will do: OpenRecent only stats it, and the actual
+        // load is an async Task this test drops.
+        let dir = std::env::temp_dir();
+        let (a, b) = (dir.join("ocs_si_a.dwg"), dir.join("ocs_si_b.dwg"));
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"x").unwrap();
+
+        let _ = app.update(Message::OpenExternal(a.clone()));
+        assert!(
+            app.opening.is_some(),
+            "first handoff should start an open, not queue"
+        );
+        assert!(app.pending_opens.is_empty(), "nothing to queue yet");
+
+        let _ = app.update(Message::OpenExternal(b.clone()));
+        assert_eq!(
+            app.pending_opens.len(),
+            1,
+            "second handoff arriving mid-open must queue, not be dropped"
+        );
+        assert_eq!(app.pending_opens.front(), Some(&b));
+
+        // A drawing that fails to parse must still release the queue behind it.
+        let _ = app.update(Message::FileOpened(Err("boom".into())));
+        assert!(
+            app.pending_opens.is_empty(),
+            "a failed open must drain the queue, not strand it"
+        );
+
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
     fn save_then_open_round_trips() {
         let mut app = OpenCADStudio::new_for_test();
         let path = std::env::temp_dir().join("ocs_automation_test.dxf");

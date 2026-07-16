@@ -10,6 +10,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::io::Read as _;
+use std::path::{Path, PathBuf};
 
 use super::external;
 use super::external::RegistryEntry;
@@ -196,20 +197,172 @@ pub fn install(release: &Release) -> Result<String, String> {
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     let bytes = download_bytes(&lib.url)?;
-    // Clean upgrade / reinstall: drop any previously-installed native library
-    // with a different name so the loader doesn't pick a stale one. The
-    // currently-resident library (if loaded) keeps running until restart.
-    let ext = external_lib_ext();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        for old in rd.flatten() {
-            let p = old.path();
-            let is_lib = p.extension().and_then(|s| s.to_str()) == Some(ext);
-            if is_lib && p.file_name().and_then(|s| s.to_str()) != Some(lib.name.as_str()) {
+    replace_library(&dir, &lib.name, external_lib_ext(), &bytes)?;
+    std::fs::write(dir.join("plugin.toml"), toml_text).map_err(|e| e.to_string())?;
+    Ok(manifest.id)
+}
+
+/// Install `bytes` as the package's native library at `dir/lib_name`, upgrading
+/// in place even when the previous version is currently loaded.
+///
+/// A loaded `cdylib` is memory-mapped by its runner process, so on Windows its
+/// file cannot be truncated or removed — a plain overwrite fails with "being
+/// used by another process". It *can*, however, be renamed (the loader opens it
+/// with `FILE_SHARE_DELETE`). So we move every existing library in the package
+/// aside to a `.old` stash and then write the new one under its own name. The
+/// stash keeps serving the running session; the loader picks up the freshly
+/// written library on the next start. Stale stashes are swept here on the next
+/// upgrade, once the process holding them has exited and released the lock.
+///
+/// This also subsumes the old "drop differently-named libraries" cleanup:
+/// stashing every resident `.<ext>` file means neither a same-named nor a
+/// legacy-named binary is left behind for the loader to pick up.
+fn replace_library(dir: &Path, lib_name: &str, ext: &str, bytes: &[u8]) -> Result<(), String> {
+    // Sweep stashes left by previous upgrades. A still-locked one (its session
+    // is somehow still alive) just fails to remove and is retried next time.
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) == Some("old") {
                 let _ = std::fs::remove_file(&p);
             }
         }
     }
-    std::fs::write(dir.join(&lib.name), bytes).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("plugin.toml"), toml_text).map_err(|e| e.to_string())?;
-    Ok(manifest.id)
+    // Move every resident library out of the way so a loaded (locked) binary
+    // doesn't block the write, whatever its filename.
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) == Some(ext) {
+                stash_aside(&p);
+            }
+        }
+    }
+    std::fs::write(dir.join(lib_name), bytes).map_err(|e| e.to_string())
+}
+
+/// Rename a resident (possibly loaded, hence locked) library out of the way so
+/// a new one can take its place. Stashes are named `<lib>.<n>.old` — the `.old`
+/// extension keeps them clear of the loader's `.<ext>` scan, and the numeric
+/// slot lets several in-session upgrades coexist without colliding. Best-effort:
+/// rename works on a loaded DLL; if it can't, fall back to a direct remove, and
+/// if that fails too the caller's write surfaces the real lock error.
+fn stash_aside(path: &Path) {
+    for n in 0..64 {
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(".{n}.old"));
+        let stash = PathBuf::from(name);
+        // Reuse a slot only if we can clear whatever occupies it.
+        if stash.exists() && std::fs::remove_file(&stash).is_err() {
+            continue;
+        }
+        if std::fs::rename(path, &stash).is_ok() {
+            return;
+        }
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ocs_mkt_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Happy path: the new library lands under its name, the old one is stashed,
+    /// and a second upgrade sweeps the (now-unlocked) stash instead of piling up.
+    #[test]
+    fn replace_library_swaps_and_sweeps() {
+        let dir = scratch("swap");
+        let lib = "opencad.demo-x86_64.dll";
+        std::fs::write(dir.join(lib), b"V1").unwrap();
+
+        replace_library(&dir, lib, "dll", b"V2").unwrap();
+        assert_eq!(std::fs::read(dir.join(lib)).unwrap(), b"V2");
+        let stashes = |d: &Path| {
+            std::fs::read_dir(d)
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("old"))
+                .collect::<Vec<_>>()
+        };
+        let s = stashes(&dir);
+        assert_eq!(s.len(), 1, "exactly one stash after first upgrade");
+        assert_eq!(
+            std::fs::read(&s[0]).unwrap(),
+            b"V1",
+            "stash holds the old lib"
+        );
+
+        replace_library(&dir, lib, "dll", b"V3").unwrap();
+        assert_eq!(std::fs::read(dir.join(lib)).unwrap(), b"V3");
+        assert_eq!(
+            stashes(&dir).len(),
+            1,
+            "second upgrade sweeps the old stash, doesn't accumulate",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A differently-named legacy library is stashed aside too, so the loader
+    /// won't find a stale `.<ext>` beside the new one.
+    #[test]
+    fn replace_library_clears_legacy_named_lib() {
+        let dir = scratch("legacy");
+        std::fs::write(dir.join("old_name_plugin.dll"), b"LEGACY").unwrap();
+        replace_library(&dir, "new.name-x86_64.dll", "dll", b"NEW").unwrap();
+
+        let live_libs: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("dll"))
+            .collect();
+        assert_eq!(live_libs.len(), 1, "only the new lib carries the .dll ext");
+        assert!(live_libs[0].ends_with("new.name-x86_64.dll"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reported bug, reproduced faithfully: a currently-loaded DLL is held
+    /// open the way the Windows loader holds it (`FILE_SHARE_READ | DELETE`, no
+    /// write share). A plain overwrite fails — that's the lock the user hit —
+    /// yet `replace_library` upgrades in place anyway.
+    #[cfg(windows)]
+    #[test]
+    fn replace_library_upgrades_a_locked_binary() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_SHARE_DELETE: u32 = 0x4;
+
+        let dir = scratch("locked");
+        let lib = "opencad.landsurvey-windows-x86_64.dll";
+        let path = dir.join(lib);
+        std::fs::write(&path, b"RESIDENT").unwrap();
+
+        // Simulate the loaded DLL: the loader's handle shares read+delete but
+        // not write, exactly like a memory-mapped image section.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+            .open(&path)
+            .unwrap();
+
+        assert!(
+            std::fs::write(&path, b"UPGRADE").is_err(),
+            "precondition: a locked binary can't be overwritten in place",
+        );
+
+        replace_library(&dir, lib, "dll", b"UPGRADE").expect("upgrade under lock");
+        assert_eq!(std::fs::read(&path).unwrap(), b"UPGRADE");
+
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

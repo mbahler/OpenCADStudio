@@ -179,6 +179,33 @@ impl Scene {
                     })
                     .collect();
 
+                // SDF glyph quads ride `text_verts` in absolute WCS, so they need
+                // the same projection the points get — a bare clone leaves the
+                // text at model (UTM) coordinates while its own dimension lines
+                // move to the sheet, putting the glyphs kilometres off the page
+                // (issue #385 for layout plots). Cull per glyph on the quad's
+                // centroid: the text analogue of `clip_polyline_to_rect`, since a
+                // glyph can't be split at the viewport border.
+                let mut projected_text = if wire.text_verts.is_empty() {
+                    Vec::new()
+                } else {
+                    model::wire_model::map_text_verts(&wire.text_verts, |x, y, z| {
+                        let p = proj_abs(x, y, z);
+                        (p[0] as f64, p[1] as f64, p[2] as f64)
+                    })
+                    .chunks_exact(6)
+                    .filter(|quad| {
+                        let (sx, sy) = quad.iter().fold((0.0f32, 0.0f32), |(ax, ay), v| {
+                            (ax + v.pos[0] + v.pos_low[0], ay + v.pos[1] + v.pos_low[1])
+                        });
+                        let (cx, cy) = (sx / 6.0, sy / 6.0);
+                        cx.is_finite() && cy.is_finite() && in_vp(cx, cy)
+                    })
+                    .flatten()
+                    .copied()
+                    .collect::<Vec<_>>()
+                };
+
                 // Fast AABB pre-reject.
                 let any_near = projected_pts.iter().any(|&[x, y, _]| {
                     x.is_finite()
@@ -202,13 +229,16 @@ impl Scene {
                     );
                 let aabb_hits =
                     max_x >= vp_x0 && min_x <= vp_x1 && max_y >= vp_y0 && min_y <= vp_y1;
-                if !any_near && !aabb_hits {
+                // A text-only wire (TEXT / MTEXT carry no stroke `points` since
+                // text went SDF-only) has nothing to pre-reject on, so gate both
+                // rejections on the glyphs too or it never reaches the sheet.
+                if !any_near && !aabb_hits && projected_text.is_empty() {
                     continue;
                 }
 
                 let clipped =
                     clip_polyline_to_rect(&projected_pts, vp_x0, vp_y0, vp_x1, vp_y1, pcz);
-                if clipped.is_empty() {
+                if clipped.is_empty() && projected_text.is_empty() {
                     continue;
                 }
 
@@ -225,6 +255,17 @@ impl Scene {
                     pmny = pmny.min(y);
                     pmxx = pmxx.max(x);
                     pmxy = pmxy.max(y);
+                }
+                // Glyphs count towards the paper AABB as well — a text-only wire
+                // would otherwise stay UNBOUNDED and never pick.
+                for v in &projected_text {
+                    let (x, y) = (v.pos[0] + v.pos_low[0], v.pos[1] + v.pos_low[1]);
+                    if x.is_finite() && y.is_finite() {
+                        pmnx = pmnx.min(x);
+                        pmny = pmny.min(y);
+                        pmxx = pmxx.max(x);
+                        pmxy = pmxy.max(y);
+                    }
                 }
 
                 // Project snap points + key vertices into the same paper frame,
@@ -252,8 +293,16 @@ impl Scene {
 
                 let adapted = view::render::adapt_to_bg(wire.color, self.paper_bg_color);
                 let [r, g, b, a] = adapted;
+                // Glyphs carry their own per-vertex colour, so dim them through
+                // the same adapt + 0.80/0.85 the wire colour below gets, or the
+                // text reads brighter than its own dimension lines.
+                for v in &mut projected_text {
+                    let [tr, tg, tb, ta] = view::render::adapt_to_bg(v.color, self.paper_bg_color);
+                    v.color = [tr * 0.80, tg * 0.80, tb * 0.80, ta * 0.85];
+                }
                 let mut out = wire.clone();
                 out.points = clipped;
+                out.text_verts = projected_text;
                 // Paper coordinates are small sheet units — no relative-to-eye
                 // residual is needed, and keeping the model wire's points_low
                 // here would add a model-scale offset to the paper points.

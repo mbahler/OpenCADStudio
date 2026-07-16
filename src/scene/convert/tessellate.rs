@@ -68,6 +68,52 @@ fn points_to_ds(
     (high, low)
 }
 
+/// Lift a WireModel built in a local frame (a fixed f64 origin subtracted) back
+/// to absolute world coordinates, re-splitting every position — polyline points
+/// and SDF glyph vertices — into double-single so it stays precise at UTM scale.
+/// The MLINE complex-linetype path uses this because `apply_along` lays out its
+/// dashes and glyphs in f32, which would otherwise quantise fine spacing far
+/// from the origin.
+fn shift_wire_to_world(w: &mut WireModel, origin: [f64; 3]) {
+    if !w.points.is_empty() {
+        let mut hi = Vec::with_capacity(w.points.len());
+        let mut lo = Vec::with_capacity(w.points.len());
+        for p in &w.points {
+            if p[0].is_nan() {
+                hi.push([f32::NAN; 3]);
+                lo.push([0.0; 3]);
+                continue;
+            }
+            let (h, l) = split_ds_xyz(
+                p[0] as f64 + origin[0],
+                p[1] as f64 + origin[1],
+                p[2] as f64 + origin[2],
+            );
+            hi.push(h);
+            lo.push(l);
+        }
+        w.points = hi;
+        w.points_low = lo;
+    }
+    for tv in &mut w.text_verts {
+        let (h, l) = split_ds_xyz(
+            tv.pos[0] as f64 + tv.pos_low[0] as f64 + origin[0],
+            tv.pos[1] as f64 + tv.pos_low[1] as f64 + origin[1],
+            tv.pos[2] as f64 + tv.pos_low[2] as f64 + origin[2],
+        );
+        tv.pos = h;
+        tv.pos_low = l;
+    }
+    if w.aabb != WireModel::UNBOUNDED_AABB {
+        w.aabb = [
+            w.aabb[0] + origin[0] as f32,
+            w.aabb[1] + origin[1] as f32,
+            w.aabb[2] + origin[0] as f32,
+            w.aabb[3] + origin[1] as f32,
+        ];
+    }
+}
+
 // ── Public entry points ────────────────────────────────────────────────────
 
 /// Tessellate one entity into a WireModel.
@@ -137,6 +183,172 @@ pub fn tessellate(
             line_weight_px,
             anno_scale,
         )];
+    }
+
+    // MLINE emits one WireModel per style element so each parallel line keeps
+    // its own colour and linetype — a red Continuous line under a yellow dashed
+    // line reads as the two-tone multiline the style defines. Handled here, like
+    // Leader, because the single-colour truck `Lines` path can't carry
+    // per-element colour.
+    if let EntityType::MLine(m) = entity {
+        let lines = crate::entities::mline::mline_lines(m, document);
+        if lines.is_empty() {
+            return vec![];
+        }
+        let lt_scale =
+            document.header.linetype_scale as f32 * m.common.linetype_scale as f32;
+        let snap_pts: Vec<(glam::DVec3, SnapHint)> = m
+            .vertices
+            .iter()
+            .map(|v| {
+                (
+                    glam::DVec3::new(v.position.x, v.position.y, v.position.z),
+                    SnapHint::Node,
+                )
+            })
+            .collect();
+        let key_vertices: Vec<[f64; 3]> = m
+            .vertices
+            .iter()
+            .map(|v| [v.position.x, v.position.y, v.position.z])
+            .collect();
+
+        // Local-frame origin (mline start) for the CPU-dashed / glyph-laid
+        // elements. `apply_along` walks positions in f32, which quantises fine
+        // spacing — dash gaps AND inter-glyph advance — at UTM coordinates
+        // (the low half of the double-single is dropped). Subtracting this f64
+        // origin first keeps the walk near zero and precise; the result is
+        // shifted back to absolute double-single afterwards. Mirrors the
+        // Tolerance frame, which also builds geometry locally and applies its
+        // f64 origin later.
+        let origin = [
+            m.vertices[0].position.x,
+            m.vertices[0].position.y,
+            m.vertices[0].position.z,
+        ];
+        let mut out: Vec<WireModel> = Vec::with_capacity(lines.len());
+        let mut snap_attached = false;
+        for l in lines {
+            if l.points.is_empty() {
+                continue;
+            }
+            // Element colour: ByLayer / ByBlock inherit the entity's resolved
+            // colour; an explicit ACI / true-colour is used as-is.
+            let wcolor = if selected {
+                WireModel::SELECTED
+            } else {
+                match l.color {
+                    AcadColor::ByLayer | AcadColor::ByBlock => entity_color,
+                    other => {
+                        let [r, g, b, _] =
+                            crate::scene::convert::tess_util::aci_to_rgba(&other);
+                        [r, g, b, entity_color[3]]
+                    }
+                }
+            };
+            let aci = match l.color {
+                AcadColor::Index(i) => i,
+                _ => 0,
+            };
+
+            // Every dashed element is CPU-dashed by `apply_along` (not the GPU
+            // pattern) so all parallel lines walk the polyline with the *same*
+            // arithmetic and stay in phase — otherwise a shader-dashed line and an
+            // apply_along-dashed sibling drift apart at large (UTM) coordinates and
+            // one line's dash lands in the other's gap, striking through embedded
+            // text. Document definition wins over the bundled catalog; a
+            // continuous element yields `None` and falls to the solid path below.
+            // Selection forces a plain solid highlight, so skip dashing then.
+            let clt = if selected {
+                None
+            } else {
+                crate::io::linetypes::document_lt_segments(document, &l.linetype)
+                    .or_else(|| crate::io::linetypes::complex_lt(&l.linetype).cloned())
+            };
+
+            let mut elem_wires: Vec<WireModel> = if let Some(clt) = clt {
+                // Walk the dash / glyph layout in a local frame so the f32 math
+                // stays precise, then lift each wire back to world DS.
+                let local: Vec<[f32; 3]> = l
+                    .points
+                    .iter()
+                    .map(|p| {
+                        [
+                            (p[0] - origin[0]) as f32,
+                            (p[1] - origin[1]) as f32,
+                            (p[2] - origin[2]) as f32,
+                        ]
+                    })
+                    .collect();
+                let mut w = crate::scene::text::complex_lt::apply_along(
+                    &name,
+                    &local,
+                    &clt,
+                    lt_scale.max(1e-4),
+                    wcolor,
+                    selected,
+                    line_weight_px,
+                );
+                for wm in &mut w {
+                    wm.aci = aci;
+                    shift_wire_to_world(wm, origin);
+                }
+                w
+            } else {
+                Vec::new()
+            };
+
+            // Simple path: the linetype isn't complex, or `apply_along` bailed
+            // (pattern blow-up guard) and returned nothing — draw the element as a
+            // dashed / solid polyline so it is never lost.
+            if elem_wires.is_empty() {
+                let (pts, pts_low) = points_to_ds(l.points);
+                let (pattern_length, pattern) = if selected {
+                    (0.0, [0.0; 8])
+                } else {
+                    crate::scene::view::render::resolve_pattern(
+                        &document.line_types,
+                        &l.linetype,
+                        lt_scale,
+                    )
+                };
+                elem_wires.push(WireModel {
+                    text_verts: Vec::new(),
+                    name: name.clone(),
+                    points: pts,
+                    points_low: pts_low,
+                    color: wcolor,
+                    selected,
+                    pattern_length,
+                    pattern,
+                    line_weight_px,
+                    snap_pts: Vec::new(),
+                    tangent_geoms: Vec::new(),
+                    aci,
+                    key_vertices: Vec::new(),
+                    aabb: WireModel::UNBOUNDED_AABB,
+                    plinegen: false,
+                    vp_scissor: None,
+                    fill_tris: Vec::new(),
+                    fill_tris_low: Vec::new(),
+                });
+            }
+
+            // Snap / key vertices ride the first emitted wire only (they describe
+            // the whole entity, not one element).
+            if !snap_attached {
+                if let Some(w0) = elem_wires.first_mut() {
+                    w0.snap_pts = snap_pts.clone();
+                    w0.key_vertices = key_vertices.clone();
+                    snap_attached = true;
+                }
+            }
+            out.append(&mut elem_wires);
+        }
+        if out.is_empty() {
+            return vec![];
+        }
+        return out;
     }
 
     // ── Try the truck path first ───────────────────────────────────────────

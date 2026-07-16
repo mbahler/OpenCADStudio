@@ -383,7 +383,7 @@ fn emit_wire_instances(wire: &WireModel, color: [f32; 4], draw_depth: f32) -> Ve
 /// Native: emit slim per-segment instances (positions + distances + `wire_id`)
 /// plus the one `WireConst` record every segment of this wire shares.
 #[cfg(not(target_arch = "wasm32"))]
-fn emit_wire_native(
+pub(crate) fn emit_wire_native(
     wire: &WireModel,
     wire_id: u32,
     color: [f32; 4],
@@ -432,7 +432,10 @@ fn emit_wire_native(
 /// Looks up a wire's draw-order depth from the per-entity map using the
 /// handle encoded in its `name`. Falls back to 0.0 (transient / preview
 /// wires that carry no document handle).
-fn wire_draw_depth(wire: &WireModel, depth_map: &rustc_hash::FxHashMap<u64, f32>) -> f32 {
+pub(crate) fn wire_draw_depth(
+    wire: &WireModel,
+    depth_map: &rustc_hash::FxHashMap<u64, f32>,
+) -> f32 {
     wire
         .name
         .parse::<u64>()

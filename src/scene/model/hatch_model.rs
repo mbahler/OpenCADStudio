@@ -96,26 +96,30 @@ impl HatchModel {
     /// `paper_canvas`, print preview) can draw the actual pattern instead
     /// of just the outline.
     ///
-    /// Coordinate frame: each emitted segment is in the same
-    /// boundary-relative WCS that callers already use, i.e. `world_origin +
-    /// boundary[i]`. Solid / gradient hatches return an empty vec —
-    /// callers fall back to their solid-fill path.
-    pub fn pattern_segments(&self) -> Vec<[[f32; 2]; 2]> {
+    /// Coordinate frame: each emitted segment is absolute WCS in f64, i.e.
+    /// `world_origin + boundary[i]` resolved. Solid / gradient hatches return an
+    /// empty vec — callers fall back to their solid-fill path.
+    ///
+    /// The whole rasterisation is f64 because the pattern is anchored at world
+    /// (0, 0): a hatch at UTM sits ~5e5 away from that anchor, so the line index
+    /// `k` runs to ~1e7 and `origin + k · step` in f32 quantises the family lines
+    /// into visible garbage, as does the `edge − line` cancellation below.
+    pub fn pattern_segments(&self) -> Vec<[[f64; 2]; 2]> {
         let HatchPattern::Pattern(families) = &self.pattern else {
             return Vec::new();
         };
         if self.boundary.is_empty() || families.is_empty() {
             return Vec::new();
         }
-        let ox = self.world_origin[0] as f32;
-        let oy = self.world_origin[1] as f32;
+        let ox = self.world_origin[0];
+        let oy = self.world_origin[1];
 
         // ── Build edge list from boundary, splitting on NaN sentinels.
         //    Each sub-path is closed (last → first edge) so even-odd
         //    inside-tests work for islands / holes.
-        let mut edges: Vec<([f32; 2], [f32; 2])> = Vec::new();
-        let mut sub_start: Option<[f32; 2]> = None;
-        let mut prev: Option<[f32; 2]> = None;
+        let mut edges: Vec<([f64; 2], [f64; 2])> = Vec::new();
+        let mut sub_start: Option<[f64; 2]> = None;
+        let mut prev: Option<[f64; 2]> = None;
         for &[bx, by] in self.boundary.iter() {
             if bx.is_nan() || by.is_nan() {
                 if let (Some(s), Some(p)) = (sub_start, prev) {
@@ -127,7 +131,7 @@ impl HatchModel {
                 prev = None;
                 continue;
             }
-            let pt = [bx + ox, by + oy];
+            let pt = [bx as f64 + ox, by as f64 + oy];
             match (sub_start, prev) {
                 (None, _) => {
                     sub_start = Some(pt);
@@ -150,10 +154,10 @@ impl HatchModel {
         }
 
         // ── AABB of the boundary in world coords.
-        let mut min_x = f32::INFINITY;
-        let mut max_x = f32::NEG_INFINITY;
-        let mut min_y = f32::INFINITY;
-        let mut max_y = f32::NEG_INFINITY;
+        let mut min_x = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
         for &(a, b) in &edges {
             for [x, y] in [a, b] {
                 min_x = min_x.min(x);
@@ -163,25 +167,29 @@ impl HatchModel {
             }
         }
 
-        let scale = self.scale.max(1e-6);
-        let angle_offset = self.angle_offset;
-        let mut segments: Vec<[[f32; 2]; 2]> = Vec::new();
+        let scale = self.scale.max(1e-6) as f64;
+        let angle_offset = self.angle_offset as f64;
+        let mut segments: Vec<[[f64; 2]; 2]> = Vec::new();
 
         // Hard cap to keep pathological patterns / huge boundaries bounded.
-        const MAX_LINES_PER_FAMILY: i32 = 4096;
+        // `k` is i64: at UTM with a fine spacing the index legitimately reaches
+        // ~1e7 and an out-of-range `as i32` saturates silently, collapsing the
+        // range to a bogus run of lines from i32::MIN.
+        const MAX_LINES_PER_FAMILY: i64 = 4096;
         const MAX_SEGMENTS_TOTAL: usize = 200_000;
 
         let cos_off = angle_offset.cos();
         let sin_off = angle_offset.sin();
         for family in families {
-            let angle = family.angle_deg.to_radians() + angle_offset;
+            let angle = (family.angle_deg as f64).to_radians() + angle_offset;
             let cos_a = angle.cos();
             let sin_a = angle.sin();
             // PAT local frame: dx = along-line phase, dy = perpendicular
             // spacing. Lines step in world by k · (dx, dy)_local rotated
             // into the family's frame.
-            let step_x = (family.dx * cos_a - family.dy * sin_a) * scale;
-            let step_y = (family.dx * sin_a + family.dy * cos_a) * scale;
+            let (fdx, fdy) = (family.dx as f64, family.dy as f64);
+            let step_x = (fdx * cos_a - fdy * sin_a) * scale;
+            let step_y = (fdx * sin_a + fdy * cos_a) * scale;
             let perp_x = -sin_a;
             let perp_y = cos_a;
             let step_perp = step_x * perp_x + step_y * perp_y;
@@ -195,12 +203,13 @@ impl HatchModel {
             // same convention as the GPU shader, so PAT patterns whose
             // `x0/y0` are non-zero (e.g. brick offsets) line up with the
             // on-screen render.
+            let (fx0, fy0) = (family.x0 as f64, family.y0 as f64);
             let origin = [
-                (family.x0 * cos_off - family.y0 * sin_off) * scale,
-                (family.x0 * sin_off + family.y0 * cos_off) * scale,
+                (fx0 * cos_off - fy0 * sin_off) * scale,
+                (fx0 * sin_off + fy0 * cos_off) * scale,
             ];
-            let mut p_min = f32::INFINITY;
-            let mut p_max = f32::NEG_INFINITY;
+            let mut p_min = f64::INFINITY;
+            let mut p_max = f64::NEG_INFINITY;
             for &[cx, cy] in &[
                 [min_x, min_y],
                 [max_x, min_y],
@@ -211,8 +220,8 @@ impl HatchModel {
                 p_min = p_min.min(p);
                 p_max = p_max.max(p);
             }
-            let mut k_lo = (p_min / step_perp).floor() as i32 - 1;
-            let mut k_hi = (p_max / step_perp).ceil() as i32 + 1;
+            let mut k_lo = (p_min / step_perp).floor() as i64 - 1;
+            let mut k_hi = (p_max / step_perp).ceil() as i64 + 1;
             if k_lo > k_hi {
                 std::mem::swap(&mut k_lo, &mut k_hi);
             }
@@ -226,21 +235,21 @@ impl HatchModel {
                 k_hi = k_lo.saturating_add(MAX_LINES_PER_FAMILY);
             }
 
-            let period: f32 = family.dashes.iter().map(|d| d.abs()).sum::<f32>() * scale;
+            let period: f64 = family.dashes.iter().map(|d| d.abs() as f64).sum::<f64>() * scale;
             let has_dashes = !family.dashes.is_empty() && period > 1e-6;
 
             for k in k_lo..=k_hi {
                 if segments.len() >= MAX_SEGMENTS_TOTAL {
                     return segments;
                 }
-                let kf = k as f32;
+                let kf = k as f64;
                 let lx = origin[0] + kf * step_x;
                 let ly = origin[1] + kf * step_y;
 
                 // Intersect line P(t) = L + t·(cos_a, sin_a) against each
                 // boundary edge; collect t-values where the edge actually
                 // crosses (s ∈ [0,1]).
-                let mut ts: Vec<f32> = Vec::with_capacity(8);
+                let mut ts: Vec<f64> = Vec::with_capacity(8);
                 for &(a, b) in &edges {
                     let ex = b[0] - a[0];
                     let ey = b[1] - a[1];
@@ -285,7 +294,7 @@ impl HatchModel {
                         // a dot — rendered as a short mark so dot patterns
                         // (e.g. DOTS) are visible instead of drawing nothing.
                         let n = family.dashes.len();
-                        let dot_len = (period * 0.06).max(1e-3);
+                        let dot_len: f64 = (period * 0.06).max(1e-3);
                         let phase = t0.rem_euclid(period);
                         // Start at the period boundary at or before t0; the
                         // span clip below drops anything before t0.
@@ -294,7 +303,7 @@ impl HatchModel {
                         let max_iters = (((t1 - t0) / period).ceil() as usize + 2) * n + 8;
                         let mut iters = 0usize;
                         while seg_t < t1 && iters < max_iters {
-                            let d = family.dashes[idx];
+                            let d = family.dashes[idx] as f64;
                             let dl = d.abs() * scale;
                             if d > 0.0 {
                                 let a = seg_t.max(t0);

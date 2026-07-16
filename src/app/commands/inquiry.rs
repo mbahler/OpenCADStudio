@@ -55,10 +55,13 @@ impl OpenCADStudio {
 
             // CAL / QUICKCALC <expression> — evaluate an arithmetic expression
             //   (+ - * /, parentheses, unary minus, decimals).
-            cmd if cmd == "CAL"
-                || cmd == "QUICKCALC"
-                || cmd == "QC"
-                || cmd.starts_with("CAL ")
+            "CAL" | "QUICKCALC" | "QC" => {
+                use crate::command::ValuePromptCommand;
+                let c = ValuePromptCommand::new("CAL", "CAL  expression  (e.g. (2+3)*4):");
+                self.command_line.push_info(&c.prompt());
+                self.tabs[self.active_tab].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("CAL ")
                 || cmd.starts_with("QUICKCALC ")
                 || cmd.starts_with("QC ") =>
             {
@@ -875,7 +878,17 @@ impl OpenCADStudio {
             }
 
             // ── COUNT — entity statistics ─────────────────────────────────────
-            cmd if cmd == "COUNT" || cmd.starts_with("COUNT ") => {
+            "COUNT" => {
+                use crate::command::KeywordCommand;
+                let c = KeywordCommand::new(
+                    "COUNT",
+                    "COUNT  tally  [All (by type) / by Layer]:",
+                    vec![("All", "TYPE", None), ("By layer", "LAYER", None)],
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[self.active_tab].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("COUNT ") => {
                 let filter = cmd.split_once(' ').map(|(_, r)| r.trim().to_uppercase());
                 let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
                 for e in self.tabs[i].scene.document.entities() {
@@ -912,11 +925,25 @@ impl OpenCADStudio {
             // FIND <search>              — list all Text/MText/Dimension containing <search>
             // FIND <search> REPLACE <rep> — replace first occurrence (case-insensitive)
             // FINDALL <search> REPLACE <rep> — replace all occurrences
-            cmd if cmd == "FIND"
-                || cmd.starts_with("FIND ")
-                || cmd == "FINDALL"
-                || cmd.starts_with("FINDALL ") =>
-            {
+            "FIND" => {
+                use crate::command::ValuePromptCommand;
+                let c = ValuePromptCommand::new(
+                    "FIND",
+                    "FIND  text to find  (add REPLACE <text> by typing):",
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[self.active_tab].active_cmd = Some(Box::new(c));
+            }
+            "FINDALL" => {
+                use crate::command::ValuePromptCommand;
+                let c = ValuePromptCommand::new(
+                    "FINDALL",
+                    "FINDALL  text to find  (add REPLACE <text> by typing):",
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[self.active_tab].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("FIND ") || cmd.starts_with("FINDALL ") => {
                 let all_mode = cmd.starts_with("FINDALL");
                 let rest = cmd.split_once(' ').map(|(_, r)| r.trim()).unwrap_or("");
 

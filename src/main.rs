@@ -100,6 +100,29 @@ fn main() -> iced::Result {
             std::process::exit(code);
         }
 
+        // Single instance: a double-clicked drawing belongs as a tab in the
+        // editor that is already open, not in a second copy of the app.
+        //
+        // The gate is POSITIONAL, and that is the point: every headless mode
+        // has already returned above — the plugin runner, which is this same
+        // binary re-spawning itself, most of all. A flag list here would rot
+        // the first time a mode is added; a position cannot.
+        if !args.new_instance {
+            if let io::single_instance::Claim::Existing(stream) = io::single_instance::claim() {
+                // Only bare files forward. `--read-only` / `--script` / `--new`
+                // configure the whole editor rather than a tab, so they always
+                // get a process of their own.
+                let plain_open =
+                    !args.read_only && args.script.is_none() && !args.new && !args.files.is_empty();
+                if plain_open && io::single_instance::handoff(stream, &args.files) {
+                    return Ok(());
+                }
+                // Nothing to forward, or the far end never acknowledged: fall
+                // through and boot our own window. We hold no listener, so the
+                // editor that owns the port keeps serving.
+            }
+        }
+
         // GUI: stash the startup config for `app::boot` to pick up.
         let script_lines = args
             .script
@@ -118,7 +141,7 @@ fn main() -> iced::Result {
             })
             .unwrap_or_default();
         let _ = cli::GUI_CONFIG.set(cli::GuiConfig {
-            file: if args.new { None } else { args.file },
+            files: if args.new { Vec::new() } else { args.files },
             new: args.new,
             read_only: args.read_only,
             script_lines,

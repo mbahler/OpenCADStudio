@@ -72,6 +72,9 @@ fn expand_block_mtext(
         None,
         false,
         [0.0, 0.0, 0.0, 1.0],
+        // Annotation scale: 1.0 = no annotative scaling, matching the
+        // `BlockCache::build(&doc, 1.0, ...)` call above.
+        1.0,
     )
     .expect("block defn is cached")
 }

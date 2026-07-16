@@ -75,7 +75,13 @@ impl OpenCADStudio {
             }
 
             // LAYDEL <name> — delete a layer and erase the objects on it.
-            cmd if cmd == "LAYDEL" || cmd.starts_with("LAYDEL ") => {
+            "LAYDEL" => {
+                use crate::command::ValuePromptCommand;
+                let c = ValuePromptCommand::new("LAYDEL", "LAYDEL  layer to delete:");
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("LAYDEL ") => {
                 let name = cmd.trim_start_matches("LAYDEL").trim();
                 if name.is_empty() {
                     self.command_line.push_info("Usage: LAYDEL <layer name>");
@@ -127,7 +133,17 @@ impl OpenCADStudio {
 
             // LAYMRG <source> <target> — move every object from <source> onto
             // <target>, then delete the emptied <source> layer.
-            cmd if cmd == "LAYMRG" || cmd.starts_with("LAYMRG ") => {
+            "LAYMRG" => {
+                use crate::command::TwoValuePromptCommand;
+                let c = TwoValuePromptCommand::new(
+                    "LAYMRG",
+                    "LAYMRG  source layer (merged away):",
+                    "LAYMRG  target layer (kept):",
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("LAYMRG ") => {
                 let rest = cmd.trim_start_matches("LAYMRG").trim();
                 let parts: Vec<&str> = rest.split_whitespace().collect();
                 if parts.len() != 2 {
@@ -191,10 +207,22 @@ impl OpenCADStudio {
             // LAYERSTATE — save / restore named snapshots of all layer states
             // (on/off, freeze, lock, colour, linetype, lineweight).
             // LAYERSTATE SAVE <name> | RESTORE <name> | DELETE <name> | ? (list)
-            cmd if cmd == "LAYERSTATE"
-                || cmd == "LAS"
-                || cmd == "LMAN"
-                || cmd.starts_with("LAYERSTATE ")
+            "LAYERSTATE" | "LAS" | "LMAN" => {
+                use crate::command::KeywordCommand;
+                let c = KeywordCommand::new(
+                    "LAYERSTATE",
+                    "LAYERSTATE  [List / Save / Restore / Delete]:",
+                    vec![
+                        ("List", "LIST", None),
+                        ("Save", "SAVE", Some("LAYERSTATE SAVE  new state name:")),
+                        ("Restore", "RESTORE", Some("LAYERSTATE RESTORE  state name:")),
+                        ("Delete", "DELETE", Some("LAYERSTATE DELETE  state name:")),
+                    ],
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("LAYERSTATE ")
                 || cmd.starts_with("LAS ")
                 || cmd.starts_with("LMAN ") =>
             {

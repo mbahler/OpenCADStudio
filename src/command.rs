@@ -130,6 +130,641 @@ impl CadCommand for ValuePromptCommand {
     }
 }
 
+/// Interactive front-end for RENAME. Prompts for the object type (as clickable
+/// buttons), then the current name, then the new name, and delegates to the
+/// inline `RENAME <type> <old> <new>` handler via [`CmdResult::Dispatch`] — the
+/// rename logic stays in one place while the command prompts step by step like
+/// every other command instead of only working with all three arguments typed
+/// on one line.
+pub struct RenameCommand {
+    step: RenameStep,
+}
+
+enum RenameStep {
+    Type,
+    Old { ty: String },
+    New { ty: String, old: String },
+}
+
+impl RenameCommand {
+    /// `(button label, keyword)` for the object types the inline handler can
+    /// actually rename. BLOCK is intentionally omitted — the inline handler
+    /// does not implement it, so offering the button would do nothing.
+    const TYPES: [(&'static str, &'static str); 6] = [
+        ("Layer", "LAYER"),
+        ("Text style", "STYLE"),
+        ("Dim style", "DIMSTYLE"),
+        ("Linetype", "LINETYPE"),
+        ("UCS", "UCS"),
+        ("View", "VIEW"),
+    ];
+
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self {
+            step: RenameStep::Type,
+        }
+    }
+}
+
+impl CadCommand for RenameCommand {
+    fn name(&self) -> &'static str {
+        "RENAME"
+    }
+
+    fn prompt(&self) -> String {
+        match &self.step {
+            RenameStep::Type => "RENAME  Select the object type to rename:".to_string(),
+            RenameStep::Old { ty } => format!("RENAME {ty}  Enter the current name:"),
+            RenameStep::New { ty, old } => format!("RENAME {ty}  Rename \"{old}\" to:"),
+        }
+    }
+
+    fn options(&self) -> Vec<CmdOption> {
+        match self.step {
+            RenameStep::Type => Self::TYPES
+                .iter()
+                .map(|(label, keyword)| CmdOption::new(label, keyword))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn wants_text_input(&self) -> bool {
+        true
+    }
+
+    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        let t = text.trim();
+        if t.is_empty() {
+            // Keep prompting for the current step.
+            return None;
+        }
+        match &self.step {
+            RenameStep::Type => {
+                // Accept a known type (or a common alias); re-prompt otherwise so
+                // a typo doesn't advance to a rename that can't happen.
+                let canonical = match t.to_uppercase().as_str() {
+                    "LAYER" | "LA" => "LAYER",
+                    "STYLE" | "TEXTSTYLE" | "ST" => "STYLE",
+                    "DIMSTYLE" | "D" => "DIMSTYLE",
+                    "LINETYPE" | "LT" => "LINETYPE",
+                    "UCS" => "UCS",
+                    "VIEW" | "V" => "VIEW",
+                    _ => return None,
+                };
+                self.step = RenameStep::Old {
+                    ty: canonical.to_string(),
+                };
+                None
+            }
+            RenameStep::Old { ty } => {
+                self.step = RenameStep::New {
+                    ty: ty.clone(),
+                    old: t.to_string(),
+                };
+                None
+            }
+            RenameStep::New { ty, old } => {
+                Some(CmdResult::Dispatch(format!("RENAME {ty} {old} {t}")))
+            }
+        }
+    }
+
+    fn on_point(&mut self, _pt: DVec3) -> CmdResult {
+        // A rename takes no point; ignore stray clicks and keep prompting.
+        CmdResult::NeedPoint
+    }
+
+    fn on_enter(&mut self) -> CmdResult {
+        // Bare Enter with nothing typed cancels, like the other prompt commands.
+        CmdResult::Cancel
+    }
+}
+
+/// Interactive front-end for USERI / USERR — the five integer / real user
+/// registers in the drawing header. They take two inputs (which register, then
+/// the value), so they prompt for the register as clickable `1`–`5` buttons and
+/// then the value, and delegate to the inline `USERI <n> <value>` handler.
+pub struct UserRegCommand {
+    /// `"USERI"` or `"USERR"`.
+    name: &'static str,
+    /// Chosen register 1–5 once the first step is answered.
+    slot: Option<u8>,
+}
+
+impl UserRegCommand {
+    pub fn new(name: &'static str) -> Self {
+        Self { name, slot: None }
+    }
+}
+
+impl CadCommand for UserRegCommand {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn prompt(&self) -> String {
+        match self.slot {
+            None => format!("{}  which register?  [1-5]:", self.name),
+            Some(n) => format!("{}{n}  new value:", self.name),
+        }
+    }
+
+    fn options(&self) -> Vec<CmdOption> {
+        match self.slot {
+            None => (1..=5).map(|n| CmdOption::new(&n.to_string(), &n.to_string())).collect(),
+            Some(_) => Vec::new(),
+        }
+    }
+
+    fn wants_text_input(&self) -> bool {
+        true
+    }
+
+    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        let t = text.trim();
+        if t.is_empty() {
+            return None;
+        }
+        match self.slot {
+            None => {
+                // Accept a register 1–5; re-prompt on anything else.
+                match t.parse::<u8>() {
+                    Ok(n @ 1..=5) => {
+                        self.slot = Some(n);
+                        None
+                    }
+                    _ => None,
+                }
+            }
+            // The inline handler validates the value (int vs real) and reports
+            // usage if it doesn't parse, so just hand the whole line over.
+            Some(n) => Some(CmdResult::Dispatch(format!("{} {n} {t}", self.name))),
+        }
+    }
+
+    fn on_point(&mut self, _pt: DVec3) -> CmdResult {
+        CmdResult::NeedPoint
+    }
+
+    fn on_enter(&mut self) -> CmdResult {
+        CmdResult::Cancel
+    }
+}
+
+/// Generic interactive front-end for a keyword sub-verb command (ATTDISP,
+/// LAYERSTATE, SCALELISTEDIT, VIEW…). Bare `<name>` enters this command, which
+/// shows the sub-verbs as clickable buttons; picking one either dispatches
+/// `<name> <keyword>` straight away (an action verb) or, when the verb needs an
+/// argument, prompts for it and then dispatches `<name> <keyword> <value>`.
+/// Delegates to the existing inline `<name> …` handler so the logic stays in
+/// one place, the way [`ValuePromptCommand`] does for single values.
+pub struct KeywordCommand {
+    name: &'static str,
+    prompt: &'static str,
+    /// `(button label, keyword, value prompt)`. A `Some` value prompt means the
+    /// verb takes one argument collected in a second step; `None` acts alone.
+    options: Vec<(&'static str, &'static str, Option<&'static str>)>,
+    /// Set once a value-taking verb is chosen: `(keyword, value prompt)`.
+    pending: Option<(&'static str, &'static str)>,
+}
+
+impl KeywordCommand {
+    pub fn new(
+        name: &'static str,
+        prompt: &'static str,
+        options: Vec<(&'static str, &'static str, Option<&'static str>)>,
+    ) -> Self {
+        Self {
+            name,
+            prompt,
+            options,
+            pending: None,
+        }
+    }
+}
+
+impl CadCommand for KeywordCommand {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn prompt(&self) -> String {
+        match self.pending {
+            Some((_, value_prompt)) => value_prompt.to_string(),
+            None => self.prompt.to_string(),
+        }
+    }
+
+    fn options(&self) -> Vec<CmdOption> {
+        match self.pending {
+            Some(_) => Vec::new(),
+            None => self
+                .options
+                .iter()
+                .map(|(label, keyword, _)| CmdOption::new(label, keyword))
+                .collect(),
+        }
+    }
+
+    fn wants_text_input(&self) -> bool {
+        true
+    }
+
+    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        let t = text.trim();
+        if t.is_empty() {
+            return None;
+        }
+        match self.pending {
+            // Second step: the argument for the already-chosen verb.
+            Some((keyword, _)) => Some(CmdResult::Dispatch(format!("{} {keyword} {t}", self.name))),
+            // First step: match the typed / clicked token to a sub-verb.
+            None => {
+                let up = t.to_uppercase();
+                let Some((_, keyword, value_prompt)) =
+                    self.options.iter().find(|(_, k, _)| k.eq_ignore_ascii_case(&up))
+                else {
+                    // Unknown verb — keep prompting rather than dispatch garbage.
+                    return None;
+                };
+                match value_prompt {
+                    Some(vp) => {
+                        self.pending = Some((keyword, vp));
+                        None
+                    }
+                    None => Some(CmdResult::Dispatch(format!("{} {keyword}", self.name))),
+                }
+            }
+        }
+    }
+
+    fn on_point(&mut self, _pt: DVec3) -> CmdResult {
+        CmdResult::NeedPoint
+    }
+
+    fn on_enter(&mut self) -> CmdResult {
+        CmdResult::Cancel
+    }
+}
+
+/// Generic interactive front-end for a two-argument command (LAYMRG source +
+/// target, SETVAR variable + value…). Prompts for the two values in turn and
+/// dispatches `<name> <first> <second>` to the existing inline handler. A bare
+/// Enter on the second value dispatches `<name> <first>` (no second token) so a
+/// getter-style command (SETVAR reading a variable) still works.
+pub struct TwoValuePromptCommand {
+    name: &'static str,
+    prompt1: &'static str,
+    prompt2: &'static str,
+    first: Option<String>,
+}
+
+impl TwoValuePromptCommand {
+    pub fn new(name: &'static str, prompt1: &'static str, prompt2: &'static str) -> Self {
+        Self {
+            name,
+            prompt1,
+            prompt2,
+            first: None,
+        }
+    }
+}
+
+impl CadCommand for TwoValuePromptCommand {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn prompt(&self) -> String {
+        match &self.first {
+            None => self.prompt1.to_string(),
+            Some(_) => self.prompt2.to_string(),
+        }
+    }
+
+    fn wants_text_input(&self) -> bool {
+        true
+    }
+
+    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        let t = text.trim();
+        match &self.first {
+            None => {
+                if t.is_empty() {
+                    return None;
+                }
+                self.first = Some(t.to_string());
+                None
+            }
+            Some(first) => Some(CmdResult::Dispatch(if t.is_empty() {
+                format!("{} {first}", self.name)
+            } else {
+                format!("{} {first} {t}", self.name)
+            })),
+        }
+    }
+
+    fn on_point(&mut self, _pt: DVec3) -> CmdResult {
+        CmdResult::NeedPoint
+    }
+
+    fn on_enter(&mut self) -> CmdResult {
+        match &self.first {
+            // Enter on the second step with nothing typed = report / no-op form.
+            Some(first) => CmdResult::Dispatch(format!("{} {first}", self.name)),
+            None => CmdResult::Cancel,
+        }
+    }
+}
+
+/// Generic interactive front-end for a keyword command that operates on the
+/// current selection (CHPROP, ADJUST, XDATA, UNDERLAY, DRAWORDER…). If nothing
+/// is selected when it starts it first gathers a selection (Enter confirms),
+/// then shows the sub-verbs as buttons exactly like [`KeywordCommand`] and
+/// dispatches `<name> <verb> [value]` to the inline handler, which reads the
+/// (still-selected) set. Verbs the generic form can't express — a second value
+/// (XDATA SET) or a reference pick (DRAWORDER ABOVE) — stay available by typing
+/// the full argument line.
+pub struct SelectThenKeywordCommand {
+    name: &'static str,
+    prompt: &'static str,
+    options: Vec<(&'static str, &'static str, Option<&'static str>)>,
+    gathering: bool,
+    selected: Vec<Handle>,
+    pending: Option<(&'static str, &'static str)>,
+}
+
+impl SelectThenKeywordCommand {
+    pub fn new(
+        name: &'static str,
+        prompt: &'static str,
+        options: Vec<(&'static str, &'static str, Option<&'static str>)>,
+        has_selection: bool,
+    ) -> Self {
+        Self {
+            name,
+            prompt,
+            options,
+            gathering: !has_selection,
+            selected: Vec::new(),
+            pending: None,
+        }
+    }
+}
+
+impl CadCommand for SelectThenKeywordCommand {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn prompt(&self) -> String {
+        if self.gathering {
+            return format!("{}  select objects, then press Enter:", self.name);
+        }
+        match self.pending {
+            Some((_, value_prompt)) => value_prompt.to_string(),
+            None => self.prompt.to_string(),
+        }
+    }
+
+    fn options(&self) -> Vec<CmdOption> {
+        if self.gathering || self.pending.is_some() {
+            return Vec::new();
+        }
+        self.options
+            .iter()
+            .map(|(label, keyword, _)| CmdOption::new(label, keyword))
+            .collect()
+    }
+
+    fn wants_text_input(&self) -> bool {
+        !self.gathering
+    }
+
+    fn is_selection_gathering(&self) -> bool {
+        self.gathering
+    }
+
+    fn on_selection_complete(&mut self, handles: Vec<Handle>) -> CmdResult {
+        // The normal selection system has set the scene selection; remember the
+        // set so Enter knows whether anything was picked, and keep gathering.
+        self.selected = handles;
+        CmdResult::NeedPoint
+    }
+
+    fn on_enter(&mut self) -> CmdResult {
+        if self.gathering {
+            if self.selected.is_empty() {
+                return CmdResult::Cancel;
+            }
+            self.gathering = false;
+            return CmdResult::NeedPoint;
+        }
+        CmdResult::Cancel
+    }
+
+    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        let t = text.trim();
+        if t.is_empty() {
+            return None;
+        }
+        match self.pending {
+            Some((keyword, _)) => Some(CmdResult::Dispatch(format!("{} {keyword} {t}", self.name))),
+            None => {
+                let up = t.to_uppercase();
+                let Some((_, keyword, value_prompt)) =
+                    self.options.iter().find(|(_, k, _)| k.eq_ignore_ascii_case(&up))
+                else {
+                    return None;
+                };
+                match value_prompt {
+                    Some(vp) => {
+                        self.pending = Some((keyword, vp));
+                        None
+                    }
+                    None => Some(CmdResult::Dispatch(format!("{} {keyword}", self.name))),
+                }
+            }
+        }
+    }
+
+    fn on_point(&mut self, _pt: DVec3) -> CmdResult {
+        CmdResult::NeedPoint
+    }
+}
+
+/// Generic interactive front-end for a single-value command that operates on
+/// the current selection (HYPERLINK url, ARCTEXT text, TEXTFIT width, TCASE
+/// aside…). Gathers a selection first when none is set (Enter confirms), then
+/// prompts for one value and dispatches `<name> <value>` to the inline handler,
+/// which reads the still-selected set. A bare Enter on the value step dispatches
+/// `<name>` alone — for commands whose value is optional (TCOUNT, TEXTMASK).
+pub struct SelectThenValueCommand {
+    name: &'static str,
+    value_prompt: &'static str,
+    gathering: bool,
+    selected: Vec<Handle>,
+}
+
+impl SelectThenValueCommand {
+    pub fn new(name: &'static str, value_prompt: &'static str, has_selection: bool) -> Self {
+        Self {
+            name,
+            value_prompt,
+            gathering: !has_selection,
+            selected: Vec::new(),
+        }
+    }
+}
+
+impl CadCommand for SelectThenValueCommand {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn prompt(&self) -> String {
+        if self.gathering {
+            format!("{}  select objects, then press Enter:", self.name)
+        } else {
+            self.value_prompt.to_string()
+        }
+    }
+
+    fn wants_text_input(&self) -> bool {
+        !self.gathering
+    }
+
+    fn is_selection_gathering(&self) -> bool {
+        self.gathering
+    }
+
+    fn on_selection_complete(&mut self, handles: Vec<Handle>) -> CmdResult {
+        self.selected = handles;
+        CmdResult::NeedPoint
+    }
+
+    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        if self.gathering {
+            return None;
+        }
+        let t = text.trim();
+        if t.is_empty() {
+            return None;
+        }
+        Some(CmdResult::Dispatch(format!("{} {t}", self.name)))
+    }
+
+    fn on_point(&mut self, _pt: DVec3) -> CmdResult {
+        CmdResult::NeedPoint
+    }
+
+    fn on_enter(&mut self) -> CmdResult {
+        if self.gathering {
+            if self.selected.is_empty() {
+                return CmdResult::Cancel;
+            }
+            self.gathering = false;
+            return CmdResult::NeedPoint;
+        }
+        // Value step, nothing typed: the no-argument form (optional value).
+        CmdResult::Dispatch(format!("{} ", self.name))
+    }
+}
+
+/// Generic front-end for a two-value command that operates on the current
+/// selection (POLYSOLID width + height on a selected polyline). Gathers a
+/// selection first when none is set, prompts for two values, and dispatches
+/// `<name> <first> <second>` to the inline handler.
+pub struct SelectThenTwoValueCommand {
+    name: &'static str,
+    prompt1: &'static str,
+    prompt2: &'static str,
+    gathering: bool,
+    selected: Vec<Handle>,
+    first: Option<String>,
+}
+
+impl SelectThenTwoValueCommand {
+    pub fn new(
+        name: &'static str,
+        prompt1: &'static str,
+        prompt2: &'static str,
+        has_selection: bool,
+    ) -> Self {
+        Self {
+            name,
+            prompt1,
+            prompt2,
+            gathering: !has_selection,
+            selected: Vec::new(),
+            first: None,
+        }
+    }
+}
+
+impl CadCommand for SelectThenTwoValueCommand {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn prompt(&self) -> String {
+        if self.gathering {
+            format!("{}  select objects, then press Enter:", self.name)
+        } else if self.first.is_none() {
+            self.prompt1.to_string()
+        } else {
+            self.prompt2.to_string()
+        }
+    }
+
+    fn wants_text_input(&self) -> bool {
+        !self.gathering
+    }
+
+    fn is_selection_gathering(&self) -> bool {
+        self.gathering
+    }
+
+    fn on_selection_complete(&mut self, handles: Vec<Handle>) -> CmdResult {
+        self.selected = handles;
+        CmdResult::NeedPoint
+    }
+
+    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        if self.gathering {
+            return None;
+        }
+        let t = text.trim();
+        if t.is_empty() {
+            return None;
+        }
+        match &self.first {
+            None => {
+                self.first = Some(t.to_string());
+                None
+            }
+            Some(first) => Some(CmdResult::Dispatch(format!("{} {first} {t}", self.name))),
+        }
+    }
+
+    fn on_point(&mut self, _pt: DVec3) -> CmdResult {
+        CmdResult::NeedPoint
+    }
+
+    fn on_enter(&mut self) -> CmdResult {
+        if self.gathering {
+            if self.selected.is_empty() {
+                return CmdResult::Cancel;
+            }
+            self.gathering = false;
+            return CmdResult::NeedPoint;
+        }
+        CmdResult::Cancel
+    }
+}
+
 // ── Result token ──────────────────────────────────────────────────────────
 
 /// Returned by every `CadCommand` method to tell main.rs what to do.

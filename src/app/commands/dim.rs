@@ -56,7 +56,26 @@ impl OpenCADStudio {
 
             // JUSTIFYTEXT <option> — change the justification of selected text and
             // multiline-text objects.
-            cmd if cmd == "JUSTIFYTEXT" || cmd.starts_with("JUSTIFYTEXT ") => {
+            "JUSTIFYTEXT" => {
+                use crate::command::SelectThenKeywordCommand;
+                let has_sel = !self.tabs[i].scene.selected_entities().is_empty();
+                let c = SelectThenKeywordCommand::new(
+                    "JUSTIFYTEXT",
+                    "JUSTIFYTEXT  [Left / Center / Right / Middle / Aligned / Fit]:",
+                    vec![
+                        ("Left", "LEFT", None),
+                        ("Center", "CENTER", None),
+                        ("Right", "RIGHT", None),
+                        ("Middle", "MIDDLE", None),
+                        ("Aligned", "ALIGN", None),
+                        ("Fit", "FIT", None),
+                    ],
+                    has_sel,
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("JUSTIFYTEXT ") => {
                 let opt = cmd.split_whitespace().nth(1).unwrap_or("").to_uppercase();
                 let handles: Vec<acadrust::Handle> = self.tabs[i]
                     .scene
@@ -157,7 +176,24 @@ impl OpenCADStudio {
 
             // TCASE <Upper|Lower|Sentence|Title> — change the case of the text in
             // selected text and multiline-text objects.
-            cmd if cmd == "TCASE" || cmd.starts_with("TCASE ") => {
+            "TCASE" => {
+                use crate::command::SelectThenKeywordCommand;
+                let has_sel = !self.tabs[i].scene.selected_entities().is_empty();
+                let c = SelectThenKeywordCommand::new(
+                    "TCASE",
+                    "TCASE  [Upper / Lower / Sentence / Title]:",
+                    vec![
+                        ("Upper", "UPPER", None),
+                        ("Lower", "LOWER", None),
+                        ("Sentence", "SENTENCE", None),
+                        ("Title", "TITLE", None),
+                    ],
+                    has_sel,
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("TCASE ") => {
                 let opt = cmd.split_whitespace().nth(1).unwrap_or("").to_uppercase();
                 let handles: Vec<acadrust::Handle> = self.tabs[i]
                     .scene
@@ -226,7 +262,18 @@ impl OpenCADStudio {
             // extent and bring the text in front, so the mask hides whatever is
             // underneath while the text stays readable. (Same world-XY coordinate
             // space the WIPEOUT command uses.)
-            cmd if cmd == "TEXTMASK" || cmd.starts_with("TEXTMASK ") => {
+            "TEXTMASK" => {
+                use crate::command::SelectThenValueCommand;
+                let has_sel = !self.tabs[i].scene.selected_entities().is_empty();
+                let c = SelectThenValueCommand::new(
+                    "TEXTMASK",
+                    "TEXTMASK  press Enter to mask the selected text:",
+                    has_sel,
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("TEXTMASK ") => {
                 let handles: Vec<acadrust::Handle> = self.tabs[i]
                     .scene
                     .selected_entities()
@@ -289,7 +336,15 @@ impl OpenCADStudio {
             // (text width fit)
             // TEXTFIT <width> — adjust the width factor of selected single-line
             // text so its rendered width matches the target.
-            cmd if cmd == "TEXTFIT" || cmd.starts_with("TEXTFIT ") => {
+            "TEXTFIT" => {
+                use crate::command::SelectThenValueCommand;
+                let has_sel = !self.tabs[i].scene.selected_entities().is_empty();
+                let c =
+                    SelectThenValueCommand::new("TEXTFIT", "TEXTFIT  target width:", has_sel);
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("TEXTFIT ") => {
                 let target: f64 = match cmd.split_whitespace().nth(1).and_then(|s| s.parse().ok()) {
                     Some(v) if v > 0.0 => v,
                     _ => {
@@ -351,7 +406,18 @@ impl OpenCADStudio {
             // (text sequential numbering)
             // TCOUNT [start] — prefix selected single-line text with sequential
             // numbers in reading order (top-to-bottom, then left-to-right).
-            cmd if cmd == "TCOUNT" || cmd.starts_with("TCOUNT ") => {
+            "TCOUNT" => {
+                use crate::command::SelectThenValueCommand;
+                let has_sel = !self.tabs[i].scene.selected_entities().is_empty();
+                let c = SelectThenValueCommand::new(
+                    "TCOUNT",
+                    "TCOUNT  starting number (Enter for 1):",
+                    has_sel,
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("TCOUNT ") => {
                 let start: i64 = cmd
                     .split_whitespace()
                     .nth(1)
@@ -997,7 +1063,18 @@ impl OpenCADStudio {
 
             // ARCTEXT <text> — lay the text out as one Text entity per character
             // along the selected arc, each rotated to follow the tangent.
-            cmd if cmd == "ARCTEXT" || cmd.starts_with("ARCTEXT ") => {
+            "ARCTEXT" => {
+                use crate::command::SelectThenValueCommand;
+                let has_sel = !self.tabs[i].scene.selected_entities().is_empty();
+                let c = SelectThenValueCommand::new(
+                    "ARCTEXT",
+                    "ARCTEXT  text to place along the arc:",
+                    has_sel,
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("ARCTEXT ") => {
                 use acadrust::entities::Text;
                 use acadrust::types::Vector3;
                 let text = cmd.strip_prefix("ARCTEXT").unwrap_or("").trim().to_string();

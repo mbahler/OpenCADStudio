@@ -324,7 +324,13 @@ impl OpenCADStudio {
             // block's current attribute definitions: drop attributes whose tag
             // no longer exists and add any newly-defined ones (keeping the values
             // of attributes that remain).
-            cmd if cmd == "ATTSYNC" || cmd.starts_with("ATTSYNC ") => {
+            "ATTSYNC" => {
+                use crate::command::ValuePromptCommand;
+                let c = ValuePromptCommand::new("ATTSYNC", "ATTSYNC  block name to sync:");
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("ATTSYNC ") => {
                 let arg = cmd.trim_start_matches("ATTSYNC").trim();
                 let blocks = self.tabs[i].scene.custom_block_names();
                 if arg.is_empty() {

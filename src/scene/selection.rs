@@ -329,27 +329,38 @@ impl Scene {
     // ── Erase ─────────────────────────────────────────────────────────────
 
     pub fn erase_entities(&mut self, handles: &[Handle]) {
+        let mut erased: Vec<(Handle, ChangeKind)> = Vec::new();
         for &h in handles {
             // Objects on a locked layer can't be erased.
             if self.is_layer_locked(h) {
                 continue;
+            }
+            // Delta-undo: capture the removed entity so an undo can re-insert it.
+            if self.is_recording_undo() {
+                let before = self.document.get_entity(h).cloned();
+                self.record_undo_before(h, before);
             }
             self.document.remove_entity(h);
             self.selected.remove(&h);
             self.hatches.remove(&h);
             self.meshes.remove(&h);
             self.solid_models.remove(&h);
-            self.mark_entity_dirty(h);
+            erased.push((h, ChangeKind::Removed));
         }
         // Remove erased handles from all groups; delete groups that become empty.
         let group_dict_handle = self.document.header.acad_group_dict_handle;
+        let mut groups_changed = false;
         let to_remove: Vec<Handle> = self
             .document
             .objects
             .values_mut()
             .filter_map(|obj| match obj {
                 ObjectType::Group(g) => {
+                    let before = g.entities.len();
                     g.entities.retain(|h| !handles.contains(h));
+                    if g.entities.len() != before {
+                        groups_changed = true;
+                    }
                     if g.entities.is_empty() {
                         Some(g.handle)
                     } else {
@@ -359,6 +370,11 @@ impl Scene {
                 _ => None,
             })
             .collect();
+        // Delta-undo: editing a group (or deleting an emptied one) mutates
+        // document.objects — non-entity state a pure-entity delta can't restore.
+        if groups_changed {
+            self.poison_undo_recording();
+        }
         for gh in &to_remove {
             if let Some(ObjectType::Dictionary(dict)) =
                 self.document.objects.get_mut(&group_dict_handle)
@@ -367,8 +383,10 @@ impl Scene {
             }
             self.document.objects.remove(gh);
         }
-        // Deleting top-level entities/inserts leaves block definitions intact;
-        // the erased handles were already dropped from the memo above.
-        self.bump_geometry_no_blocks();
+        // Deleting top-level entities/inserts leaves block definitions intact.
+        // Report the exact erased handles so derived caches drop just those and
+        // the resident set removes only their wires (bump_entities drops them
+        // from the tessellation memos too).
+        self.bump_entities(&erased);
     }
 }

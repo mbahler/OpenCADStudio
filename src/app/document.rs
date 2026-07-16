@@ -8,7 +8,7 @@ use crate::scene::Scene;
 use crate::snap::SnapResult;
 use crate::ui::{LayerPanel, PropertiesPanel};
 use acadrust::tables::Ucs;
-use acadrust::{CadDocument, Handle};
+use acadrust::{CadDocument, EntityType, Handle};
 use iced;
 use std::any::Any;
 use std::collections::HashMap;
@@ -472,12 +472,51 @@ impl DocumentTab {
     }
 }
 
+/// One undo/redo entry. Most edits touch the whole drawing's state and store a
+/// [`FullSnapshot`] (a document clone); frequent entity-only edits (move / copy /
+/// draw / erase) instead store a cheap [`DeltaSnapshot`] naming just the entities
+/// they changed, so an 800k-entity drawing doesn't pay a ~46 ms document clone
+/// per edit.
 #[derive(Clone)]
-pub(super) struct HistorySnapshot {
+pub(super) enum HistorySnapshot {
+    Full(FullSnapshot),
+    Delta(DeltaSnapshot),
+}
+
+impl HistorySnapshot {
+    pub(super) fn label(&self) -> &str {
+        match self {
+            HistorySnapshot::Full(f) => &f.label,
+            HistorySnapshot::Delta(d) => &d.label,
+        }
+    }
+}
+
+/// A whole-document undo entry: the safe fallback for any command that may touch
+/// layers, objects, block records, styles or tables.
+#[derive(Clone)]
+pub(super) struct FullSnapshot {
     pub(super) document: CadDocument,
     pub(super) current_layout: String,
     pub(super) selected: Vec<Handle>,
     pub(super) dirty: bool,
+    pub(super) label: String,
+}
+
+/// An entity-only undo entry: for each touched handle, its before-image and
+/// after-image (`None` = the entity was absent on that side, i.e. an add or an
+/// erase). Symmetric — undo applies the before side, redo the after side — so
+/// one delta moves between the undo and redo stacks without re-capturing. The
+/// command by construction changes no layers / objects / blocks, so only the
+/// cheap scalars (`current_layout`, selection, `dirty`) ride alongside.
+#[derive(Clone)]
+pub(super) struct DeltaSnapshot {
+    pub(super) entities: Vec<(Handle, Option<EntityType>, Option<EntityType>)>,
+    pub(super) current_layout: String,
+    pub(super) selected_before: Vec<Handle>,
+    pub(super) selected_after: Vec<Handle>,
+    pub(super) dirty_before: bool,
+    pub(super) dirty_after: bool,
     pub(super) label: String,
 }
 

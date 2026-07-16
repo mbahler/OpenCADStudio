@@ -98,10 +98,26 @@ impl OpenCADStudio {
             // chosen style is reported so the mapping is explicit. (`SOLID` is
             // intentionally NOT a visual-style verb — it is the 2D filled-polygon
             // draw command; the shaded ribbon button drives `SetWireframe`.)
-            cmd if cmd == "VS"
-                || cmd == "VSCURRENT"
-                || cmd == "SHADEMODE"
-                || cmd == "HIDDENLINE"
+            "VS" | "VSCURRENT" | "SHADEMODE" => {
+                use crate::command::KeywordCommand;
+                let c = KeywordCommand::new(
+                    "VSCURRENT",
+                    "VSCURRENT  visual style  [Shaded / Wireframe / Hidden / Realistic / Conceptual / X-ray]:",
+                    vec![
+                        ("Shaded", "SHADED", None),
+                        ("Wireframe", "WIREFRAME", None),
+                        ("Hidden", "HIDDEN", None),
+                        ("Realistic", "REALISTIC", None),
+                        ("Conceptual", "CONCEPTUAL", None),
+                        ("X-Ray", "XRAY", None),
+                    ],
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            // The named visual-style shortcuts still switch directly, and the
+            // `<name> <style>` argument form (also what the picker dispatches).
+            cmd if cmd == "HIDDENLINE"
                 || cmd == "XRAY"
                 || cmd == "REALISTIC"
                 || cmd == "CONCEPTUAL"
@@ -314,11 +330,13 @@ impl OpenCADStudio {
             // SCRIPT <path> — run a command script: each non-blank, non-comment
             // line is fed through the same command path the `--script` startup
             // flag uses, so the behaviour matches headless automation exactly.
-            cmd if cmd == "SCRIPT"
-                || cmd == "SCR"
-                || cmd.starts_with("SCRIPT ")
-                || cmd.starts_with("SCR ") =>
-            {
+            "SCRIPT" | "SCR" => {
+                use crate::command::ValuePromptCommand;
+                let c = ValuePromptCommand::new("SCRIPT", "SCRIPT  path to the .scr file:");
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("SCRIPT ") || cmd.starts_with("SCR ") => {
                 let path = cmd.split_once(' ').map(|(_, r)| r.trim().to_string());
                 match path {
                     Some(p) if !p.is_empty() => match std::fs::read_to_string(&p) {

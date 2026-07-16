@@ -7,83 +7,141 @@ use crate::scene::convert::acad_to_truck::{TruckEntity, TruckObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 use crate::scene::model::wire_model::SnapHint;
 
+/// One drawn line of a multiline: the polyline for a single style element (or
+/// an end cap), tagged with the element's colour and linetype so the
+/// tessellator can colour-bin and dash each one independently.
+pub struct MLineLine {
+    pub points: Vec<[f64; 3]>,
+    pub color: acadrust::types::Color,
+    pub linetype: String,
+}
+
+/// Resolve a multiline into its per-element parallel lines in WCS.
+///
+/// Geometry comes from the referenced MLINESTYLE (element offsets, the
+/// justification shift and the entity scale) rather than a fixed ±scale/2 guess,
+/// so a custom style's offsets, colours and linetypes render the way the drawing
+/// intends. Falls back to a ±0.5 two-line layout only when no MLINESTYLE can be
+/// resolved (e.g. the style object is missing).
+pub fn mline_lines(m: &MLine, document: &acadrust::CadDocument) -> Vec<MLineLine> {
+    use acadrust::entities::{MLineFlags, MLineJustification};
+    use acadrust::objects::ObjectType;
+    use acadrust::types::Color;
+
+    if m.vertices.is_empty() {
+        return Vec::new();
+    }
+
+    // MLINESTYLE lookup: prefer the hard-pointer handle, fall back to the name.
+    let style = m
+        .style_handle
+        .and_then(|h| match document.objects.get(&h) {
+            Some(ObjectType::MLineStyle(s)) => Some(s),
+            _ => None,
+        })
+        .or_else(|| {
+            document.objects.values().find_map(|o| match o {
+                ObjectType::MLineStyle(s) if s.name.eq_ignore_ascii_case(&m.style_name) => Some(s),
+                _ => None,
+            })
+        });
+
+    // (offset, colour, linetype) per element.
+    let elems: Vec<(f64, Color, String)> = match style {
+        Some(s) if !s.elements.is_empty() => s
+            .elements
+            .iter()
+            .map(|e| (e.offset, e.color, e.linetype.clone()))
+            .collect(),
+        _ => vec![
+            (0.5, Color::ByLayer, "ByLayer".to_string()),
+            (-0.5, Color::ByLayer, "ByLayer".to_string()),
+        ],
+    };
+
+    // Justification shifts every element so the picked path runs along the top /
+    // centre / bottom element of the style.
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for (o, _, _) in &elems {
+        lo = lo.min(*o);
+        hi = hi.max(*o);
+    }
+    let shift = match m.justification {
+        MLineJustification::Top => -hi,
+        MLineJustification::Bottom => -lo,
+        MLineJustification::Zero => 0.0,
+    };
+
+    let scale = m.scale_factor;
+    let closed = m.flags.contains(MLineFlags::CLOSED);
+
+    // Offset a vertex along its miter direction by `d` drawing units.
+    let off = |vi: usize, d: f64| -> [f64; 3] {
+        let v = &m.vertices[vi];
+        [
+            v.position.x + v.miter.x * d,
+            v.position.y + v.miter.y * d,
+            v.position.z + v.miter.z * d,
+        ]
+    };
+
+    let mut out: Vec<MLineLine> = Vec::with_capacity(elems.len() + 2);
+    for (offset, color, linetype) in &elems {
+        let d = (*offset + shift) * scale;
+        let mut pts: Vec<[f64; 3]> = (0..m.vertices.len()).map(|i| off(i, d)).collect();
+        if closed && m.vertices.len() >= 2 {
+            pts.push(off(0, d));
+        }
+        out.push(MLineLine {
+            points: pts,
+            color: *color,
+            linetype: linetype.clone(),
+        });
+    }
+
+    // End caps: a segment across the full style width at the first / last vertex,
+    // drawn only when the style requests square caps, the style has width, and
+    // the multiline is open.
+    if let Some(s) = style {
+        let d_lo = (lo + shift) * scale;
+        let d_hi = (hi + shift) * scale;
+        if (d_hi - d_lo).abs() > 1e-9 && !closed {
+            let mut cap = |vi: usize| {
+                out.push(MLineLine {
+                    points: vec![off(vi, d_lo), off(vi, d_hi)],
+                    color: Color::ByLayer,
+                    linetype: "ByLayer".to_string(),
+                });
+            };
+            if s.flags.start_square_cap {
+                cap(0);
+            }
+            if s.flags.end_square_cap {
+                cap(m.vertices.len() - 1);
+            }
+        }
+    }
+
+    out
+}
+
 impl TruckConvertible for MLine {
-    fn to_truck(&self, _document: &acadrust::CadDocument) -> Option<TruckEntity> {
+    fn to_truck(&self, document: &acadrust::CadDocument) -> Option<TruckEntity> {
         if self.vertices.is_empty() {
             return None;
         }
 
-        let n = self.vertices.len();
-        let closed = self.flags.contains(acadrust::entities::MLineFlags::CLOSED);
-
-        // Spine: center line connecting all vertex positions.
-        // Also attempt to draw parallel offset lines (±scale/2 in miter direction)
-        // when scale_factor is non-zero.
-        let scale = self.scale_factor;
-
+        // NaN-separated flat list of every element line (single-colour path used
+        // by pick and the edit commands; the coloured render is built in
+        // `tessellate`, which special-cases MLINE).
+        let lines = mline_lines(self, document);
         let mut pts: Vec<[f64; 3]> = Vec::new();
-
-        // Center spine.
-        for v in &self.vertices {
-            pts.push([v.position.x, v.position.y, v.position.z]);
-        }
-        if closed && n >= 2 {
-            pts.push([
-                self.vertices[0].position.x,
-                self.vertices[0].position.y,
-                self.vertices[0].position.z,
-            ]);
-        }
-
-        // Parallel offset lines — one at +scale/2 and one at -scale/2
-        // along each vertex's miter direction.
-        if scale.abs() > 1e-6 {
-            let half = scale * 0.5;
-            for sign in [-1.0_f64, 1.0_f64] {
-                let offset = half * sign;
+        for (i, l) in lines.iter().enumerate() {
+            if i > 0 {
                 pts.push([f64::NAN; 3]);
-                for v in &self.vertices {
-                    let mx = v.miter.x;
-                    let my = v.miter.y;
-                    let mz = v.miter.z;
-                    pts.push([
-                        v.position.x + mx * offset,
-                        v.position.y + my * offset,
-                        v.position.z + mz * offset,
-                    ]);
-                }
-                if closed && n >= 2 {
-                    let v0 = &self.vertices[0];
-                    let mx = v0.miter.x;
-                    let my = v0.miter.y;
-                    let mz = v0.miter.z;
-                    pts.push([
-                        v0.position.x + mx * offset,
-                        v0.position.y + my * offset,
-                        v0.position.z + mz * offset,
-                    ]);
-                }
             }
-
-            // Start and end caps: perpendicular line connecting the two offset lines
-            // at the first and last vertex of an open MLine.
-            if !closed {
-                let cap_v = |v: &acadrust::entities::MLineVertex| {
-                    let mx = v.miter.x;
-                    let my = v.miter.y;
-                    let mz = v.miter.z;
-                    let px = v.position.x;
-                    let py = v.position.y;
-                    let pz = v.position.z;
-                    [
-                        [f64::NAN; 3],
-                        [px + mx * (-half), py + my * (-half), pz + mz * (-half)],
-                        [px + mx * half, py + my * half, pz + mz * half],
-                    ]
-                };
-                pts.extend_from_slice(&cap_v(&self.vertices[0]));
-                pts.extend_from_slice(&cap_v(&self.vertices[n - 1]));
-            }
+            pts.extend_from_slice(&l.points);
         }
 
         let key_verts: Vec<[f64; 3]> = self

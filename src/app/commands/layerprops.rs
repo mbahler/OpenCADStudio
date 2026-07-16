@@ -400,7 +400,22 @@ impl OpenCADStudio {
                 )));
             }
 
-            cmd if cmd == "VIEW" || cmd.starts_with("VIEW ") => {
+            "VIEW" => {
+                use crate::command::KeywordCommand;
+                let c = KeywordCommand::new(
+                    "VIEW",
+                    "VIEW  [List / Save / Restore / Delete]:",
+                    vec![
+                        ("List", "LIST", None),
+                        ("Save", "SAVE", Some("VIEW SAVE  new view name:")),
+                        ("Restore", "RESTORE", Some("VIEW RESTORE  view name:")),
+                        ("Delete", "DELETE", Some("VIEW DELETE  view name:")),
+                    ],
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("VIEW ") => {
                 let parts: Vec<&str> = cmd.splitn(3, ' ').collect();
                 let sub = parts.get(1).map(|s| s.to_uppercase()).unwrap_or_default();
                 match sub.as_str() {

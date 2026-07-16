@@ -32,8 +32,8 @@ pub fn export_pdf(
     _wipeouts: &[HatchModel],
     _paper_w: f64,
     _paper_h: f64,
-    _offset_x: f32,
-    _offset_y: f32,
+    _offset_x: f64,
+    _offset_y: f64,
     _rotation_deg: i32,
     _scale: f32,
     _clip: Option<(f32, f32, f32, f32)>,
@@ -47,6 +47,15 @@ pub fn export_pdf(
 pub async fn pick_pdf_path_owned(_stem: String) -> Option<std::path::PathBuf> {
     None
 }
+
+/// mm to PDF points (1 mm = 2.834645 pt).
+const MM_TO_PT: f32 = 2.834645;
+/// `wire.line_weight_px` is the on-screen pixel weight: mm × (96/25.4) × 2.0,
+/// where the ×2 is a screen-legibility boost (see render.rs). Print wants the
+/// true physical weight, so undo both the 96-dpi scaling and the boost before
+/// converting to points — otherwise weights export ~2× too heavy in pixels
+/// (and the old `× 0.35278` left them inconsistent with the physical mm).
+const LW_PX_TO_PT: f32 = MM_TO_PT / ((96.0 / 25.4) * 2.0);
 
 // ── Public entry point ────────────────────────────────────────────────────
 
@@ -63,8 +72,8 @@ pub fn export_pdf(
     wipeouts: &[HatchModel],
     paper_w: f64,
     paper_h: f64,
-    offset_x: f32,
-    offset_y: f32,
+    offset_x: f64,
+    offset_y: f64,
     rotation_deg: i32,
     scale: f32,
     clip: Option<(f32, f32, f32, f32)>,
@@ -110,8 +119,11 @@ fn build_pdf(
     wipeouts: &[HatchModel],
     paper_w: f32,
     paper_h: f32,
-    ox: f32,
-    oy: f32,
+    // Absolute-world offsets, kept in f64: at UTM the drawing sits at ~5e5/4.5e6
+    // where an f32 has ~0.03 m / ~0.5 m of resolution, so an f32 offset is itself
+    // already quantised before it can cancel the coordinate it is meant to cancel.
+    ox: f64,
+    oy: f64,
     rotation_deg: i32,
     scale: f32,
     clip: Option<(f32, f32, f32, f32)>,
@@ -171,7 +183,6 @@ fn build_pdf(
         // Clip rectangle (mm), applied in the pre-scale coordinate space so it
         // matches the wires drawn under the same CTM.
         if let Some((cx, cy, cw, ch)) = clip {
-            const MM_TO_PT: f32 = 2.834645;
             ops.push(Op::DrawPolygon {
                 polygon: Polygon {
                     rings: vec![PolygonRing {
@@ -204,14 +215,6 @@ fn build_pdf(
         }
     }
 
-    // mm to PDF points (1 mm = 2.834645 pt).
-    const MM_TO_PT: f32 = 2.834645;
-    // `wire.line_weight_px` is the on-screen pixel weight: mm × (96/25.4) × 2.0,
-    // where the ×2 is a screen-legibility boost (see render.rs). Print wants the
-    // true physical weight, so undo both the 96-dpi scaling and the boost before
-    // converting to points — otherwise weights export ~2× too heavy in pixels
-    // (and the old `× 0.35278` left them inconsistent with the physical mm).
-    const LW_PX_TO_PT: f32 = MM_TO_PT / ((96.0 / 25.4) * 2.0);
 
     // ── Hatch / wipeout fills (rendered before wires so wires draw on top,
     //    matching paper_canvas ordering). Each `emit_hatch` sets its own
@@ -306,21 +309,37 @@ fn build_pdf(
             last_dash = Some(dash_arr);
         }
 
-        // Emit segments (NaN = pen-up).
+        // Emit segments (NaN = pen-up). Points are the "high" half of a
+        // double-single pair; fold in the `points_low` residual and cancel the
+        // offset in f64 before narrowing. Dropping the residual (or narrowing
+        // first) snaps a UTM drawing onto the f32 grid — ~3 cm across, ~50 cm
+        // along northing — which is exactly the distortion the plot showed while
+        // low-coordinate drawings came out clean. The result is a sheet-mm value
+        // in single digits, so f32 is lossless from here.
         let mut segment: Vec<LinePoint> = Vec::new();
-        for &[x, y, _z] in &wire.points {
+        for (pi, &[x, y, _z]) in wire.points.iter().enumerate() {
             if x.is_nan() || y.is_nan() {
                 flush_line(&mut ops, &segment);
                 segment.clear();
             } else {
+                let lo = wire.points_low.get(pi).copied().unwrap_or([0.0; 3]);
+                let wx = (x as f64 + lo[0] as f64 + ox) as f32;
+                let wy = (y as f64 + lo[1] as f64 + oy) as f32;
                 segment.push(LinePoint {
-                    p: Point::new(Mm(x + ox), Mm(y + oy)),
+                    p: Point::new(Mm(wx), Mm(wy)),
                     bezier: false,
                 });
             }
         }
         flush_line(&mut ops, &segment);
     }
+
+    // Text (SDF glyph quads) — re-emitted as vector strokes / fills. Text now
+    // renders on-screen only as textured SDF quads (`wire.text_verts`), which
+    // this CPU exporter can't sample, so without this pass all text — including
+    // dimension text — is missing from the PDF (issue #385). Drawn after the
+    // wires (on top) and under the same rotation/scale/clip CTM.
+    emit_text(&mut ops, wires, ox, oy, scale, plot_style);
 
     if needs_state {
         ops.push(Op::RestoreGraphicsState);
@@ -377,7 +396,7 @@ fn flush_line(ops: &mut Vec<Op>, pts: &[LinePoint]) {
 /// Mirrors `scene::paper_canvas::draw_hatch`: solid → fill, pattern → outline,
 /// gradient → solid fill of the averaged colour.
 #[cfg(not(target_arch = "wasm32"))]
-fn emit_hatch(ops: &mut Vec<Op>, hatch: &HatchModel, ox: f32, oy: f32) {
+fn emit_hatch(ops: &mut Vec<Op>, hatch: &HatchModel, ox: f64, oy: f64) {
     if hatch.boundary.is_empty() {
         return;
     }
@@ -404,8 +423,11 @@ fn emit_hatch(ops: &mut Vec<Op>, hatch: &HatchModel, ox: f32, oy: f32) {
             b = 0.50;
         }
     }
-    let world_ox = hatch.world_origin[0] as f32;
-    let world_oy = hatch.world_origin[1] as f32;
+    // `boundary` holds f32 offsets from the f64 `world_origin`, so resolve the
+    // pair in f64 and only narrow once the offset has cancelled — casting
+    // `world_origin` to f32 first re-introduces the ~0.5 m UTM quantisation the
+    // boundary-relative encoding exists to avoid.
+    let (world_ox, world_oy) = (hatch.world_origin[0], hatch.world_origin[1]);
 
     // Split the boundary into rings on every NaN-NaN separator.
     let mut rings: Vec<PolygonRing> = Vec::new();
@@ -419,8 +441,10 @@ fn emit_hatch(ops: &mut Vec<Op>, hatch: &HatchModel, ox: f32, oy: f32) {
             }
             continue;
         }
+        let px = (bx as f64 + world_ox + ox) as f32;
+        let py = (by as f64 + world_oy + oy) as f32;
         current.push(LinePoint {
-            p: Point::new(Mm(bx + world_ox + ox), Mm(by + world_oy + oy)),
+            p: Point::new(Mm(px), Mm(py)),
             bezier: false,
         });
     }
@@ -468,15 +492,19 @@ fn emit_hatch(ops: &mut Vec<Op>, hatch: &HatchModel, ox: f32, oy: f32) {
             }),
         });
         for [a, b_pt] in segments {
+            // `pattern_segments` returns absolute world f64; cancel the offset
+            // before narrowing, as everywhere else in this file.
+            let (ax, ay) = ((a[0] + ox) as f32, (a[1] + oy) as f32);
+            let (bx, by) = ((b_pt[0] + ox) as f32, (b_pt[1] + oy) as f32);
             ops.push(Op::DrawLine {
                 line: Line {
                     points: vec![
                         LinePoint {
-                            p: Point::new(Mm(a[0] + ox), Mm(a[1] + oy)),
+                            p: Point::new(Mm(ax), Mm(ay)),
                             bezier: false,
                         },
                         LinePoint {
-                            p: Point::new(Mm(b_pt[0] + ox), Mm(b_pt[1] + oy)),
+                            p: Point::new(Mm(bx), Mm(by)),
                             bezier: false,
                         },
                     ],
@@ -507,6 +535,207 @@ fn emit_hatch(ops: &mut Vec<Op>, hatch: &HatchModel, ox: f32, oy: f32) {
     });
 }
 
+// ── Text (SDF glyph quads → vector strokes / fills) ────────────────────────
+
+/// Absolute world XY of a glyph vertex (double-single high + low parts folded).
+///
+/// The fold must happen in f64: the pair exists because the absolute coordinate
+/// does not fit an f32, so `pos + pos_low` evaluated in f32 rounds straight back
+/// to `pos` and throws away the residual it was carrying.
+#[cfg(not(target_arch = "wasm32"))]
+fn glyph_world_xy(v: &crate::scene::pipeline::text_gpu::TextVertex) -> [f64; 2] {
+    [
+        v.pos[0] as f64 + v.pos_low[0] as f64,
+        v.pos[1] as f64 + v.pos_low[1] as f64,
+    ]
+}
+
+/// Adapt a text colour to the white sheet, mirroring the wire/hatch passes:
+/// near-white / near-yellow (colour-7-on-white) → black, near-cyan → dark blue.
+#[cfg(not(target_arch = "wasm32"))]
+fn adapt_text_color([r, g, b]: [f32; 3]) -> [f32; 3] {
+    let is_light = r > 0.80 && g > 0.80 && b > 0.80;
+    let is_yellow = r > 0.80 && g > 0.70 && b < 0.30;
+    let is_cyan = r < 0.30 && g > 0.70 && b > 0.70;
+    if is_light || is_yellow {
+        [0.0, 0.0, 0.0]
+    } else if is_cyan {
+        [0.0, 0.15, 0.50]
+    } else {
+        [r, g, b]
+    }
+}
+
+/// Re-emit every wire's SDF text as vector geometry.
+///
+/// Each visible glyph rides on `wire.text_verts` as one 6-vertex quad (two
+/// triangles) whose corners are the glyph's atlas `plane` rect run through the
+/// text transform. We recover the glyph's outline / fill from the atlas by the
+/// quad's `uv_min` and map it into that quad by affine interpolation of the
+/// plane rect — so a stroke (LFF) font emits polylines and a filled TrueType
+/// glyph emits filled triangles, exactly where the SDF quad sits.
+#[cfg(not(target_arch = "wasm32"))]
+fn emit_text(
+    ops: &mut Vec<Op>,
+    wires: &[WireModel],
+    ox: f64,
+    oy: f64,
+    scale: f32,
+    plot_style: Option<&PlotStyleTable>,
+) {
+    use crate::scene::text::sdf_atlas;
+
+    if wires.iter().all(|w| w.text_verts.is_empty()) {
+        return;
+    }
+    // Snapshot the atlas' baked-glyph geometry once; drop the lock before use.
+    let (table, solid_key) = {
+        let Ok(atlas) = sdf_atlas::text_atlas().lock() else {
+            return;
+        };
+        (atlas.export_table(), sdf_atlas::uv_key(atlas.solid_uv()))
+    };
+
+    // `Op::SetLineDashPattern` is persistent graphics state and the wire pass
+    // above only re-emits it on change, so whatever the last wire needed is
+    // still active here — without this reset a drawing whose last wire carries a
+    // HIDDEN/CENTER linetype prints its glyph outlines dashed.
+    ops.push(Op::SetLineDashPattern {
+        dash: LineDashPattern::default(),
+    });
+
+    for wire in wires {
+        let verts = &wire.text_verts;
+        if verts.is_empty() {
+            continue;
+        }
+        // Mirror the wire pass: CTB colour/lineweight override by ACI, and the
+        // `/ scale` that keeps pen widths absolute under the scaled CTM (a Fit
+        // plot would otherwise render text as near-invisible hairlines).
+        let mut ctb_color: Option<[f32; 3]> = None;
+        let mut lw_override: Option<f32> = None;
+        if let Some(ctb) = plot_style {
+            if wire.aci > 0 {
+                ctb_color = ctb.resolve_color(wire.aci);
+                lw_override = ctb
+                    .resolve_lineweight(wire.aci)
+                    .map(|mm| (mm * MM_TO_PT).max(0.1) / scale.max(1e-6));
+            }
+        }
+        let lw_pt = lw_override
+            .unwrap_or_else(|| (wire.line_weight_px * LW_PX_TO_PT).max(0.1) / scale.max(1e-6));
+
+        let mut gi = 0;
+        while gi + 6 <= verts.len() {
+            let quad = &verts[gi..gi + 6];
+            gi += 6;
+
+            let a = quad[0].color[3];
+            if a < 0.01 {
+                continue;
+            }
+            // A CTB colour override wins over the white-sheet adaptation, exactly
+            // as in the wire pass — else a monochrome.ctb plot plots the lines
+            // black and leaves the text on its screen colour.
+            let [r, g, b] = ctb_color.unwrap_or_else(|| {
+                adapt_text_color([quad[0].color[0], quad[0].color[1], quad[0].color[2]])
+            });
+
+            // Quad corners in world XY: verts run [bl, br, tr, bl, tr, tl].
+            let bl = glyph_world_xy(&quad[0]);
+            let br = glyph_world_xy(&quad[1]);
+            let tr = glyph_world_xy(&quad[2]);
+            let tl = glyph_world_xy(&quad[5]);
+            // `tl` carries uv = (uv_min.x, uv_min.y) — the atlas tile key.
+            let key = sdf_atlas::uv_key([quad[5].uv[0], quad[5].uv[1]]);
+
+            // Cancel the offset in f64, then narrow: the sheet-mm result is a
+            // small number even when the world coordinate is UTM-scale.
+            let point = |wx: f64, wy: f64| Point::new(Mm((wx + ox) as f32), Mm((wy + oy) as f32));
+
+            if let Some(ge) = table.get(&key) {
+                // Affine basis of the quad: plane_min → bl, +x → br, +y → tl.
+                // The glyph-space maths is small and stays f32; only the lift into
+                // world coordinates needs f64.
+                let (pmin, pmax) = (ge.plane_min, ge.plane_max);
+                let (sx, sy) = (pmax[0] - pmin[0], pmax[1] - pmin[1]);
+                if sx.abs() < 1e-9 || sy.abs() < 1e-9 {
+                    continue;
+                }
+                let map = |p: [f32; 2]| -> Point {
+                    let u = ((p[0] - pmin[0]) / sx) as f64;
+                    let v = ((p[1] - pmin[1]) / sy) as f64;
+                    let wx = bl[0] + u * (br[0] - bl[0]) + v * (tl[0] - bl[0]);
+                    let wy = bl[1] + u * (br[1] - bl[1]) + v * (tl[1] - bl[1]);
+                    point(wx, wy)
+                };
+
+                if !ge.fill_tris.is_empty() {
+                    // Filled TrueType glyph: one filled triangle per triple.
+                    ops.push(Op::SetFillColor {
+                        col: Color::Rgb(Rgb { r, g, b, icc_profile: None }),
+                    });
+                    for tri in ge.fill_tris.chunks_exact(3) {
+                        ops.push(Op::DrawPolygon {
+                            polygon: Polygon {
+                                rings: vec![PolygonRing {
+                                    points: tri
+                                        .iter()
+                                        .map(|&p| LinePoint { p: map(p), bezier: false })
+                                        .collect(),
+                                }],
+                                mode: PaintMode::Fill,
+                                winding_order: WindingOrder::NonZero,
+                            },
+                        });
+                    }
+                } else {
+                    // Stroke (LFF pen) font or hollow glyph: polylines. Bold bakes
+                    // at a 1.7× pen over the same centrelines, so widen to match or
+                    // a bold run prints at regular weight.
+                    ops.push(Op::SetOutlineColor {
+                        col: Color::Rgb(Rgb { r, g, b, icc_profile: None }),
+                    });
+                    let pen = if ge.bold { lw_pt * 1.7 } else { lw_pt };
+                    ops.push(Op::SetOutlineThickness { pt: Pt(pen) });
+                    for stroke in &ge.strokes {
+                        if stroke.len() < 2 {
+                            continue;
+                        }
+                        ops.push(Op::DrawLine {
+                            line: Line {
+                                points: stroke
+                                    .iter()
+                                    .map(|&p| LinePoint { p: map(p), bezier: false })
+                                    .collect(),
+                                is_closed: false,
+                            },
+                        });
+                    }
+                }
+            } else if key == solid_key {
+                // Decoration bar (underline / overline / strike): the quad is a
+                // solid-texel rectangle — fill it directly from its corners.
+                ops.push(Op::SetFillColor {
+                    col: Color::Rgb(Rgb { r, g, b, icc_profile: None }),
+                });
+                ops.push(Op::DrawPolygon {
+                    polygon: Polygon {
+                        rings: vec![PolygonRing {
+                            points: [bl, br, tr, tl]
+                                .iter()
+                                .map(|&c| LinePoint { p: point(c[0], c[1]), bezier: false })
+                                .collect(),
+                        }],
+                        mode: PaintMode::Fill,
+                        winding_order: WindingOrder::NonZero,
+                    },
+                });
+            }
+        }
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -535,5 +764,42 @@ mod tests {
         // A valid PDF is produced (starts with the PDF header) and is non-trivial.
         assert!(bytes.starts_with(b"%PDF"), "not a PDF");
         assert!(bytes.len() > 200, "suspiciously small: {}", bytes.len());
+    }
+
+    // Build a WireModel carrying the SDF glyph quads for `text` in the embedded
+    // "txt" stroke font, laid out into the process-wide atlas emit_text reads.
+    fn text_wire(text: &str, origin: [f64; 3]) -> WireModel {
+        use crate::scene::pipeline::text_gpu::push_glyph_vertices;
+        use crate::scene::text::{glyph_quads::layout_glyph_quads, sdf_atlas};
+        let quads = {
+            let mut atlas = sdf_atlas::text_atlas().lock().unwrap();
+            layout_glyph_quads(&mut atlas, 10.0, 0.0, 1.0, 0.0, 1.0, "txt", false, text)
+        };
+        assert!(!quads.is_empty(), "stroke glyphs laid out for {text:?}");
+        let mut verts = Vec::new();
+        push_glyph_vertices(&mut verts, &quads, origin, 1.0, [1.0, 0.0, 0.0, 1.0], 0.0);
+        WireModel {
+            text_verts: verts,
+            ..WireModel::solid("t".into(), Vec::new(), WireModel::WHITE, false)
+        }
+    }
+
+    // End-to-end: a page whose only content is SDF text produces a larger PDF
+    // than the same page with the text stripped — proving text reaches the file.
+    #[test]
+    fn text_grows_the_pdf_vs_no_text() {
+        let wire = text_wire("HELLO", [20.0, 20.0, 0.0]);
+        let mut blank = wire.clone();
+        blank.text_verts.clear();
+
+        let with_text = build_pdf(&[wire], &[], &[], 210.0, 297.0, 0.0, 0.0, 0, 1.0, None, None);
+        let no_text = build_pdf(&[blank], &[], &[], 210.0, 297.0, 0.0, 0.0, 0, 1.0, None, None);
+        assert!(with_text.starts_with(b"%PDF"));
+        assert!(
+            with_text.len() > no_text.len(),
+            "text did not add content: {} !> {}",
+            with_text.len(),
+            no_text.len()
+        );
     }
 }

@@ -8,7 +8,7 @@
 use rustc_hash::FxHashMap as HashMap;
 use std::sync::OnceLock;
 
-use acadrust::tables::linetype::{LineType, LineTypeElement};
+use acadrust::tables::linetype::{LineType, LineTypeComplexContent, LineTypeElement};
 use acadrust::{CadDocument, TableEntry};
 
 // ── Complex linetype types ────────────────────────────────────────────────
@@ -67,6 +67,112 @@ pub fn complex_lt(name: &str) -> Option<&'static ComplexLt> {
     COMPLEX_CATALOG
         .get_or_init(|| parse_complex(LIN_SOURCE))
         .get(&name.to_ascii_uppercase())
+}
+
+/// Build the full segment list — dashes, spaces, dots **and** embedded
+/// text / shape — for a linetype defined in the loaded **document**, whether it
+/// is simple or complex.
+///
+/// Returns `None` when the linetype is missing or continuous (no pattern). Used
+/// by the MLINE renderer: every element is CPU-dashed by the same walker so the
+/// parallel lines (and any embedded text) stay in phase with each other. Ordinary
+/// entities keep the cheaper shader dash for simple linetypes; see
+/// [`document_complex_lt`] / [`resolve_complex_lt`].
+pub fn document_lt_segments(document: &CadDocument, name: &str) -> Option<ComplexLt> {
+    let lt = document
+        .line_types
+        .iter()
+        .find(|l| l.name.eq_ignore_ascii_case(name))?;
+
+    let mut segments: Vec<LtSegment> = Vec::with_capacity(lt.elements.len() + 1);
+    let mut has_length = false;
+    for e in &lt.elements {
+        // Emit the dash / space for this element FIRST, then any embedded
+        // text / shape — the pen advances across the element's length before the
+        // glyph is placed, so the text lands at the element's *end* (inside the
+        // gap), matching the `.lin` token order (`dash, -space, ["TEXT"], …`) and
+        // AutoCAD's placement. Putting the text first drops it onto the preceding
+        // dash, so the dash strikes through the glyphs.
+        let len = e.length as f32;
+        if len > 1e-9 {
+            segments.push(LtSegment::Dash(len));
+            has_length = true;
+        } else if len < -1e-9 {
+            segments.push(LtSegment::Space(-len));
+            has_length = true;
+        } else if e.complex.is_none() {
+            // A zero-length *non-complex* element is a dot; a zero-length complex
+            // element only contributes its text/shape (pushed below).
+            segments.push(LtSegment::Dot);
+            has_length = true;
+        }
+
+        if let Some(c) = &e.complex {
+            match &c.content {
+                LineTypeComplexContent::Text { text } => {
+                    let style_name = document
+                        .text_styles
+                        .iter()
+                        .find(|s| s.handle == c.style_handle)
+                        .map(|s| s.name.as_str())
+                        .unwrap_or("");
+                    let font = crate::entities::text_support::resolve_text_style(
+                        style_name, document,
+                    )
+                    .font_name;
+                    let scale = c.scale as f32;
+                    segments.push(LtSegment::Text {
+                        text: text.clone(),
+                        style: font,
+                        x: c.offset[0] as f32,
+                        y: c.offset[1] as f32,
+                        scale: if scale.abs() < 1e-6 { 1.0 } else { scale },
+                        rot_deg: c.rotation as f32,
+                    });
+                }
+                // Embedded SHAPE glyphs need a .shp set we don't ship; skip the
+                // draw (matches the bundled-catalog behaviour).
+                LineTypeComplexContent::Shape { .. } => {}
+            }
+        }
+    }
+
+    // No dash/space/dot means "continuous" — let the caller draw a solid line.
+    if !has_length {
+        return None;
+    }
+    Some(ComplexLt { segments })
+}
+
+/// Complex (embedded text/shape) segments for a **document** linetype, or `None`
+/// when it is simple (dash-only) — simple dashes are handled by the ordinary
+/// `resolve_pattern` shader path, so ordinary entities don't pay the CPU-dash
+/// cost. This is the gate used by [`resolve_complex_lt`].
+pub fn document_complex_lt(document: &CadDocument, name: &str) -> Option<ComplexLt> {
+    let lt = document
+        .line_types
+        .iter()
+        .find(|l| l.name.eq_ignore_ascii_case(name))?;
+    if !lt.elements.iter().any(|e| e.complex.is_some()) {
+        return None;
+    }
+    document_lt_segments(document, name)
+}
+
+/// Resolve a complex linetype honouring "**document first, bundled catalog
+/// second**": if the drawing defines the linetype, its own definition wins
+/// (embedded text/shape, or `None` when the drawing's version is simple); only a
+/// linetype absent from the drawing falls back to the bundled `.lin` catalog.
+pub fn resolve_complex_lt(document: &CadDocument, name: &str) -> Option<ComplexLt> {
+    let in_document = document
+        .line_types
+        .iter()
+        .any(|l| l.name.eq_ignore_ascii_case(name));
+    if in_document {
+        document_complex_lt(document, name)
+    } else {
+        complex_lt(name).cloned()
+    }
 }
 
 const LIN_SOURCE: &str = include_str!("../../assets/linetypes/OpenCADStudio.lin");

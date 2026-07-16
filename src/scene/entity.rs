@@ -106,6 +106,12 @@ impl Scene {
         // (e.g. a plugin-supplied layer) so it survives a DWG save instead of
         // collapsing to layer 0 in the reopened file (#252).
         let layer = entity.common().layer.clone();
+        // Delta-undo poison inputs (captured before the mutations below): an
+        // add that also creates a new layer, adds a block, or inserts an image
+        // definition mutates non-entity state a pure-entity delta can't undo.
+        let creates_layer =
+            self.is_recording_undo() && !layer.trim().is_empty() && !self.document.layers.contains(&layer);
+        let is_image = matches!(&entity, EntityType::RasterImage(_));
         self.ensure_layer(&layer);
 
         // Route to the correct block based on current editing mode:
@@ -135,10 +141,22 @@ impl Scene {
             if let Some(model) = mesh_seed {
                 self.meshes.insert(handle, model);
             }
+            // Delta-undo: the new handle's before-image is "nothing" (it did not
+            // exist). Poison the recording if this add also mutated non-entity
+            // state (a new layer / block / image definition) so the app knows a
+            // pure-entity delta would be incomplete.
+            if self.is_recording_undo() {
+                self.record_undo_before(handle, None);
+                if creates_layer || affects_blocks || is_image {
+                    self.poison_undo_recording();
+                }
+            }
             if affects_blocks {
                 self.bump_geometry();
             } else {
-                self.bump_geometry_no_blocks();
+                // Plain top-level add: name the new handle so every derived cache
+                // patches in just this one entity instead of rebuilding.
+                self.bump_entities(&[(handle, ChangeKind::Added)]);
             }
         }
         handle
@@ -208,6 +226,9 @@ impl Scene {
         // so the edited entity keeps that layer on save instead of collapsing
         // to layer 0 in the reopened file (#252).
         let new_layer = entity.common().layer.clone();
+        let creates_layer = self.is_recording_undo()
+            && !new_layer.trim().is_empty()
+            && !self.document.layers.contains(&new_layer);
         self.ensure_layer(&new_layer);
 
         // Rebuild the derived-model seeds from the new entity (as add_entity).
@@ -237,6 +258,17 @@ impl Scene {
             None
         };
 
+        // Delta-undo: capture the entity's pre-edit image (before the slot is
+        // overwritten) so an undo can restore it, and poison if this replace
+        // also created a layer or crossed a block boundary.
+        if self.is_recording_undo() {
+            let before = self.document.get_entity(handle).cloned();
+            self.record_undo_before(handle, before);
+            if creates_layer || affects_blocks {
+                self.poison_undo_recording();
+            }
+        }
+
         // Write the new entity into the live slot.
         let Some(slot) = self.document.get_entity_mut(handle) else {
             return false;
@@ -259,13 +291,71 @@ impl Scene {
             self.meshes.insert(handle, model);
         }
 
-        self.mark_entity_dirty(handle);
         if affects_blocks {
+            self.mark_entity_dirty(handle);
             self.bump_geometry();
         } else {
-            self.bump_geometry_no_blocks();
+            // One entity changed in place: report just this handle so every
+            // derived cache patches it instead of rebuilding (bump_entities also
+            // drops it from the tessellation memos).
+            self.bump_entities(&[(handle, ChangeKind::Modified)]);
         }
         true
+    }
+
+    /// Rebuild the per-entity derived caches (hatch fill / raster image / solid
+    /// mesh) for a single handle from whatever entity currently lives at it —
+    /// or drop them all if the handle is now absent. Mirrors the reseed block in
+    /// [`Scene::update_entity`]; used by delta-undo when it re-applies an
+    /// entity's before / after image so the fills and meshes follow.
+    pub(crate) fn reseed_derived_caches(&mut self, handle: Handle) {
+        let (hatch_seed, image_seed, mesh_seed) = match self.document.get_entity(handle) {
+            None => (None, None, None),
+            Some(entity) => {
+                let hatch_seed = if let EntityType::Hatch(dxf) = entity {
+                    let color = self.render_style(entity).0;
+                    Self::hatch_model_from_dxf(dxf, color)
+                } else if let EntityType::Solid(solid) = entity {
+                    let color = self.render_style(entity).0;
+                    Some(Self::solid_hatch_model(solid, color))
+                } else {
+                    None
+                };
+                let image_seed = if let EntityType::RasterImage(img) = entity {
+                    ImageModel::from_raster_image(img)
+                } else {
+                    None
+                };
+                let facet_res = self.document.header.facet_resolution;
+                let mesh_seed = if matches!(
+                    entity,
+                    EntityType::Solid3D(_)
+                        | EntityType::Region(_)
+                        | EntityType::Body(_)
+                        | EntityType::Surface(_)
+                ) {
+                    let color = self.render_style(entity).0;
+                    crate::entities::solid3d::tessellate_volume(entity, color, facet_res)
+                        .map(offset_mesh_lod_set)
+                } else {
+                    None
+                };
+                (hatch_seed, image_seed, mesh_seed)
+            }
+        };
+        self.hatches.remove(&handle);
+        self.images.remove(&handle);
+        self.meshes.remove(&handle);
+        self.solid_models.remove(&handle);
+        if let Some(model) = hatch_seed {
+            self.hatches.insert(handle, model);
+        }
+        if let Some(model) = image_seed {
+            self.images.insert(handle, model);
+        }
+        if let Some(model) = mesh_seed {
+            self.meshes.insert(handle, model);
+        }
     }
 
     /// Returns the RGBA color for the given layer name.
@@ -1650,24 +1740,43 @@ impl Scene {
     /// DXF SOLID corners are in "Z-order": p0-p1 top, p2-p3 bottom.
     /// Visual quad is p0→p1→p3→p2 (closed).
     pub(super) fn solid_hatch_model(solid: &DxfSolid, color: [f32; 4]) -> HatchModel {
-        let boundary = vec![
-            [
-                (solid.first_corner.x) as f32,
-                (solid.first_corner.y) as f32,
-            ],
-            [
-                (solid.second_corner.x) as f32,
-                (solid.second_corner.y) as f32,
-            ],
-            [
-                (solid.fourth_corner.x) as f32,
-                (solid.fourth_corner.y) as f32,
-            ],
-            [
-                (solid.third_corner.x) as f32,
-                (solid.third_corner.y) as f32,
-            ],
+        // Keep the corners in f64 until the AABB centre is known, then store
+        // each as a small f32 offset from it — same precision-preserving anchor
+        // `hatch_model_from_dxf` uses. Casting the absolute WCS corner straight
+        // to f32 costs ~0.06 units of resolution at UTM magnitudes (~1e6), so
+        // the quad snapped to a grid and the fill drifted off its outline.
+        let corners: [[f64; 2]; 4] = [
+            [solid.first_corner.x, solid.first_corner.y],
+            [solid.second_corner.x, solid.second_corner.y],
+            [solid.fourth_corner.x, solid.fourth_corner.y],
+            [solid.third_corner.x, solid.third_corner.y],
         ];
+        let mut min = [f64::INFINITY; 2];
+        let mut max = [f64::NEG_INFINITY; 2];
+        for c in &corners {
+            for i in 0..2 {
+                if c[i] < min[i] {
+                    min[i] = c[i];
+                }
+                if c[i] > max[i] {
+                    max[i] = c[i];
+                }
+            }
+        }
+        let world_origin = if min[0].is_finite() && min[1].is_finite() {
+            [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5]
+        } else {
+            [0.0, 0.0]
+        };
+        let boundary = corners
+            .iter()
+            .map(|c| {
+                [
+                    (c[0] - world_origin[0]) as f32,
+                    (c[1] - world_origin[1]) as f32,
+                ]
+            })
+            .collect();
         HatchModel {
             boundary: std::sync::Arc::new(boundary),
             boundary_wcs: None,
@@ -1676,7 +1785,7 @@ impl Scene {
             color,
             angle_offset: 0.0,
             scale: 1.0,
-            world_origin: [0.0; 2],
+            world_origin,
             vp_scissor: None,
             draw_depth: 0.0,
         }

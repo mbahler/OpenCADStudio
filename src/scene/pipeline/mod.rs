@@ -10,6 +10,11 @@ pub mod mesh_gpu;
 pub mod text_gpu;
 pub mod uniforms;
 pub mod viewcube;
+/// Persistent per-entity wire instance arena (native), enabled by
+/// `OCS_WIRE_GPU_PATCH` — patches one entity's slab via `write_buffer` instead
+/// of re-uploading the whole wire set on an edit.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod wire_arena;
 pub mod wire_gpu;
 
 use iced::wgpu;
@@ -44,7 +49,7 @@ pub struct Pipeline {
     /// xray pipelines). `Some` on native; `None` on web (fat instance, no
     /// storage). Passed to `WireGpu::from_run` / `from_batch` so they can build
     /// each batch's per-wire bind group.
-    wire_const_bgl: Option<wgpu::BindGroupLayout>,
+    pub(crate) wire_const_bgl: Option<wgpu::BindGroupLayout>,
     wipeout_pipeline: wgpu::RenderPipeline,
     /// Phase 4-B — single-draw batched hatch pipeline. Per-instance
     /// data lives in storage buffers; one draw call covers every
@@ -144,6 +149,19 @@ pub struct Pipeline {
     /// their camera uniforms + scissor stay per-slot, only the geometry is
     /// deduplicated. Never mutated in place, only reassigned on content change.
     pub(crate) gpu_wires: std::sync::Arc<Vec<WireGpu>>,
+    /// Persistent per-entity wire instance arena (native, `OCS_WIRE_GPU_PATCH`).
+    /// When active, `gpu_wires` is a thin wrapper over this arena's buffers and an
+    /// edit patches one entity's slab in place instead of rebuilding every wire.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) wire_arena: Option<wire_arena::WireArena>,
+    /// Second arena for the mesh/solid EDGE wires (drawn with the mesh-edge skip /
+    /// black treatment); the resident set is split into this + `wire_arena` so
+    /// both patch incrementally. Shares `wire_arena_id`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) wire_arena_mesh: Option<wire_arena::WireArena>,
+    /// The Model content id both arenas currently mirror (`u64::MAX` = none).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) wire_arena_id: u64,
     /// Pixel scissor rects [x, y, w, h] for viewport-clipped wires. Recomputed each frame.
     wire_pixel_scissors: Vec<Option<[u32; 4]>>,
     /// Ghost copies (25% alpha) of selected wires for the X-ray depth pass.
@@ -1304,6 +1322,12 @@ impl Pipeline {
             blit_uniform_buffer,
             surface_format: format,
             gpu_wires: std::sync::Arc::new(vec![]),
+            #[cfg(not(target_arch = "wasm32"))]
+            wire_arena: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            wire_arena_mesh: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            wire_arena_id: u64::MAX,
             wire_pixel_scissors: vec![],
             gpu_selected_wires: vec![],
             gpu_preview_wires: vec![],

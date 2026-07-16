@@ -207,7 +207,11 @@ impl CadModule for AnnotateModule {
                             icon: crate::modules::IconKind::Svg(include_bytes!(
                                 "../../../assets/icons/add_scale.svg"
                             )),
-                            event: crate::modules::ModuleEvent::Command("OBJECTSCALE".to_string()),
+                            // The quick "mark annotative at the current scale"
+                            // action; bare OBJECTSCALE opens the manage dialog.
+                            event: crate::modules::ModuleEvent::Command(
+                                "OBJECTSCALE ADD".to_string(),
+                            ),
                         }),
                         RibbonItem::Tool(crate::modules::ToolDef {
                             id: "SCALELISTEDIT",

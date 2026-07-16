@@ -185,9 +185,12 @@ pub fn apply_along(
                             &mut atlas,
                             *tx_scale,
                             fwd_angle,
+                            1.0, // width_factor
+                            0.0, // oblique
+                            // tracking = 1.0 applies the font's natural
+                            // letter_spacing; 0.0 zeroes it and cramps the glyphs
+                            // (every other text path passes 1.0).
                             1.0,
-                            0.0,
-                            0.0,
                             style,
                             false,
                             &resolved,

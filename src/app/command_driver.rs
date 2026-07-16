@@ -230,17 +230,27 @@ impl OpenCADStudio {
                     self.update_cont_anchor(&entity);
                 }
                 let label = self.history_label_from_active_cmd(i, "ENTITY");
-                self.push_undo_snapshot(i, label);
+                // A plain drawable added on an existing layer touches only the
+                // one new entity; a block/image/dimension/viewport add also
+                // mutates layers/objects/blocks → keep the full snapshot.
+                let delta_safe = self.delta_add_safe(i, &entity);
+                let pending = self.begin_undo(i, label, 1, delta_safe);
                 self.commit_entity(entity);
                 self.tabs[i].dirty = true;
                 let prompt = self.tabs[i].active_cmd.as_ref().map(|c| c.prompt());
                 if let Some(p) = prompt {
                     self.command_line.push_info(&p);
                 }
+                if let Some(pd) = pending {
+                    self.commit_undo_delta(i, pd);
+                }
             }
             CmdResult::TransformSelected(handles, transform) => {
                 let label = self.history_label_from_active_cmd(i, "MOVE");
-                self.push_undo_snapshot(i, label);
+                // A move/rotate/scale/mirror mutates only the selected entities
+                // (and their baked dimension sub-entities) through
+                // transform_entities — always delta-safe.
+                let pending = self.begin_undo(i, label, handles.len(), true);
                 self.tabs[i].scene.transform_entities(&handles, &transform);
                 // ACIS solids render from a cached mesh, so a move/rotate/
                 // scale/mirror needs the mesh re-tessellated from the now-moved
@@ -255,10 +265,16 @@ impl OpenCADStudio {
                 self.tabs[i].snap_result = None;
                 self.restore_pre_cmd_tangent();
                 self.refresh_properties();
+                if let Some(p) = pending {
+                    self.commit_undo_delta(i, p);
+                }
             }
             CmdResult::CopySelected(handles, transform) => {
                 let label = self.history_label_from_active_cmd(i, "COPY");
-                self.push_undo_snapshot(i, label);
+                // Copying a dimension clones a *D block record, so gate delta on
+                // the selection being dimension-free.
+                let delta_safe = self.delta_copy_safe(i, &handles);
+                let pending = self.begin_undo(i, label, handles.len(), delta_safe);
                 let new_handles = self.tabs[i].scene.copy_entities(&handles, &transform);
                 if self.tabs[i].scene.any_solid(&new_handles) {
                     self.tabs[i].scene.populate_meshes_from_document();
@@ -274,6 +290,9 @@ impl OpenCADStudio {
                     self.command_line.push_info(&p);
                 }
                 self.refresh_properties();
+                if let Some(pd) = pending {
+                    self.commit_undo_delta(i, pd);
+                }
             }
             CmdResult::CommitAndExit(entity) => {
                 // For XATTACH: ensure the xref block definition exists before
@@ -301,13 +320,17 @@ impl OpenCADStudio {
                 // (before `entity` is moved into commit_entity).
                 self.update_cont_anchor(&entity);
                 let label = self.history_label_from_active_cmd(i, "ENTITY");
-                self.push_undo_snapshot(i, label);
+                let delta_safe = self.delta_add_safe(i, &entity);
+                let pending = self.begin_undo(i, label, 1, delta_safe);
                 self.commit_entity(entity);
                 self.tabs[i].dirty = true;
                 self.tabs[i].scene.clear_preview_wire();
                 self.tabs[i].active_cmd = None;
                 self.tabs[i].snap_result = None;
                 self.restore_pre_cmd_tangent();
+                if let Some(pd) = pending {
+                    self.commit_undo_delta(i, pd);
+                }
             }
             CmdResult::CommitSolid { entity, solid } => {
                 let label = self.history_label_from_active_cmd(i, "SOLID");
@@ -321,7 +344,8 @@ impl OpenCADStudio {
             }
             CmdResult::CommitAndEditText(entity) => {
                 let label = self.history_label_from_active_cmd(i, "ENTITY");
-                self.push_undo_snapshot(i, label);
+                let delta_safe = self.delta_add_safe(i, &entity);
+                let pending = self.begin_undo(i, label, 1, delta_safe);
                 let handle = self.commit_entity_handle(entity);
                 self.tabs[i].dirty = true;
                 self.tabs[i].scene.clear_preview_wire();
@@ -329,6 +353,9 @@ impl OpenCADStudio {
                 self.tabs[i].snap_result = None;
                 self.restore_pre_cmd_tangent();
                 self.ribbon.deactivate_tool();
+                if let Some(pd) = pending {
+                    self.commit_undo_delta(i, pd);
+                }
                 if let Some(h) = handle {
                     return self.begin_text_edit(h);
                 }
@@ -419,8 +446,12 @@ impl OpenCADStudio {
             }
             CmdResult::BatchCopy(handles, transforms) => {
                 let label = self.history_label_from_active_cmd(i, "ARRAY");
-                self.push_undo_snapshot(i, label.clone());
                 let count = transforms.len();
+                // Same gate as COPY (dimension-free), sized by the total number
+                // of copies the array will add.
+                let delta_safe = self.delta_copy_safe(i, &handles);
+                let pending =
+                    self.begin_undo(i, label.clone(), handles.len() * count, delta_safe);
                 for t in &transforms {
                     self.tabs[i].scene.copy_entities(&handles, t);
                 }
@@ -433,6 +464,9 @@ impl OpenCADStudio {
                 self.command_line
                     .push_output(&format!("{label}: {count} {noun} created."));
                 self.refresh_properties();
+                if let Some(pd) = pending {
+                    self.commit_undo_delta(i, pd);
+                }
             }
             CmdResult::ReplaceMany(replacements, additions) => {
                 let label = self.history_label_from_active_cmd(i, "FILLET");
@@ -759,6 +793,19 @@ impl OpenCADStudio {
                         c.line_weight,
                     )
                 });
+                // Text-specific properties travel between text-like objects
+                // (TEXT ↔ MTEXT, both directions), like AutoCAD's "Text"
+                // special property (#361).
+                let text_props =
+                    self.tabs[i]
+                        .scene
+                        .document
+                        .get_entity(src)
+                        .and_then(|e| match e {
+                            acadrust::EntityType::Text(t) => Some((t.style.clone(), t.height)),
+                            acadrust::EntityType::MText(m) => Some((m.style.clone(), m.height)),
+                            _ => None,
+                        });
 
                 if let Some((layer, color, linetype, lt_scale, lw)) = props {
                     self.push_undo_snapshot(i, "MATCHPROP");
@@ -769,6 +816,19 @@ impl OpenCADStudio {
                             crate::scene::view::dispatch::apply_line_weight(e, lw);
                             e.common_mut().linetype = linetype.clone();
                             e.common_mut().linetype_scale = lt_scale;
+                            if let Some((style, height)) = &text_props {
+                                match e {
+                                    acadrust::EntityType::Text(t) => {
+                                        t.style = style.clone();
+                                        t.height = *height;
+                                    }
+                                    acadrust::EntityType::MText(m) => {
+                                        m.style = style.clone();
+                                        m.height = *height;
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
                     }
                     self.tabs[i].dirty = true;
@@ -962,7 +1022,10 @@ impl OpenCADStudio {
                     self.restore_pre_cmd_tangent();
                 } else {
                     let label = self.history_label_from_active_cmd(i, "ALIGN");
-                    self.push_undo_snapshot(i, label);
+                    // A chain of transform_entities on the same handles — the
+                    // recording keeps each entity's first (pre-align) image, so
+                    // it's delta-safe like a single transform.
+                    let pending = self.begin_undo(i, label, handles.len(), true);
                     // Step 1: translate so src1 is at origin
                     self.tabs[i].scene.transform_entities(
                         &handles,
@@ -1004,6 +1067,9 @@ impl OpenCADStudio {
                     self.restore_pre_cmd_tangent();
                     self.command_line.push_output("ALIGN: applied.");
                     self.refresh_properties();
+                    if let Some(pd) = pending {
+                        self.commit_undo_delta(i, pd);
+                    }
                 }
             }
             CmdResult::LengthenEntity {

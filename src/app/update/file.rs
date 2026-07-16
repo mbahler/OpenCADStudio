@@ -350,6 +350,35 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 }
     }
 
+    /// Index of a tab already showing `path`, or `None`.
+    ///
+    /// Compares resolved paths, so the same drawing reached through a symlink,
+    /// a `..` segment or a different relative spelling is recognised as the one
+    /// already open rather than loaded a second time. A path that cannot be
+    /// resolved (deleted since) matches nothing and falls through to the normal
+    /// open, which reports the miss.
+    pub(in crate::app) fn tab_showing(&self, path: &std::path::Path) -> Option<usize> {
+        let want = std::fs::canonicalize(path).ok()?;
+        self.tabs.iter().position(|t| {
+            t.current_path
+                .as_deref()
+                .and_then(|p| std::fs::canonicalize(p).ok())
+                .is_some_and(|p| p == want)
+        })
+    }
+
+    /// Start the next drawing a second launch handed us, if any.
+    ///
+    /// Must be called from EVERY path that clears `opening` — completion, error
+    /// and cancel alike. Draining only the success path would strand the queue
+    /// forever the first time a file fails to parse.
+    pub(in crate::app) fn drain_pending_open(&mut self) -> Task<Message> {
+        match self.pending_opens.pop_front() {
+            Some(p) => Task::done(Message::OpenExternal(p)),
+            None => Task::none(),
+        }
+    }
+
     pub(super) fn on_file_opened(&mut self, name: String, path: std::path::PathBuf, doc: acadrust::CadDocument, caches: crate::scene::DerivedCaches) -> Task<Message> {
                 // If the user clicked Cancel while the parser was running, the
                 // overlay state was cleared and we silently drop the result.
@@ -558,7 +587,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 self.tabs[i].dirty = false;
                 self.tabs[i].history = crate::app::document::HistoryState::default();
                 self.refresh_selected_grips();
-                Task::none()
+                self.drain_pending_open()
     }
 
     pub(super) fn on_wblock_save_result_some(&mut self, block_name: String, path: std::path::PathBuf) -> Task<Message> {
@@ -1119,7 +1148,10 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 }
     }
 
-    pub(super) fn on_plot_export_path_some(&mut self, path: std::path::PathBuf) -> Task<Message> {
+    pub(in crate::app) fn on_plot_export_path_some(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> Task<Message> {
                 let i = self.active_tab;
                 let scene = &self.tabs[i].scene;
                 let wires = scene.entity_wires();
@@ -1214,18 +1246,20 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     wipeouts.as_slice(),
                     eff_w,
                     eff_h,
-                    draw_ox as f32,
-                    draw_oy as f32,
+                    draw_ox,
+                    draw_oy,
                     rotation_deg,
                     1.0,
                     None,
                     &path,
                     self.active_plot_style.as_ref(),
                 ) {
-                    Ok(()) => self.command_line.push_info(&format!(
-                        "Exported: {}",
-                        path.file_name().unwrap_or_default().to_string_lossy()
-                    )),
+                    // Full path, not just the file name — when the export was
+                    // driven by EXPORTPDF <path> the user needs to see where
+                    // the file actually landed. (#369)
+                    Ok(()) => self
+                        .command_line
+                        .push_info(&format!("Exported: {}", path.display())),
                     Err(e) => self.command_line.push_error(&format!("Export failed: {e}")),
                 }
                 Task::none()
@@ -1284,8 +1318,8 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 // scale (rotation_deg == 0 adds no further CTM translation).
                 // window_to_sheet's (ox, oy) is the sheet-mm target for the window's
                 // min corner, so: scale * (x0 + offset_x) = ox  =>  offset_x = ox/scale - x0.
-                let offset_x = ((ox / scale) - x0) as f32;
-                let offset_y = ((oy / scale) - y0) as f32;
+                let offset_x = (ox / scale) - x0;
+                let offset_y = (oy / scale) - y0;
                 // Clip rect in pre-scale space (build_pdf's CTM applies `scale` to it,
                 // same as the wires) so the final sheet-mm rect lands at (ox, oy).
                 let clip = Some(((ox / scale) as f32, (oy / scale) as f32, win_w as f32, win_h as f32));
@@ -1330,8 +1364,10 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         Vec<crate::scene::model::hatch_model::HatchModel>,
         f64,
         f64,
-        f32,
-        f32,
+        // Draw offsets stay f64: they cancel an absolute world coordinate that
+        // an f32 cannot hold at UTM scale.
+        f64,
+        f64,
         i32,
     ) {
         let i = self.active_tab;
@@ -1382,8 +1418,8 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
             wipeouts,
             eff_w,
             eff_h,
-            draw_ox as f32,
-            draw_oy as f32,
+            draw_ox,
+            draw_oy,
             rotation_deg,
         )
     }
@@ -2047,8 +2083,10 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         Vec<crate::scene::model::hatch_model::HatchModel>,
         f64,
         f64,
-        f32,
-        f32,
+        // Offsets stay f64 (they cancel a UTM-scale world coordinate); the plot
+        // scale is a small ratio and stays f32.
+        f64,
+        f64,
         f32,
         Option<(f32, f32, f32, f32)>,
     )> {
@@ -2084,8 +2122,8 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
             .collect();
         let hatches: Vec<_> = scene.paper_canvas_hatches().as_ref().clone();
         let wipeouts: Vec<_> = scene.paper_canvas_wipeouts().as_ref().clone();
-        let offset_x = ((ox / scale) - x0) as f32;
-        let offset_y = ((oy / scale) - y0) as f32;
+        let offset_x = (ox / scale) - x0;
+        let offset_y = (oy / scale) - y0;
         let clip = Some((
             (ox / scale) as f32,
             (oy / scale) as f32,

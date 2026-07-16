@@ -1677,6 +1677,12 @@ impl OpenCADStudio {
         };
         #[cfg(target_arch = "wasm32")]
         let autosave = Subscription::none();
+        // Drawings handed over by a second launch (single instance). Inert in a
+        // process that lost the port election, so it costs nothing there.
+        #[cfg(not(target_arch = "wasm32"))]
+        let single_instance = crate::io::single_instance::subscribe().map(Message::OpenExternal);
+        #[cfg(target_arch = "wasm32")]
+        let single_instance = Subscription::none();
         iced::Subscription::batch([
             frames,
             history_tick,
@@ -1686,6 +1692,7 @@ impl OpenCADStudio {
             caret_blink,
             web_fonts,
             autosave,
+            single_instance,
             event::listen_with(|ev, status, win_id| {
                 use iced::event::Status;
                 match ev {

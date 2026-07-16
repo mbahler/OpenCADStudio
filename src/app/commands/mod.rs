@@ -103,6 +103,11 @@ impl OpenCADStudio {
         // command would silently do nothing. Allow only the commands that
         // make sense there (create / open a document, or quit) and tell the
         // user otherwise instead of running a no-op. See #96.
+        // Anything that acts on the application rather than a drawing belongs
+        // here: document lifecycle, the links, and the app-wide configuration
+        // editors (shortcuts, aliases) — none of them read the scene. This is
+        // the single place that decides; `on_ribbon_tool_click` defers to it
+        // rather than keeping a second, blunter copy (#388, #389).
         if self.tabs[i].is_start
             && !matches!(
                 cmd,
@@ -117,6 +122,11 @@ impl OpenCADStudio {
                     | "PLUGINMANAGER"
                     | "DONATE"
                     | "WEBVERSION"
+                    | "HELP"
+                    | "CUI"
+                    | "ALIASEDIT"
+                    | "CUILOAD"
+                    | "CUIIMPORT"
             )
         {
             self.command_line

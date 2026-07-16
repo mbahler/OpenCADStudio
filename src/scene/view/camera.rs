@@ -367,15 +367,64 @@ impl Camera {
         self.target += (cam_up * delta_y * wpp).as_dvec3();
     }
 
+    /// The 8 corners of `min..max`, expressed in camera space relative to the
+    /// current target: `x`/`y` span the screen plane, `z` runs along the eye
+    /// direction. The offset is taken in f64 before the cast, so a corner at
+    /// UTM scale doesn't lose the difference to cancellation.
+    fn bounds_in_view(&self, min: Vec3, max: Vec3) -> [Vec3; 8] {
+        let inv = self.rotation.inverse();
+        let mut out = [Vec3::ZERO; 8];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let corner = Vec3::new(
+                if i & 1 == 0 { min.x } else { max.x },
+                if i & 2 == 0 { min.y } else { max.y },
+                if i & 4 == 0 { min.z } else { max.z },
+            );
+            *slot = inv * (corner.as_dvec3() - self.target).as_vec3();
+        }
+        out
+    }
+
+    /// Fit the camera to `min..max` — pose and depth both.
+    ///
+    /// Zoom and clipping are sized from DIFFERENT axes on purpose. The zoom must
+    /// frame what the view actually shows (the extent across the screen plane),
+    /// while near/far must span what lies along the eye direction. Sizing both
+    /// from the 3-D diagonal — as this did — makes one far-off Z drag the
+    /// horizontal zoom out with it: a 140-unit drawing carrying a single entity
+    /// 800 km below its plane zoomed out to 800 km and became a dot. The two
+    /// agree on a flat drawing, which is why it went unnoticed.
     pub fn fit_to_bounds(&mut self, min: Vec3, max: Vec3) {
         self.target = ((min + max) * 0.5).as_dvec3();
-        let size = (max - min).length();
-        self.distance = size * 1.5;
-        // Size the depth range to the drawing's full diagonal (not the zoom
-        // distance): it covers the model's Z-extent even after panning to a
-        // corner, and keeps depth-buffer precision constant across zoom so
-        // coincident solids / meshes / wires never flip draw order.
-        self.depth_half_range = size.max(1.0);
+        let corners = self.bounds_in_view(min, max);
+        // Circumscribed radius across the screen plane — aspect-agnostic, so the
+        // content fits whatever the viewport's shape turns out to be.
+        let screen_r = corners
+            .iter()
+            .fold(0.0_f32, |m, c| m.max(c.x.hypot(c.y)))
+            .max(1e-6);
+        // `ortho_size` (the half-height) is `distance * tan(fov/2)`, so invert
+        // that to get the distance which just contains `screen_r`, plus margin.
+        self.distance = (screen_r / (self.fov_y * 0.5).tan() * 1.2).max(1e-3);
+        self.fit_depth_to_bounds(min, max);
+    }
+
+    /// Size only the near/far span to `min..max`, leaving the pose alone.
+    ///
+    /// Split out of [`fit_to_bounds`] for the camera restored from a file's
+    /// saved view: that pose must not move, but its depth range still has to
+    /// cover the model or geometry outside it is silently clipped away.
+    pub fn fit_depth_to_bounds(&mut self, min: Vec3, max: Vec3) {
+        // Half-extent along the eye direction, measured from the target — that
+        // is exactly what `ortho_depth_range`'s `distance ± r` has to contain.
+        // Keeping it tied to the model (not to `distance`) also holds
+        // depth-buffer precision constant across zoom, so coincident solids /
+        // meshes / wires never flip draw order.
+        let depth_r = self
+            .bounds_in_view(min, max)
+            .iter()
+            .fold(0.0_f32, |m, c| m.max(c.z.abs()));
+        self.depth_half_range = (depth_r * 1.05).max(1.0);
     }
 
     // ── ViewCube snap ─────────────────────────────────────────────────────
@@ -522,4 +571,80 @@ pub fn yaw_pitch_to_quat(yaw: f32, pitch: f32, roll: f32) -> Quat {
     let q_pitch = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2 - pitch);
     let q_roll = Quat::from_rotation_z(roll);
     (q_yaw * q_pitch * q_roll).normalize()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A drawing 140 units wide carrying one entity 800 km below its plane must
+    /// still zoom to the 140 units — the outlier belongs to the depth range, not
+    /// to the zoom. (Sizing both from the 3-D diagonal made the drawing a dot.)
+    #[test]
+    fn a_far_off_plane_outlier_does_not_drag_the_zoom_out() {
+        let flat_min = Vec3::new(-1200100.0, -800081.5, 0.0);
+        let flat_max = Vec3::new(-1199960.0, -800000.0, 10.0);
+
+        let mut flat = Camera::default();
+        flat.fit_to_bounds(flat_min, flat_max);
+
+        // Same drawing, plus the benchmark's entity 800 km down.
+        let mut deep = Camera::default();
+        deep.fit_to_bounds(Vec3::new(flat_min.x, flat_min.y, -800017.5), flat_max);
+
+        // Top view: the outlier is along the eye direction, so the on-screen
+        // framing must barely move.
+        let ratio = deep.distance / flat.distance;
+        assert!(
+            (0.5..2.0).contains(&ratio),
+            "zoom moved {ratio}x because of a depth-only outlier \
+             (flat={}, deep={})",
+            flat.distance,
+            deep.distance
+        );
+    }
+
+    /// …and that same outlier must be inside near/far, or it is clipped away.
+    #[test]
+    fn the_outlier_lands_inside_the_depth_range() {
+        let min = Vec3::new(-1200100.0, -800081.5, -800017.5);
+        let max = Vec3::new(-1199960.0, -800000.0, 10.0);
+        let mut cam = Camera::default();
+        cam.fit_to_bounds(min, max);
+
+        let (near, far) = cam.ortho_depth_range();
+        // Depth of a point from the eye, along the view direction. Top view, so
+        // the outlier at z=-800015 sits `distance + 800015`-ish away.
+        let outlier = Vec3::new(-1200082.1, -800015.4, -800015.4);
+        let local = cam.rotation.inverse() * (outlier.as_dvec3() - cam.target).as_vec3();
+        let depth = cam.distance - local.z;
+        assert!(
+            depth > near && depth < far,
+            "outlier at depth {depth} is outside near/far ({near}, {far})"
+        );
+    }
+
+    /// A flat drawing must be unaffected: the 3-D diagonal and the screen-plane
+    /// extent agree there, so the framing has to match the old behaviour.
+    #[test]
+    fn a_flat_drawing_frames_about_as_before() {
+        let min = Vec3::new(-70.0, -40.0, 0.0);
+        let max = Vec3::new(70.0, 40.0, 0.0);
+        let mut cam = Camera::default();
+        cam.fit_to_bounds(min, max);
+        // Old rule: distance = 3-D diagonal * 1.5.
+        let old = (max - min).length() * 1.5;
+        let ratio = cam.distance / old;
+        assert!(
+            (0.75..1.25).contains(&ratio),
+            "flat framing drifted {ratio}x from the old rule (was {old}, now {})",
+            cam.distance
+        );
+        // And the whole drawing still fits the half-height.
+        let half_h = cam.ortho_size();
+        assert!(
+            half_h >= 40.0,
+            "half-height {half_h} no longer contains the drawing"
+        );
+    }
 }

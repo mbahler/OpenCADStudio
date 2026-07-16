@@ -315,7 +315,8 @@ impl WireModel {
 /// glyph quads live in `text_verts` (absolute-world double-single) — so a text
 /// ghost (MOVE / COPY / ROTATE / SCALE / STRETCH / MIRROR preview) must carry
 /// these along or the dragged text renders frozen at its source (issue #316).
-fn map_text_verts(
+/// Paper-space viewport projection uses it for the same reason (issue #385).
+pub(crate) fn map_text_verts(
     verts: &[crate::scene::pipeline::text_gpu::TextVertex],
     f: impl Fn(f64, f64, f64) -> (f64, f64, f64),
 ) -> Vec<crate::scene::pipeline::text_gpu::TextVertex> {

@@ -132,6 +132,11 @@ impl Scene {
             .flatten()
             .collect();
         for &h in handles {
+            // Delta-undo: capture the pre-transform image before mutating.
+            if self.is_recording_undo() {
+                let before = self.document.get_entity(h).cloned();
+                self.record_undo_before(h, before);
+            }
             if let Some(entity) = self.document.get_entity_mut(h) {
                 view::dispatch::apply_transform(entity, t);
                 if mirror_true {
@@ -164,18 +169,24 @@ impl Scene {
             }
         }
         // Move the baked dimension-block sub-entities too (collected above).
+        // These are entities not named in the reported change set, so a delta
+        // must capture their before-images here or a dimension move won't undo.
         for h in &dim_block_subs {
+            if self.is_recording_undo() {
+                let before = self.document.get_entity(*h).cloned();
+                self.record_undo_before(*h, before);
+            }
             if let Some(entity) = self.document.get_entity_mut(*h) {
                 view::dispatch::apply_transform(entity, t);
             }
         }
         // Only the transformed entities changed (a top-level move/rotate/scale/
-        // mirror never edits a block definition) — re-tessellate just those and
-        // keep the block cache + every other entity's memoized wires.
-        for &h in handles {
-            self.mark_entity_dirty(h);
-        }
-        self.bump_geometry_no_blocks();
+        // mirror never edits a block definition) — report just those so the
+        // resident set re-tessellates only them and every derived cache patches
+        // per-handle, keeping the block cache + all other memoized wires.
+        let changes: Vec<(Handle, ChangeKind)> =
+            handles.iter().map(|&h| (h, ChangeKind::Modified)).collect();
+        self.bump_entities(&changes);
     }
 
     /// Give a freshly-cloned entity brand-new handles for every *inline*
@@ -317,6 +328,10 @@ impl Scene {
                 let bn = d.base().block_name.clone();
                 if !bn.trim().is_empty() {
                     if let Some(new_bn) = self.clone_transformed_block(&bn, t) {
+                        // Delta-undo: a copied dimension adds a fresh anonymous
+                        // *D block record — non-entity state a pure-entity delta
+                        // can't restore. Poison so the app keeps a full snapshot.
+                        self.poison_undo_recording();
                         if let EntityType::Dimension(d) = &mut entity {
                             d.base_mut().block_name = new_bn;
                         }
@@ -327,6 +342,10 @@ impl Scene {
             entity.common_mut().handle = Handle::NULL;
             let h = self.document.add_entity(entity).unwrap_or(Handle::NULL);
             if !h.is_null() {
+                // Delta-undo: a copy's before-image is "nothing" (undo erases it).
+                if self.is_recording_undo() {
+                    self.record_undo_before(h, None);
+                }
                 let new_model = match self.document.get_entity(h) {
                     Some(EntityType::Hatch(dxf)) => {
                         let color = convert::tess_util::aci_to_rgba(&dxf.common.color);
@@ -346,7 +365,10 @@ impl Scene {
         }
         // The copies are new handles (natural memo misses, tessellated fresh)
         // and reference only already-cached blocks — no block defn changes.
-        self.bump_geometry_no_blocks();
+        // Report them as additions so derived caches patch in exactly the copies.
+        let changes: Vec<(Handle, ChangeKind)> =
+            new_handles.iter().map(|&h| (h, ChangeKind::Added)).collect();
+        self.bump_entities(&changes);
         new_handles
     }
 

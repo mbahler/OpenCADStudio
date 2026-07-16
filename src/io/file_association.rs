@@ -22,11 +22,12 @@
 //! would otherwise block the iced executor; the result is delivered back
 //! through a oneshot channel that the async wrapper awaits.
 
-/// Reverse-DNS bundle / app id, shared by the macOS handler binding and the
-/// Linux desktop-file name. Matches `CFBundleIdentifier` in packaging/Info.plist
-/// and the installed `*.desktop` basename.
+/// Reverse-DNS bundle / app id, shared by the macOS handler binding, the
+/// Linux desktop-file name and the Wayland window app_id. Matches
+/// `CFBundleIdentifier` in packaging/Info.plist and the installed `*.desktop`
+/// basename.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-const APP_ID: &str = "io.github.HakanSeven12.OpenCadStudio";
+pub(crate) const APP_ID: &str = "io.github.HakanSeven12.OpenCadStudio";
 
 /// Silently register this app as *a* handler (not necessarily the default) for
 /// .dwg / .dxf, so it appears in the OS "Open with" list. Unlike
@@ -503,7 +504,7 @@ mod linux_impl {
             "[Desktop Entry]\n\
              Name=Open CAD Studio\n\
              Comment=A CAD application for 2D/3D drawing and design\n\
-             Exec={exec} %f\n\
+             Exec={exec} %F\n\
              Icon={APP_ID}\n\
              Terminal=false\n\
              Type=Application\n\

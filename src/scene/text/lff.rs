@@ -50,6 +50,12 @@ const FONTS_SRC: &[(&str, &str)] = &[
     ("symeteo", include_str!("../../../assets/fonts/symeteo.lff")),
     ("symusic", include_str!("../../../assets/fonts/symusic.lff")),
     ("unicode", include_str!("../../../assets/fonts/unicode.lff")),
+    // Geometric-tolerance symbols. Registered like any other font and
+    // keyed by the letter its `\Fgdt;X` escape carries, so a switch to it
+    // anywhere — a tolerance frame, an MTEXT, a text style literally named
+    // "gdt.shx" — resolves through the ordinary name lookup and needs no
+    // special case. It holds no Latin text: a letter IS a symbol here.
+    ("gdt", include_str!("../../../assets/fonts/gdt.lff")),
 ];
 
 /// AutoCAD / DXF SHX font names → LFF stem. Names that already match a stem

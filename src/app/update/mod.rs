@@ -272,6 +272,45 @@ impl OpenCADStudio {
                 }
             }
 
+            Message::OpenExternal(path) => {
+                // A second launch forwarded this drawing. Route it through
+                // `OpenRecent` so the redirect and a cold start share one path:
+                // it stats the file and reports a missing one visibly, instead
+                // of a boot that appears to do nothing.
+                //
+                // Raising is best-effort and cannot be made reliable from here.
+                // `gain_focus` reaches winit's `focus_window`, which on Wayland
+                // has an empty body — it is `request_user_attention` that walks
+                // the xdg-activation path, and it mints its token without a seat
+                // serial, which a compositor may refuse to honour. So expect an
+                // attention mark rather than a raise on Wayland; X11 does raise.
+                // A real raise needs the activation token from the launching
+                // process, and neither iced 0.14 nor winit 0.30 can apply one to
+                // an existing window.
+                let raise = match self.main_window {
+                    Some(id) => Task::batch([
+                        iced::window::gain_focus(id),
+                        iced::window::request_user_attention(
+                            id,
+                            Some(iced::window::UserAttention::Critical),
+                        ),
+                    ]),
+                    None => Task::none(),
+                };
+                // Already open → go to that tab rather than load a second copy
+                // of the same drawing. Checked before the queue: switching is
+                // instant and needs no load slot.
+                if let Some(idx) = self.tab_showing(&path) {
+                    return Task::batch([raise, self.update(Message::TabSwitch(idx))]);
+                }
+                if self.opening.is_some() {
+                    self.pending_opens.push_back(path);
+                    raise
+                } else {
+                    Task::batch([raise, self.update(Message::OpenRecent(path))])
+                }
+            }
+
             Message::RecentRemove(path) => {
                 self.remove_recent(&path);
                 Task::none()
@@ -318,7 +357,7 @@ impl OpenCADStudio {
                     self.command_line
                         .push_info(&format!("Open cancelled: \"{}\"", p.name));
                 }
-                Task::none()
+                self.drain_pending_open()
             }
 
             Message::FileOpened(Ok((name, path, doc, caches))) => {
@@ -332,7 +371,9 @@ impl OpenCADStudio {
                 if was_open && e != "Cancelled" {
                     self.command_line.push_error(&format!("Open failed: {e}"));
                 }
-                Task::none()
+                // A drawing that fails to parse must not strand the ones queued
+                // behind it.
+                self.drain_pending_open()
             }
 
             Message::ImagePick => {
@@ -2047,7 +2088,10 @@ impl OpenCADStudio {
                 self.tabs[i].scene.selection.borrow_mut().context_menu = None;
                 let handles: Vec<_> = self.tabs[i].scene.selected.iter().cloned().collect();
                 if !handles.is_empty() {
-                    self.push_undo_snapshot(i, "ERASE");
+                    // Erase is delta-safe unless a target is in a group (group
+                    // cleanup rewrites document.objects).
+                    let delta_safe = self.delta_erase_safe(i, &handles);
+                    let pending = self.begin_undo(i, "ERASE", handles.len(), delta_safe);
                     // Stash the erased entities so OOPS can restore them.
                     self.oops_cache = handles
                         .iter()
@@ -2056,6 +2100,9 @@ impl OpenCADStudio {
                     self.tabs[i].scene.erase_entities(&handles);
                     self.tabs[i].dirty = true;
                     self.refresh_properties();
+                    if let Some(pd) = pending {
+                        self.commit_undo_delta(i, pd);
+                    }
                 }
                 Task::none()
             }
@@ -3535,7 +3582,18 @@ impl OpenCADStudio {
                     Message::PlotExportPath,
                 )
             }
-            Message::PlotExportPath(None) => Task::none(),
+            // None means the save dialog was cancelled — or never opened at
+            // all (a broken XDG portal / missing zenity on Linux resolves to
+            // None too, and rfd only reports that through `log`, which is
+            // opt-in). Either way say something instead of silently doing
+            // nothing. (#369)
+            Message::PlotExportPath(None) => {
+                self.command_line.push_info(
+                    "PDF export canceled — no file chosen. \
+                     If no dialog appeared, use EXPORTPDF <path>.",
+                );
+                Task::none()
+            }
             Message::PlotExportPath(Some(path)) => self.on_plot_export_path_some(path),
 
             Message::PlotFormat(f) => {
@@ -3559,7 +3617,14 @@ impl OpenCADStudio {
                     Message::PlotWindowExportPath,
                 )
             }
-            Message::PlotWindowExportPath(None) => Task::none(),
+            // Same silent-None trap as PlotExportPath above. (#369)
+            Message::PlotWindowExportPath(None) => {
+                self.command_line.push_info(
+                    "PDF export canceled — no file chosen. \
+                     If no dialog appeared, use EXPORTPDF <path>.",
+                );
+                Task::none()
+            }
             Message::PlotWindowExportPath(Some(path)) => self.on_plot_window_export_path_some(path),
 
             // ── Print to system printer ───────────────────────────────────────

@@ -72,7 +72,22 @@ impl OpenCADStudio {
             // UCSICON OFF      — hide UCS icon in all viewports
             // UCSICON NOORIGIN — show icon but not at origin (show at corner)
             // UCSICON ORIGIN   — show icon at UCS origin
-            cmd if cmd == "UCSICON" || cmd.starts_with("UCSICON ") => {
+            "UCSICON" => {
+                use crate::command::KeywordCommand;
+                let c = KeywordCommand::new(
+                    "UCSICON",
+                    "UCSICON  [On / Off / NoOrigin / Origin]:",
+                    vec![
+                        ("On", "ON", None),
+                        ("Off", "OFF", None),
+                        ("NoOrigin", "NOORIGIN", None),
+                        ("Origin", "ORIGIN", None),
+                    ],
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("UCSICON ") => {
                 let sub = cmd.split_whitespace().nth(1).unwrap_or("").to_uppercase();
                 match sub.as_str() {
                     "ON" | "OFF" | "NOORIGIN" | "ORIGIN" => {
@@ -192,7 +207,19 @@ impl OpenCADStudio {
             // XDATA SET <app> <str>  — append a string xdata value for <app>
             // XDATA CLEAR            — remove all xdata from selected entities
             // XDATA CLEAR <app>      — remove xdata for a specific application
-            cmd if cmd == "XDATA" || cmd.starts_with("XDATA ") => {
+            "XDATA" => {
+                use crate::command::SelectThenKeywordCommand;
+                let has_sel = !self.tabs[i].scene.selected_entities().is_empty();
+                let c = SelectThenKeywordCommand::new(
+                    "XDATA",
+                    "XDATA  [List / Clear]  (SET <app> <value> by typing):",
+                    vec![("List", "LIST", None), ("Clear", "CLEAR", None)],
+                    has_sel,
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("XDATA ") => {
                 use acadrust::xdata::{ExtendedDataRecord, XDataValue};
                 let rest = cmd.trim_start_matches("XDATA").trim();
                 let parts: Vec<&str> = rest.splitn(3, char::is_whitespace).collect();
@@ -365,8 +392,40 @@ impl OpenCADStudio {
             "PLOT" | "PRINT" => {
                 return Some(Task::done(Message::PlotDialogOpen));
             }
-            "EXPORT" | "EXPORTPDF" => {
-                return Some(Task::done(Message::PlotExport));
+            // With no argument these open the save dialog; with a path they
+            // export straight to it. The direct form is also the workaround for
+            // systems where the native save dialog cannot open at all (broken
+            // XDG portal / missing zenity on Linux) — there the dialog future
+            // resolves to None and no export would happen. (#369)
+            cmd if cmd == "EXPORT"
+                || cmd == "EXPORTPDF"
+                || cmd.starts_with("EXPORT ")
+                || cmd.starts_with("EXPORTPDF ") =>
+            {
+                // Strip the keyword actually typed — EXPORTPDF first, since
+                // EXPORT is its prefix (see #295 for the failure mode).
+                let arg = cmd
+                    .strip_prefix("EXPORTPDF")
+                    .or_else(|| cmd.strip_prefix("EXPORT"))
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches('"');
+                if arg.is_empty() {
+                    return Some(Task::done(Message::PlotExport));
+                }
+                let mut path = std::path::PathBuf::from(arg);
+                if path.extension().is_none() {
+                    path.set_extension("pdf");
+                }
+                // A bare filename lands next to the drawing when it has a home.
+                if path.is_relative() {
+                    if let Some(dir) =
+                        self.tabs[i].current_path.as_deref().and_then(|p| p.parent())
+                    {
+                        path = dir.join(path);
+                    }
+                }
+                return Some(self.on_plot_export_path_some(path));
             }
             // PLOTSTYLE — load or clear CTB/STB plot style table
             cmd if cmd == "PLOTSTYLE" || cmd.starts_with("PLOTSTYLE ") => {
@@ -414,7 +473,26 @@ impl OpenCADStudio {
             //   UNDERLAY ON | OFF
             //   UNDERLAY CLIP ON | OFF
             //   UNDERLAY MONO ON | OFF
-            cmd if cmd == "UNDERLAY" || cmd.starts_with("UNDERLAY ") => {
+            "UNDERLAY" => {
+                use crate::command::SelectThenKeywordCommand;
+                let has_sel = !self.tabs[i].scene.selected_entities().is_empty();
+                let c = SelectThenKeywordCommand::new(
+                    "UNDERLAY",
+                    "UNDERLAY  [Fade / Contrast / On / Off / Mono / Clip]:",
+                    vec![
+                        ("Fade", "FADE", Some("UNDERLAY  fade 0-100:")),
+                        ("Contrast", "CONTRAST", Some("UNDERLAY  contrast 0-100:")),
+                        ("On", "ON", None),
+                        ("Off", "OFF", None),
+                        ("Mono", "MONO", Some("UNDERLAY MONO  [On / Off]:")),
+                        ("Clip", "CLIP", Some("UNDERLAY CLIP  [On / Off]:")),
+                    ],
+                    has_sel,
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("UNDERLAY ") => {
                 let sub = cmd
                     .split_once(' ')
                     .map(|(_, r)| r.trim().to_uppercase())
@@ -522,10 +600,11 @@ impl OpenCADStudio {
             // still being built. Acknowledge them with an honest status so the
             // button responds instead of reporting an unknown command; each is
             // replaced by its real handler as the feature lands.
-            // OBJECTSCALE — mark the selected objects annotative by attaching the
-            // AcAnnotativeData XData record the tessellator already honours, so
-            // they scale with the current annotation scale.
-            cmd if cmd == "OBJECTSCALE" || cmd.starts_with("OBJECTSCALE ") => {
+            // OBJECTSCALE ADD — the ribbon "Add Scale" quick action: mark the
+            // selected objects annotative by attaching the AcAnnotativeData XData
+            // record the tessellator already honours, so they scale with the
+            // current annotation scale. Bare OBJECTSCALE opens the dialog below.
+            "OBJECTSCALE ADD" => {
                 use acadrust::xdata::{ExtendedDataRecord, XDataValue};
                 let handles: Vec<acadrust::Handle> = self.tabs[i]
                     .scene
@@ -561,7 +640,18 @@ impl OpenCADStudio {
 
             // HYPERLINK <url> — attach a hyperlink to the selected objects, stored
             // in the standard PE_URL XData record so it round-trips in the file.
-            cmd if cmd == "HYPERLINK" || cmd.starts_with("HYPERLINK ") => {
+            "HYPERLINK" => {
+                use crate::command::SelectThenValueCommand;
+                let has_sel = !self.tabs[i].scene.selected_entities().is_empty();
+                let c = SelectThenValueCommand::new(
+                    "HYPERLINK",
+                    "HYPERLINK  URL to attach:",
+                    has_sel,
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("HYPERLINK ") => {
                 use acadrust::xdata::{ExtendedDataRecord, XDataValue};
                 let url = cmd.strip_prefix("HYPERLINK").unwrap_or("").trim().to_string();
                 if url.is_empty() {
@@ -593,7 +683,23 @@ impl OpenCADStudio {
 
             // ADJUST — set brightness / contrast / fade on selected raster images
             //   ADJUST BRIGHTNESS|CONTRAST|FADE <0-100>
-            cmd if cmd == "ADJUST" || cmd.starts_with("ADJUST ") => {
+            "ADJUST" => {
+                use crate::command::SelectThenKeywordCommand;
+                let has_sel = !self.tabs[i].scene.selected_entities().is_empty();
+                let c = SelectThenKeywordCommand::new(
+                    "ADJUST",
+                    "ADJUST  [Brightness / Contrast / Fade]:",
+                    vec![
+                        ("Brightness", "BRIGHTNESS", Some("ADJUST  brightness 0-100:")),
+                        ("Contrast", "CONTRAST", Some("ADJUST  contrast 0-100:")),
+                        ("Fade", "FADE", Some("ADJUST  fade 0-100:")),
+                    ],
+                    has_sel,
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("ADJUST ") => {
                 let rest = cmd.trim_start_matches("ADJUST").trim();
                 let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
                 let action = parts.first().map(|s| s.to_uppercase()).unwrap_or_default();
@@ -656,11 +762,16 @@ impl OpenCADStudio {
             // ANNOSCALE / CANNOSCALE <ratio> — set the current annotation scale
             // (e.g. 1:50, 2:1, or a plain factor). Drives annotative-object size
             // in model space and is written to the drawing header.
-            cmd if cmd == "ANNOSCALE"
-                || cmd == "CANNOSCALE"
-                || cmd.starts_with("ANNOSCALE ")
-                || cmd.starts_with("CANNOSCALE ") =>
-            {
+            "ANNOSCALE" | "CANNOSCALE" => {
+                use crate::command::ValuePromptCommand;
+                let c = ValuePromptCommand::new(
+                    "ANNOSCALE",
+                    "ANNOSCALE  new annotation scale  (e.g. 1:50, 2:1, or a factor):",
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("ANNOSCALE ") || cmd.starts_with("CANNOSCALE ") => {
                 let arg = cmd
                     .split_whitespace()
                     .nth(1)
@@ -708,7 +819,20 @@ impl OpenCADStudio {
             //   SCALELISTEDIT              list
             //   SCALELISTEDIT ADD 1:50     add (name is a paper:drawing ratio)
             //   SCALELISTEDIT DELETE 1:50  remove (not the current scale)
-            cmd if cmd == "SCALELISTEDIT" || cmd.starts_with("SCALELISTEDIT ") => {
+            "SCALELISTEDIT" => {
+                use crate::command::KeywordCommand;
+                let c = KeywordCommand::new(
+                    "SCALELISTEDIT",
+                    "SCALELISTEDIT  [Add / Delete]:",
+                    vec![
+                        ("Add", "ADD", Some("SCALELISTEDIT ADD  new scale ratio (e.g. 1:50):")),
+                        ("Delete", "DELETE", Some("SCALELISTEDIT DELETE  scale ratio to remove:")),
+                    ],
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("SCALELISTEDIT ") => {
                 let rest = cmd.trim_start_matches("SCALELISTEDIT").trim();
                 let mut parts = rest.splitn(2, char::is_whitespace);
                 let sub = parts.next().unwrap_or("").to_uppercase();
@@ -782,13 +906,21 @@ impl OpenCADStudio {
 
             // OBJECTSCALE — open the Annotation Object Scale dialog for the
             // selected object (add / remove its per-object scale representations).
+            // Reachable now that the immediate "add current scale" quick action
+            // moved to the explicit `OBJECTSCALE ADD` keyword above.
             "OBJECTSCALE" => {
                 return Some(Task::done(Message::AnnoObjectScaleOpen));
             }
 
             // DATALINK <path.csv> — import a CSV file into a table placed at the
             // origin (one-time import; a live re-reading link is future work).
-            cmd if cmd == "DATALINK" || cmd.starts_with("DATALINK ") => {
+            "DATALINK" => {
+                use crate::command::ValuePromptCommand;
+                let c = ValuePromptCommand::new("DATALINK", "DATALINK  path to the .csv file:");
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("DATALINK ") => {
                 let path = cmd.trim_start_matches("DATALINK").trim();
                 if path.is_empty() {
                     self.command_line.push_info(
@@ -842,7 +974,14 @@ impl OpenCADStudio {
             // LANDXMLIMPORT <path> — import survey points (LandXML <CgPoint>
             // elements) as Point objects. Reads the coordinate text content
             // (northing easting elevation) → Point at (easting, northing, elev).
-            cmd if cmd == "LANDXMLIMPORT" || cmd.starts_with("LANDXMLIMPORT ") => {
+            "LANDXMLIMPORT" => {
+                use crate::command::ValuePromptCommand;
+                let c =
+                    ValuePromptCommand::new("LANDXMLIMPORT", "LANDXMLIMPORT  path to the .xml file:");
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("LANDXMLIMPORT ") => {
                 let path = cmd.trim_start_matches("LANDXMLIMPORT").trim();
                 if path.is_empty() {
                     self.command_line.push_info(

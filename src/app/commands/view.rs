@@ -135,7 +135,14 @@ impl OpenCADStudio {
             // even though we don't have a LISP / DIESEL runtime yet.
             //   USERI 1 42        → header.user_int1 = 42
             //   USERR 3 1.5e-3    → header.user_real3 = 0.0015
-            cmd if cmd.starts_with("USERI") || cmd.starts_with("USERR") => {
+            "USERI" | "USERR" => {
+                use crate::command::UserRegCommand;
+                let name = if cmd == "USERR" { "USERR" } else { "USERI" };
+                let c = UserRegCommand::new(name);
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("USERI ") || cmd.starts_with("USERR ") => {
                 let is_real = cmd.starts_with("USERR");
                 let rest = if is_real {
                     cmd.trim_start_matches("USERR").trim()
@@ -228,7 +235,13 @@ impl OpenCADStudio {
 
             // CUIEXPORT <path> — write the keyboard-shortcut customizations
             // (the drawing-independent CUI data) to a plain "KEY COMMAND" file.
-            cmd if cmd == "CUIEXPORT" || cmd.starts_with("CUIEXPORT ") => {
+            "CUIEXPORT" => {
+                use crate::command::ValuePromptCommand;
+                let c = ValuePromptCommand::new("CUIEXPORT", "CUIEXPORT  file to save shortcuts to:");
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("CUIEXPORT ") => {
                 let path = cmd.trim_start_matches("CUIEXPORT").trim();
                 if path.is_empty() {
                     self.command_line.push_info(
@@ -252,11 +265,13 @@ impl OpenCADStudio {
 
             // CUIIMPORT / CUILOAD <path> — load shortcut customizations from a
             // "KEY COMMAND" file (lines starting with # are ignored).
-            cmd if cmd == "CUIIMPORT"
-                || cmd == "CUILOAD"
-                || cmd.starts_with("CUIIMPORT ")
-                || cmd.starts_with("CUILOAD ") =>
-            {
+            "CUIIMPORT" | "CUILOAD" => {
+                use crate::command::ValuePromptCommand;
+                let c = ValuePromptCommand::new("CUIIMPORT", "CUIIMPORT  shortcuts file to load:");
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("CUIIMPORT ") || cmd.starts_with("CUILOAD ") => {
                 let path = cmd
                     .trim_start_matches("CUIIMPORT")
                     .trim_start_matches("CUILOAD")
@@ -743,7 +758,19 @@ impl OpenCADStudio {
                 );
             }
 
-            cmd if cmd.starts_with("DRAWORDER") => {
+            "DRAWORDER" => {
+                use crate::command::SelectThenKeywordCommand;
+                let has_sel = !self.tabs[i].scene.selected_entities().is_empty();
+                let c = SelectThenKeywordCommand::new(
+                    "DRAWORDER",
+                    "DRAWORDER  [Front / Back]  (Above/Under <handle> by typing):",
+                    vec![("Front", "FRONT", None), ("Back", "BACK", None)],
+                    has_sel,
+                );
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("DRAWORDER ") => {
                 use acadrust::objects::{ObjectType, SortEntitiesTable};
                 let parts: Vec<&str> = cmd.split_whitespace().collect();
                 let option = parts.get(1).unwrap_or(&"").to_uppercase();
