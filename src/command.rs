@@ -242,6 +242,77 @@ impl CadCommand for RenameCommand {
     }
 }
 
+/// Interactive front-end for USERI / USERR — the five integer / real user
+/// registers in the drawing header. They take two inputs (which register, then
+/// the value), so they prompt for the register as clickable `1`–`5` buttons and
+/// then the value, and delegate to the inline `USERI <n> <value>` handler.
+pub struct UserRegCommand {
+    /// `"USERI"` or `"USERR"`.
+    name: &'static str,
+    /// Chosen register 1–5 once the first step is answered.
+    slot: Option<u8>,
+}
+
+impl UserRegCommand {
+    pub fn new(name: &'static str) -> Self {
+        Self { name, slot: None }
+    }
+}
+
+impl CadCommand for UserRegCommand {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn prompt(&self) -> String {
+        match self.slot {
+            None => format!("{}  which register?  [1-5]:", self.name),
+            Some(n) => format!("{}{n}  new value:", self.name),
+        }
+    }
+
+    fn options(&self) -> Vec<CmdOption> {
+        match self.slot {
+            None => (1..=5).map(|n| CmdOption::new(&n.to_string(), &n.to_string())).collect(),
+            Some(_) => Vec::new(),
+        }
+    }
+
+    fn wants_text_input(&self) -> bool {
+        true
+    }
+
+    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        let t = text.trim();
+        if t.is_empty() {
+            return None;
+        }
+        match self.slot {
+            None => {
+                // Accept a register 1–5; re-prompt on anything else.
+                match t.parse::<u8>() {
+                    Ok(n @ 1..=5) => {
+                        self.slot = Some(n);
+                        None
+                    }
+                    _ => None,
+                }
+            }
+            // The inline handler validates the value (int vs real) and reports
+            // usage if it doesn't parse, so just hand the whole line over.
+            Some(n) => Some(CmdResult::Dispatch(format!("{} {n} {t}", self.name))),
+        }
+    }
+
+    fn on_point(&mut self, _pt: DVec3) -> CmdResult {
+        CmdResult::NeedPoint
+    }
+
+    fn on_enter(&mut self) -> CmdResult {
+        CmdResult::Cancel
+    }
+}
+
 // ── Result token ──────────────────────────────────────────────────────────
 
 /// Returned by every `CadCommand` method to tell main.rs what to do.

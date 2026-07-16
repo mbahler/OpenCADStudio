@@ -135,7 +135,14 @@ impl OpenCADStudio {
             // even though we don't have a LISP / DIESEL runtime yet.
             //   USERI 1 42        → header.user_int1 = 42
             //   USERR 3 1.5e-3    → header.user_real3 = 0.0015
-            cmd if cmd.starts_with("USERI") || cmd.starts_with("USERR") => {
+            "USERI" | "USERR" => {
+                use crate::command::UserRegCommand;
+                let name = if cmd == "USERR" { "USERR" } else { "USERI" };
+                let c = UserRegCommand::new(name);
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("USERI ") || cmd.starts_with("USERR ") => {
                 let is_real = cmd.starts_with("USERR");
                 let rest = if is_real {
                     cmd.trim_start_matches("USERR").trim()
