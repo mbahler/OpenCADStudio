@@ -228,6 +228,27 @@ pub(crate) fn tessellate_entity(
     let pattern_length = pattern_length * pslt_factor;
     let pattern = pattern.map(|v| v * pslt_factor);
 
+    // ── Proxy entity: draw its cached preview ───────────────────────────────
+    //
+    // An entity from an application we have no reader for (e.g. an Autodesk
+    // Raster Design embedded raster image) arrives as `Unknown`. Its own data is
+    // a private format we cannot decode — but it usually ships a proxy-graphics
+    // blob, the vector preview its author cached for exactly this case. AutoCAD
+    // draws that when the object enabler is missing; draw it too, so the entity
+    // occupies its real place instead of silently disappearing.
+    if let EntityType::Unknown(_) = e {
+        if let Some(blob) = e.common().graphic_data.as_ref() {
+            if let Some(p) = convert::proxy_graphics::decode_polyline(blob) {
+                let (pts, pts_low) = convert::tessellate::points_to_ds(p.points);
+                let mut w = WireModel::solid(h.value().to_string(), pts, entity_color, sel);
+                w.points_low = pts_low;
+                w.line_weight_px = line_weight_px;
+                w.aci = aci;
+                return vec![w];
+            }
+        }
+    }
+
     // ── Dimension baked-block fast path ─────────────────────────────────────
     //
     // AutoCAD bakes each dimension's final geometry (extension lines, dim
