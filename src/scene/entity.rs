@@ -71,12 +71,13 @@ impl Scene {
             None
         };
         let facet_res = self.document.header.facet_resolution;
+        let isolines = self.document.header.isolines.max(0) as usize;
         let mesh_seed = if matches!(
             &entity,
             EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) | EntityType::Surface(_)
         ) {
             let color = self.render_style(&entity).0;
-            crate::entities::solid3d::tessellate_volume(&entity, color, facet_res)
+            crate::entities::solid3d::tessellate_volume(&entity, color, facet_res, isolines)
                 .map(|m| offset_mesh_lod_set(m))
         } else {
             None
@@ -247,12 +248,13 @@ impl Scene {
             None
         };
         let facet_res = self.document.header.facet_resolution;
+        let isolines = self.document.header.isolines.max(0) as usize;
         let mesh_seed = if matches!(
             &entity,
             EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) | EntityType::Surface(_)
         ) {
             let color = self.render_style(&entity).0;
-            crate::entities::solid3d::tessellate_volume(&entity, color, facet_res)
+            crate::entities::solid3d::tessellate_volume(&entity, color, facet_res, isolines)
                 .map(|m| offset_mesh_lod_set(m))
         } else {
             None
@@ -327,6 +329,7 @@ impl Scene {
                     None
                 };
                 let facet_res = self.document.header.facet_resolution;
+                let isolines = self.document.header.isolines.max(0) as usize;
                 let mesh_seed = if matches!(
                     entity,
                     EntityType::Solid3D(_)
@@ -335,7 +338,7 @@ impl Scene {
                         | EntityType::Surface(_)
                 ) {
                     let color = self.render_style(entity).0;
-                    crate::entities::solid3d::tessellate_volume(entity, color, facet_res)
+                    crate::entities::solid3d::tessellate_volume(entity, color, facet_res, isolines)
                         .map(offset_mesh_lod_set)
                 } else {
                     None
@@ -1705,13 +1708,14 @@ impl Scene {
 
         use crate::par::prelude::*;
         let facet_res = self.document.header.facet_resolution;
+        let isolines = self.document.header.isolines.max(0) as usize;
         // Top-level solids: offset into the render frame, drawn flat.
         // Block-definition solids: keep block-local coords for per-INSERT
         // instancing (no offset applied here).
         let built: Vec<(Handle, MeshLodSet, bool)> = entries
             .into_par_iter()
             .filter_map(|(handle, entity, color, top_level)| {
-                crate::entities::solid3d::tessellate_volume(&entity, color, facet_res).map(|m| {
+                crate::entities::solid3d::tessellate_volume(&entity, color, facet_res, isolines).map(|m| {
                     let m = if top_level { offset_mesh_lod_set(m) } else { m };
                     (handle, m, top_level)
                 })

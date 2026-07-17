@@ -141,6 +141,7 @@ fn tessellate_acis(
     name: String,
     color: [f32; 4],
     facet_res: f64,
+    isolines: usize,
 ) -> Option<MeshLodSet> {
     let mut set =
         if let Some(set) = crate::scene::convert::acis_to_truck::tessellate_sat_truck(sat, name.clone(), color, facet_res) {
@@ -158,18 +159,22 @@ fn tessellate_acis(
             );
             fallback?
         };
-    // Attach the B-rep face-boundary edges (body-transformed, split into the
-    // double-single pair) so the solid's wireframe shows real edges.
-    attach_feature_edges(&mut set, sat);
+    // Attach the B-rep face-boundary edges plus ISOLINES on curved faces
+    // (body-transformed, split into the double-single pair) so the solid's
+    // wireframe shows real edges and curved faces read from any angle.
+    attach_feature_edges(&mut set, sat, isolines);
     Some(set)
 }
 
 /// Collect the ACIS `edge` records as world-space polyline segments (pairs of
 /// endpoints), body-transform them, and store them on the set as the
 /// double-single `edge_verts` / `edge_verts_low`.
-fn attach_feature_edges(set: &mut MeshLodSet, sat: &SatDocument) {
+fn attach_feature_edges(set: &mut MeshLodSet, sat: &SatDocument, isolines: usize) {
     let xform = body_transform(sat);
-    let seg_pts = collect_feature_edges(sat);
+    let mut seg_pts = collect_feature_edges(sat);
+    // ISOLINES ride the same line list and the same body transform as the
+    // feature edges, so they inherit the offset / per-INSTANCE re-split for free.
+    seg_pts.extend(collect_isolines(sat, isolines));
     set.edge_verts.reserve(seg_pts.len());
     set.edge_verts_low.reserve(seg_pts.len());
     for p in seg_pts {
@@ -185,6 +190,83 @@ fn attach_feature_edges(set: &mut MeshLodSet, sat: &SatDocument) {
         set.edge_verts_low
             .push([(x - hx as f64) as f32, (y - hy as f64) as f32, (z - hz as f64) as f32]);
     }
+}
+
+/// ISOLINES line-list endpoints (pairs) for the curved faces of the solid:
+/// `count` longitudinal lines spaced across each cone/cylinder face, from its
+/// bottom rim to its top rim. These are view-independent tessellation lines
+/// (AutoCAD's ISOLINES), so a cylinder reads as a cylinder from any angle
+/// rather than showing only its two rim circles. Points are body-local
+/// (pre-transform), matching [`collect_feature_edges`], so the caller applies
+/// the body transform uniformly.
+fn collect_isolines(sat: &SatDocument, count: usize) -> Vec<[f64; 3]> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let mut out: Vec<[f64; 3]> = Vec::new();
+    for face in sat.faces() {
+        let Some(surf_rec) = sat.resolve(face.surface()) else {
+            continue;
+        };
+        if surf_rec.entity_type != "cone-surface" {
+            continue;
+        }
+        let Some(cone) = SatConeSurface::from_record(surf_rec) else {
+            continue;
+        };
+        let (cx, cy, cz) = cone.center();
+        let (ax, ay, az) = cone.axis();
+        let (ux, uy, uz) = cone.major_axis();
+        let radius = cone.radius();
+        let sin_a = cone.sin_half_angle();
+        let cos_a = cone.cos_half_angle();
+        let axis = norm3([ax, ay, az]);
+        let u_dir = norm3([ux, uy, uz]);
+        let v_dir = cross3(axis, u_dir);
+
+        // Same face-extent recovery as `tess_cone_face`: read the height and
+        // angular span from the boundary, and when the boundary is a single
+        // closed rim (no height span), recover the top/bottom from the coaxial
+        // circle rims.
+        let poly = collect_face_polygon(sat, &face, 48);
+        let (mut h_min, mut h_max, mut theta_min, mut theta_max, full_circle) =
+            angular_range(cx, cy, cz, axis, u_dir, v_dir, &poly);
+        if (h_max - h_min).abs() < 1e-9 {
+            if let Some((vmin, vmax)) = cone_axis_span(sat, &cone, axis, [cx, cy, cz]) {
+                h_min = vmin;
+                h_max = vmax;
+                if full_circle {
+                    theta_min = 0.0;
+                    theta_max = TAU;
+                }
+            }
+        }
+        let theta_span = if full_circle { TAU } else { theta_max - theta_min };
+        if (h_max - h_min).abs() < 1e-10 || theta_span.abs() < 1e-10 {
+            continue;
+        }
+        let r_at = |h: f64| {
+            if cos_a.abs() > 1e-9 {
+                radius + h * sin_a / cos_a
+            } else {
+                radius
+            }
+        };
+        let (r0, r1) = (r_at(h_min), r_at(h_max));
+        // A closed rim's line at theta and theta+TAU coincide, so step across
+        // [0, TAU) with `count` divisions; a bounded arc gets interior lines
+        // spanning its own arc (its two ends are already drawn as rim edges).
+        for k in 0..count {
+            let a = if full_circle {
+                theta_min + theta_span * (k as f64 / count as f64)
+            } else {
+                theta_min + theta_span * ((k as f64 + 1.0) / (count as f64 + 1.0))
+            };
+            out.push(cone_pt(cx, cy, cz, axis, u_dir, v_dir, r0, a, h_min));
+            out.push(cone_pt(cx, cy, cz, axis, u_dir, v_dir, r1, a, h_max));
+        }
+    }
+    out
 }
 
 /// Line-list endpoints (pairs) for every `edge` record: straight edges emit
@@ -378,25 +460,25 @@ fn parse_acis(
 }
 
 /// Tessellate a `Region` entity (2D planar ACIS body) at all three LOD levels.
-pub fn tessellate_region(region: &Region, color: [f32; 4], facet_res: f64) -> Option<MeshLodSet> {
+pub fn tessellate_region(region: &Region, color: [f32; 4], facet_res: f64, isolines: usize) -> Option<MeshLodSet> {
     let sat = parse_acis(
         || region.parse_sat(),
         region.acis_data.is_binary,
         &region.acis_data.sab_data,
     )?;
     let name = region.common.handle.value().to_string();
-    tessellate_acis(&sat, name, color, facet_res)
+    tessellate_acis(&sat, name, color, facet_res, isolines)
 }
 
 /// Tessellate a `Body` entity (3D ACIS body) at all three LOD levels.
-pub fn tessellate_body(body: &Body, color: [f32; 4], facet_res: f64) -> Option<MeshLodSet> {
+pub fn tessellate_body(body: &Body, color: [f32; 4], facet_res: f64, isolines: usize) -> Option<MeshLodSet> {
     let sat = parse_acis(
         || body.parse_sat(),
         body.acis_data.is_binary,
         &body.acis_data.sab_data,
     )?;
     let name = body.common.handle.value().to_string();
-    tessellate_acis(&sat, name, color, facet_res)
+    tessellate_acis(&sat, name, color, facet_res, isolines)
 }
 
 /// Tessellate a `Surface` entity (ACAD_SURFACE family) at all three LOD
@@ -407,6 +489,7 @@ pub fn tessellate_surface(
     surface: &acadrust::entities::Surface,
     color: [f32; 4],
     facet_res: f64,
+    isolines: usize,
 ) -> Option<MeshLodSet> {
     let sat = parse_acis(
         || surface.parse_sat(),
@@ -414,7 +497,7 @@ pub fn tessellate_surface(
         &surface.acis_data.sab_data,
     )?;
     let name = surface.common.handle.value().to_string();
-    tessellate_acis(&sat, name, color, facet_res)
+    tessellate_acis(&sat, name, color, facet_res, isolines)
 }
 
 /// Tessellate a `Solid3D` entity at all three LOD levels.
@@ -422,14 +505,14 @@ pub fn tessellate_surface(
 /// Returns `None` when the entity has no parseable SAT data or produces no
 /// triangles (e.g. the solid uses only unsupported surface types).
 /// `facet_res` mirrors the header FACETRES variable (0.01–10.0).
-pub fn tessellate_solid3d(solid: &Solid3D, color: [f32; 4], facet_res: f64) -> Option<MeshLodSet> {
+pub fn tessellate_solid3d(solid: &Solid3D, color: [f32; 4], facet_res: f64, isolines: usize) -> Option<MeshLodSet> {
     let sat = parse_acis(
         || solid.parse_sat(),
         solid.acis_data.is_binary,
         &solid.acis_data.sab_data,
     )?;
     let name = solid.common.handle.value().to_string();
-    tessellate_acis(&sat, name, color, facet_res)
+    tessellate_acis(&sat, name, color, facet_res, isolines)
 }
 
 // ── Topology helpers ──────────────────────────────────────────────────────────

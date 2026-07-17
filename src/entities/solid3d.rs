@@ -265,12 +265,17 @@ pub fn fallback_wires(e: &EntityType) -> Option<&[acadrust::entities::Wire]> {
 
 /// Run the appropriate `solid3d_tess::tessellate_*` for the entity,
 /// returning `None` for non-volume entities or when the kernel fails.
-pub fn tessellate_volume(e: &EntityType, color: [f32; 4], facet_res: f64) -> Option<MeshLodSet> {
+pub fn tessellate_volume(
+    e: &EntityType,
+    color: [f32; 4],
+    facet_res: f64,
+    isolines: usize,
+) -> Option<MeshLodSet> {
     match e {
-        EntityType::Solid3D(s) => solid3d_tess::tessellate_solid3d(s, color, facet_res),
-        EntityType::Region(r) => solid3d_tess::tessellate_region(r, color, facet_res),
-        EntityType::Body(b) => solid3d_tess::tessellate_body(b, color, facet_res),
-        EntityType::Surface(s) => solid3d_tess::tessellate_surface(s, color, facet_res),
+        EntityType::Solid3D(s) => solid3d_tess::tessellate_solid3d(s, color, facet_res, isolines),
+        EntityType::Region(r) => solid3d_tess::tessellate_region(r, color, facet_res, isolines),
+        EntityType::Body(b) => solid3d_tess::tessellate_body(b, color, facet_res, isolines),
+        EntityType::Surface(s) => solid3d_tess::tessellate_surface(s, color, facet_res, isolines),
         _ => None,
     }
 }

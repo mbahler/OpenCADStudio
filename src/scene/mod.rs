@@ -341,6 +341,7 @@ pub fn build_derived_caches(doc: &CadDocument) -> DerivedCaches {
     // Top-level (layout-owned) solids are offset into the render frame; block
     // definition solids keep block-local coords for per-INSERT instancing. (#123)
     let facet_res = doc.header.facet_resolution;
+    let isolines = doc.header.isolines.max(0) as usize;
     // Real layout blocks come from the Layout objects' block_record handles —
     // `BlockRecord::is_layout()` is unreliable here (it flags ordinary blocks).
     let layout_blocks: std::collections::HashSet<Handle> = doc
@@ -360,7 +361,7 @@ pub fn build_derived_caches(doc: &CadDocument) -> DerivedCaches {
             let (raw, ..) = view::render::render_style_for(doc, e);
             let color = view::render::adapt_to_bg(raw, LOAD_BG);
             let top_level = layout_blocks.contains(&e.common().owner_handle);
-            crate::entities::solid3d::tessellate_volume(e, color, facet_res).map(|m| {
+            crate::entities::solid3d::tessellate_volume(e, color, facet_res, isolines).map(|m| {
                 let m = if top_level { offset_mesh_lod_set(m) } else { m };
                 (handle, m, top_level)
             })
