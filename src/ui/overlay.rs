@@ -1757,10 +1757,29 @@ impl DynInputCanvas {
     /// Guided layout: draw the guide geometry anchored at `base`, then place
     /// each box according to its role.
     fn draw_guided(&self, frame: &mut canvas::Frame, bounds: iced::Rectangle, base: Point) {
-        let cursor = self.cursor_screen;
-        let (vx, vy) = (cursor.x - base.x, cursor.y - base.y);
-        let len = (vx * vx + vy * vy).sqrt().max(1.0);
-        let (dx, dy) = (vx / len, vy / len);
+        let cursor_raw = self.cursor_screen;
+        let (vx, vy) = (cursor_raw.x - base.x, cursor_raw.y - base.y);
+        let raw_len = (vx * vx + vy * vy).sqrt().max(1.0);
+        let (dx, dy) = (vx / raw_len, vy / raw_len);
+        // Clamp the drawn length to just past the viewport.
+        //
+        // These guides are dotted, and a dash pattern is measured in PIXELS: the
+        // tessellator emits a quad every few pixels, so the cost scales with a
+        // guide's screen length, not with what it represents. Typing a large
+        // distance (5000000 into the value box) projects the cursor millions of
+        // pixels away — millions of quads, gigabytes of them — and the process
+        // dies building a frame whose content is off-screen anyway (#406).
+        //
+        // Everything past the viewport edge is invisible, so dropping it costs
+        // nothing: `dx`/`dy` keep the true direction, the angle and every
+        // read-out are computed from `raw_len` above, and only the tail nobody
+        // can see is cut. Clamping `cursor` here bounds every guide below —
+        // they all derive from it.
+        let len = raw_len.min(bounds.width.hypot(bounds.height) * 1.5);
+        let cursor = Point {
+            x: base.x + dx * len,
+            y: base.y + dy * len,
+        };
         // Perpendicular pointing to the lower half so labels sit under the line.
         let (mut nx, mut ny) = (-dy, dx);
         if ny < 0.0 {
