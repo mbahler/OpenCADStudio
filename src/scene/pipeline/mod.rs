@@ -281,6 +281,15 @@ pub struct Pipeline {
 
 impl Pipeline {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        // wgpu's default uncaptured-error handler panics, and inside iced's
+        // main-thread redraw that panic aborts the whole process (#358). A
+        // validation error on a pathological drawing must not take the app
+        // (and the user's unsaved work) down with it — log it and keep the
+        // session alive; the affected frame renders incompletely at worst.
+        device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
+            eprintln!("[gpu] uncaptured wgpu error (frame degraded): {e}");
+        }));
+
         // ── Shared frame uniform buffer (view_proj etc.) ───────────────────
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("viewer.uniform_buffer"),
@@ -1648,9 +1657,9 @@ impl Pipeline {
         self.gpu_face3d_edges =
             WireGpu::from_batch(device, face3d_wires, depth_map, self.wire_const_bgl.as_ref());
         // Fill buffer split: 3D quads + PolyfaceMesh / PolygonMesh face
-        // tris go to `vertex_buffer_3d` (gated by `keep_3d_mesh_fills`);
+        // tris go to `chunks_3d` (gated by `keep_3d_mesh_fills`);
         // 2D fills (text-LOD greek, MultiLeader background) go to
-        // `vertex_buffer_2d` and are visible in every mode.
+        // `chunks_2d` and are visible in every mode.
         let keep_3d_mesh_fills = !wireframe_only;
         let has_any_2d_fill = all_wires
             .iter()
@@ -2176,7 +2185,7 @@ impl Pipeline {
         // pipeline in HiddenLine so wires hidden behind them disappear.
         // 2D fills (text greek, MultiLeader bg) always draw with colour.
         if let Some(ref fill) = self.gpu_face3d_fill {
-            if fill.vertex_count_3d > 0 || fill.vertex_count_2d > 0 {
+            if !fill.chunks_3d.is_empty() || !fill.chunks_2d.is_empty() {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("face3d.render_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2201,19 +2210,23 @@ impl Pipeline {
                 });
                 pass.set_viewport(0.0, 0.0, vp.width as f32, vp.height as f32, 0.0, 1.0);
                 pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                if fill.vertex_count_3d > 0 {
+                if !fill.chunks_3d.is_empty() {
                     if hidden_line {
                         pass.set_pipeline(&self.face3d_depth_pipeline);
                     } else {
                         pass.set_pipeline(&self.face3d_pipeline);
                     }
-                    pass.set_vertex_buffer(0, fill.vertex_buffer_3d.slice(..));
-                    pass.draw(0..fill.vertex_count_3d, 0..1);
+                    for c in &fill.chunks_3d {
+                        pass.set_vertex_buffer(0, c.vertex_buffer.slice(..));
+                        pass.draw(0..c.vertex_count, 0..1);
+                    }
                 }
-                if fill.vertex_count_2d > 0 {
+                if !fill.chunks_2d.is_empty() {
                     pass.set_pipeline(&self.face3d_pipeline);
-                    pass.set_vertex_buffer(0, fill.vertex_buffer_2d.slice(..));
-                    pass.draw(0..fill.vertex_count_2d, 0..1);
+                    for c in &fill.chunks_2d {
+                        pass.set_vertex_buffer(0, c.vertex_buffer.slice(..));
+                        pass.draw(0..c.vertex_count, 0..1);
+                    }
                 }
             }
         }
