@@ -281,15 +281,6 @@ pub struct Pipeline {
 
 impl Pipeline {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        // wgpu's default uncaptured-error handler panics, and inside iced's
-        // main-thread redraw that panic aborts the whole process (#358). A
-        // validation error on a pathological drawing must not take the app
-        // (and the user's unsaved work) down with it — log it and keep the
-        // session alive; the affected frame renders incompletely at worst.
-        device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
-            eprintln!("[gpu] uncaptured wgpu error (frame degraded): {e}");
-        }));
-
         // ── Shared frame uniform buffer (view_proj etc.) ───────────────────
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("viewer.uniform_buffer"),
@@ -2910,8 +2901,37 @@ impl MultiPipeline {
     }
 }
 
+/// Send wgpu's uncaptured validation errors to stderr instead of the default
+/// handler, which panics — and inside iced's main-thread redraw that panic
+/// aborts the process, taking the user's unsaved work with it (#358). A bad
+/// frame must degrade, not end the session.
+///
+/// The handler slot is per-device and single: this also catches iced's own draw
+/// errors, and nothing else can report them, so it must stay loud enough to be
+/// noticed. A validation error normally repeats on every frame, though, so a
+/// plain print would flood stderr at refresh rate and bury the first (most
+/// useful) message. Log the 1st, 2nd, 4th, 8th … occurrence instead: the error
+/// is never hidden, the count shows it is ongoing, and the output stays finite.
+///
+/// Installed from `MultiPipeline::new`, which runs once per device — NOT from
+/// `Pipeline::new`, which runs again for every pane `ensure_len` adds. If iced
+/// ever rebuilds the device it builds a new `MultiPipeline` too, so the fresh
+/// device is covered (and the throttle restarts with it).
+fn install_gpu_error_handler(device: &wgpu::Device) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static SEEN: AtomicUsize = AtomicUsize::new(0);
+    SEEN.store(0, Ordering::Relaxed);
+    device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
+        let n = SEEN.fetch_add(1, Ordering::Relaxed) + 1;
+        if n.is_power_of_two() {
+            eprintln!("[gpu] uncaptured wgpu error #{n} (frame degraded, session kept alive): {e}");
+        }
+    }));
+}
+
 impl iced::widget::shader::Pipeline for MultiPipeline {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        install_gpu_error_handler(device);
         Self {
             inners: vec![Pipeline::new(device, queue, format)],
             format,
