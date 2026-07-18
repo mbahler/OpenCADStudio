@@ -1405,6 +1405,46 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
             vis += 1;
         }
 
+        // Justify / distribute fill the line to the content width. `qj` spreads
+        // only the word gaps and leaves the paragraph's last line ragged; `qd`
+        // spreads every glyph gap (letters and words) on every line. The slack
+        // is shared as one gap `δ`: added to each space, and — for distribute —
+        // to each glyph via letter tracking, so `δ·(chars+spaces) = slack`.
+        let is_last_in_para = sub_lines
+            .get(i + 1)
+            .is_none_or(|n| n.is_first_in_paragraph || n.column != sub.column);
+        let (spread_letters, gap) = {
+            let justify =
+                matches!(sub.align, Some(ParagraphAlign::Justify)) && !is_last_in_para;
+            let distribute = matches!(sub.align, Some(ParagraphAlign::Distribute));
+            let slack = (content_right - content_left).max(0.0) - line_w;
+            if rect_w > 0.0 && (justify || distribute) && slack > 1e-6 {
+                let spaces = sub
+                    .atoms
+                    .iter()
+                    .filter(|a| matches!(a.kind, AtomKind::Space))
+                    .count();
+                if distribute {
+                    let chars: usize = sub
+                        .atoms
+                        .iter()
+                        .filter_map(|a| match &a.kind {
+                            AtomKind::Word(t) => Some(t.chars().count()),
+                            _ => None,
+                        })
+                        .sum();
+                    let n = chars + spaces;
+                    (true, if n > 0 { slack / n as f32 } else { 0.0 })
+                } else if spaces > 0 {
+                    (false, slack / spaces as f32)
+                } else {
+                    (false, 0.0)
+                }
+            } else {
+                (false, 0.0)
+            }
+        };
+
         let mut cursor_x = cursor_start;
         for atom in &sub.atoms {
             match &atom.kind {
@@ -1414,7 +1454,23 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                         base_wf.signum() * atom.state.width_mul * base_wf.abs();
                     let oblique = base_oblique + atom.state.oblique_rad;
                     let font_name = resolve_font(&atom.state, &base_font_name);
-                    let tracking = atom.state.tracking;
+                    // Distribute widens letter tracking so each glyph advances an
+                    // extra `gap`; `tracking` scales the font's letter_spacing, so
+                    // invert that to land the exact world gap. A zero-spacing font
+                    // (TTF) can't take letter tracking — its words stay solid and
+                    // only the word gaps spread.
+                    let tracking = if spread_letters {
+                        let l = Face::resolve(&font_name).letter_spacing();
+                        let wf = signed_wf.abs().max(1e-6);
+                        let scale = run_h / 9.0;
+                        if l.abs() > 1e-6 && scale > 0.0 {
+                            atom.state.tracking + gap / (l * scale * wf)
+                        } else {
+                            atom.state.tracking
+                        }
+                    } else {
+                        atom.state.tracking
+                    };
                     let valign_dy = match atom.state.valign {
                         1 => (line_max_h - run_h) * 0.5,
                         2 => line_max_h - run_h,
@@ -1512,8 +1568,16 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                             cx += adv;
                         }
                     }
-                    cursor_x +=
-                        measure_word(text, &atom.state, entity_h, base_wf, &base_font_name);
+                    // Advance by the same tracking the glyphs drew with, so a
+                    // distributed word's letters and the atoms after it stay put.
+                    if tracking != atom.state.tracking {
+                        let mut st = atom.state.clone();
+                        st.tracking = tracking;
+                        cursor_x += measure_word(text, &st, entity_h, base_wf, &base_font_name);
+                    } else {
+                        cursor_x +=
+                            measure_word(text, &atom.state, entity_h, base_wf, &base_font_name);
+                    }
                 }
                 AtomKind::Stack {
                     numerator,
@@ -1607,7 +1671,9 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                     cursor_x += slot_w;
                 }
                 AtomKind::Space => {
-                    let adv = measure_space(&atom.state, entity_h, base_wf, &base_font_name);
+                    // Justify / distribute widen every word gap by `gap`.
+                    let adv =
+                        measure_space(&atom.state, entity_h, base_wf, &base_font_name) + gap;
                     // A space inside a decorated span carries the underline /
                     // overline / strike state but draws no glyph, so without this
                     // the rule breaks at every inter-word gap. Emit the decoration
