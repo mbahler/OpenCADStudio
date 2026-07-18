@@ -337,6 +337,24 @@ pub struct MTextLine {
     /// fresh column here when the entity defines any; with no columns it reads
     /// as a plain line break, which is what `\N` degrades to anyway.
     pub starts_column: bool,
+    /// Blank space above the paragraph, in drawing units (`\p…b#;`). Widens the
+    /// gap before the paragraph's first line so stacked paragraphs read apart.
+    pub space_before: f32,
+    /// Blank space below the paragraph, in drawing units (`\p…a#;`).
+    pub space_after: f32,
+    /// Per-paragraph line spacing (`\psm#` multiple / `\pse#` exact), overriding
+    /// the entity-level factor for this paragraph's own lines.
+    pub line_spacing: Option<ParaLineSpacing>,
+}
+
+/// A paragraph's own line-spacing rule from `\psm#` / `\pse#`, overriding the
+/// entity's DXF-44 factor for that paragraph.
+#[derive(Clone, Copy, Debug)]
+pub enum ParaLineSpacing {
+    /// Multiple of the default baseline gap (`sm#`).
+    Multiple(f32),
+    /// Exact baseline-to-baseline distance in drawing units (`se#`).
+    Exact(f32),
 }
 
 impl MTextLine {
@@ -380,8 +398,8 @@ pub fn adapt_mtext_paragraphs(
     trim_blank_edges: bool,
 ) -> Vec<MTextLine> {
     use acadrust::entities::mtext_format::{
-        parse_mtext, MTextColor, MTextLineAlignment, MTextParagraphAlignment, MTextScalar,
-        ParagraphProperties, SpanProperties, StackingType,
+        parse_mtext, MTextColor, MTextLineAlignment, MTextLineSpacing, MTextParagraphAlignment,
+        MTextScalar, ParagraphProperties, SpanProperties, StackingType,
     };
 
     let entity_height = entity_height.max(1e-6);
@@ -429,8 +447,31 @@ pub fn adapt_mtext_paragraphs(
 
     let mut lines: Vec<MTextLine> = Vec::new();
     let mut carried: Option<(Option<ParagraphAlign>, f32, f32, f32, Vec<TabStop>)> = None;
+    // Paragraph spacing (`b`/`a`) and line spacing (`sm`/`se`) are sticky
+    // per-field: a `\p…;` block that names some codes leaves the rest at their
+    // previous value, so spacing set once (`\pxb0.25;`) applies to every later
+    // paragraph until re-specified. The alignment/indent carry above is
+    // all-or-nothing, which would drop spacing at the first `\p` that only
+    // touches alignment — so spacing is tracked independently here.
+    let mut carried_sb = 0.0_f32;
+    let mut carried_sa = 0.0_f32;
+    let mut carried_ls: Option<ParaLineSpacing> = None;
     for para in &doc.paragraphs {
         let props = &para.properties;
+        if let Some(v) = props.spacing_before {
+            carried_sb = v as f32;
+        }
+        if let Some(v) = props.spacing_after {
+            carried_sa = v as f32;
+        }
+        match props.line_spacing {
+            Some(MTextLineSpacing::Multiple(m)) => {
+                carried_ls = Some(ParaLineSpacing::Multiple(m as f32))
+            }
+            Some(MTextLineSpacing::Exact(e)) => carried_ls = Some(ParaLineSpacing::Exact(e as f32)),
+            Some(MTextLineSpacing::Default) => carried_ls = None,
+            None => {}
+        }
         let (align, indent_first, indent_left, indent_right, tab_stops) =
             if has_own_props(props) || carried.is_none() {
                 let v = (
@@ -460,6 +501,9 @@ pub fn adapt_mtext_paragraphs(
             indent_right,
             tab_stops,
             runs: Vec::new(),
+            space_before: carried_sb,
+            space_after: carried_sa,
+            line_spacing: carried_ls,
         };
         for span in &para.spans {
             let p = &span.properties;
@@ -978,6 +1022,12 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
         is_first_in_paragraph: bool,
         /// Which column this line lives in; always 0 without a column layout.
         column: usize,
+        /// Extra gap above (paragraph's first wrapped line only) / below (last
+        /// line only), in drawing units, from `\p…b#/a#;`.
+        space_before: f32,
+        space_after: f32,
+        /// Paragraph line-spacing override applied to this line's advance.
+        line_spacing: Option<ParaLineSpacing>,
     }
 
     let cols = opts.columns;
@@ -1076,6 +1126,7 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
             base_wf,
             &base_font_name,
         );
+        let n_wrapped = wrapped.len();
         for (idx, atoms) in wrapped.into_iter().enumerate() {
             sub_lines.push(SubLine {
                 atoms,
@@ -1086,6 +1137,15 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                 tab_stops: para.tab_stops.clone(),
                 is_first_in_paragraph: idx == 0,
                 column,
+                // The gap above rides the first wrapped line; the gap below the
+                // last, so an interior wrap keeps normal single spacing.
+                space_before: if idx == 0 { para.space_before } else { 0.0 },
+                space_after: if idx + 1 == n_wrapped {
+                    para.space_after
+                } else {
+                    0.0
+                },
+                line_spacing: para.line_spacing,
             });
         }
     }
@@ -1099,6 +1159,9 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
             tab_stops: Vec::new(),
             is_first_in_paragraph: true,
             column: 0,
+            space_before: 0.0,
+            space_after: 0.0,
+            line_spacing: None,
         });
     }
 
@@ -1115,7 +1178,6 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
             r as f32
         })
         .collect();
-    let n_lines = col_rows.iter().copied().max().unwrap_or(0).max(1) as f32;
     let ls_factor = if opts.line_spacing_factor > 0.0 {
         opts.line_spacing_factor
     } else {
@@ -1125,13 +1187,27 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
     let line_h = entity_h * ls_factor * (5.0 / 3.0) * base_font.line_spacing();
     let h = entity_h;
     // How far the first line's glyphs actually reach above the baseline, when
-    // that is further than the cap height.
+    // that is further than the line's own cap height.
     //
-    // Ordinary letters stop at the cap, so this is `h` for almost all text and
-    // nothing below moves. A symbol font is the exception: its glyphs are drawn
-    // to straddle the cap box — the diameter sign's stroke overhangs it top and
-    // bottom by design — and anchoring such a line by the nominal cap alone hung
-    // it above where the drawing puts it.
+    // Ordinary letters stop at the cap, so this is the first line's nominal cap
+    // and nothing below moves. Two exceptions push it: a symbol font whose
+    // glyphs straddle the cap box (the diameter sign's stroke overhangs it top
+    // and bottom by design), and — the reason the floor is the *line's* cap, not
+    // the entity height — a small heading (`\H0.2x;First column`): anchoring by
+    // the full entity height opened a whole blank line above it.
+    let first_line_cap = sub_lines
+        .first()
+        .map(|line| {
+            line.atoms
+                .iter()
+                .filter_map(|a| match &a.kind {
+                    AtomKind::Word(_) => Some(a.state.height_mul * entity_h),
+                    _ => None,
+                })
+                .fold(0.0_f32, f32::max)
+        })
+        .filter(|c| *c > 0.0)
+        .unwrap_or(h);
     let first_line_ascent = sub_lines
         .first()
         .map(|line| {
@@ -1151,15 +1227,73 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                     )
                     .map(|b| b.ink_max[1])
                 })
-                .fold(h, f32::max)
+                .fold(first_line_cap, f32::max)
         })
         .unwrap_or(h);
+    // Per-line vertical advance: a varying-height MText (inline `\H`) must
+    // space each line by its own content height, not the entity height —
+    // otherwise a small line still leaves a full-height gap and the block
+    // grows several times too tall. Accumulated per column (columns stack
+    // independently). Uniform-height text reduces to the constant `line_h`.
+    let per_line_h: Vec<f32> = sub_lines
+        .iter()
+        .map(|s| {
+            let mh = s
+                .atoms
+                .iter()
+                .filter_map(|a| match &a.kind {
+                    AtomKind::Word(_) => Some(a.state.height_mul * entity_h),
+                    _ => None,
+                })
+                .fold(0.0_f32, f32::max);
+            let mh = if mh > 0.0 { mh } else { entity_h };
+            // A paragraph's own `\psm#`/`\pse#` overrides the entity factor for
+            // its lines; `Exact` fixes the baseline gap outright.
+            match s.line_spacing {
+                Some(ParaLineSpacing::Exact(e)) if e > 0.0 => e,
+                Some(ParaLineSpacing::Multiple(m)) if m > 0.0 => {
+                    mh * m * (5.0 / 3.0) * base_font.line_spacing()
+                }
+                _ => mh * ls_factor * (5.0 / 3.0) * base_font.line_spacing(),
+            }
+        })
+        .collect();
+    let line_y_offset: Vec<f32> = {
+        let mut col_y = vec![0.0_f32; cols.count.max(1)];
+        let mut started = vec![false; cols.count.max(1)];
+        // Space owed below the previous paragraph in each column, paid into the
+        // gap at the next paragraph's first line (alongside its space-before).
+        let mut pending_after = vec![0.0_f32; cols.count.max(1)];
+        sub_lines
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let c = s.column.min(col_y.len().saturating_sub(1));
+                if started[c] {
+                    col_y[c] -= per_line_h[i];
+                    if s.is_first_in_paragraph {
+                        col_y[c] -= s.space_before + pending_after[c];
+                    }
+                } else {
+                    started[c] = true;
+                    // The column's first paragraph still opens its space-before as
+                    // a top margin — that gap is the entity's own `\p…b#;`, not a
+                    // heuristic, so the heading sits where the drawing places it.
+                    col_y[c] -= s.space_before;
+                }
+                pending_after[c] = s.space_after;
+                col_y[c]
+            })
+            .collect()
+    };
+    let total_depth = -line_y_offset.iter().copied().fold(0.0_f32, f32::min);
+
     let v_offset = match opts.v_anchor {
         MTextVAnchor::Top => -first_line_ascent,
-        MTextVAnchor::Middle => ((n_lines - 1.0) * line_h - h) * 0.5,
-        MTextVAnchor::Bottom => (n_lines - 1.0) * line_h,
+        MTextVAnchor::Middle => (total_depth - h) * 0.5,
+        MTextVAnchor::Bottom => total_depth,
         MTextVAnchor::MiddleOfTopLine => -h * 0.5,
-        MTextVAnchor::MiddleOfBottomLine => (n_lines - 1.0) * line_h - h * 0.5,
+        MTextVAnchor::MiddleOfBottomLine => total_depth - h * 0.5,
         MTextVAnchor::BottomOfTopLine => 0.0,
     };
     let attach_h_anchor = opts.attach_h_anchor;
@@ -1200,7 +1334,7 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                 col_offset * sin_r + v_offset * cos_r,
             )
         } else {
-            let ly = -(li * line_h) + v_offset;
+            let ly = line_y_offset[i] + v_offset;
             (ly * (-sin_r), ly * cos_r)
         };
 
@@ -1287,7 +1421,6 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                         _ => 0.0,
                     };
                     let color = atom.state.color.as_ref().and_then(resolve_inline_color);
-                    let body = decorated(text, &atom.state);
 
                     let lx = cursor_x;
                     let ly = valign_dy;
@@ -1297,6 +1430,8 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                         ins_x + (line_base_x + world_dx) as f64,
                         ins_y + (line_base_y + world_dy) as f64,
                     ];
+                    // Glyphs from the plain word — the SDF run and the stroke
+                    // fallback both draw clean characters.
                     let (strokes, fill_tris) = lff::tessellate_text_run(
                         [0.0, 0.0],
                         run_h,
@@ -1305,15 +1440,14 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                         oblique,
                         tracking,
                         &font_name,
-                        &body,
+                        text,
                     );
+                    let glyph_n = strokes.len();
                     all_strokes.push(TextStroke {
                         strokes,
                         origin,
                         color,
                         fill_tris,
-                        // `text` is the plain word (specials already resolved,
-                        // no decoration markers); `run_h` is raw like the strokes.
                         run: Some(GlyphRun {
                             text: text.clone(),
                             font: font_name.to_string(),
@@ -1325,6 +1459,33 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                             bold: atom.state.bold,
                         }),
                     });
+                    // Underline / overline / strike are lines, not glyphs; a
+                    // run-group's strokes are suppressed by the SDF path, so
+                    // emit the decorations in their own RUN-LESS group. Reuse
+                    // lff's exact positions by tessellating the decorated word
+                    // and taking the strokes it appends after the glyphs.
+                    if atom.state.underline || atom.state.overline || atom.state.strike {
+                        let body = decorated(text, &atom.state);
+                        let (deco, _) = lff::tessellate_text_run(
+                            [0.0, 0.0],
+                            run_h,
+                            rot,
+                            signed_wf,
+                            oblique,
+                            tracking,
+                            &font_name,
+                            &body,
+                        );
+                        if deco.len() > glyph_n {
+                            all_strokes.push(TextStroke {
+                                strokes: deco[glyph_n..].to_vec(),
+                                origin,
+                                color,
+                                fill_tris: vec![],
+                                run: None,
+                            });
+                        }
+                    }
                     if opts.want_glyph_boxes {
                         // Per-character boxes, advancing exactly as
                         // `measure_word` does so they track the glyphs.
@@ -1447,6 +1608,52 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                 }
                 AtomKind::Space => {
                     let adv = measure_space(&atom.state, entity_h, base_wf, &base_font_name);
+                    // A space inside a decorated span carries the underline /
+                    // overline / strike state but draws no glyph, so without this
+                    // the rule breaks at every inter-word gap. Emit the decoration
+                    // for the blank the same way words do — lff advances a space by
+                    // exactly `measure_space`, so the rule meets the neighbours'.
+                    if atom.state.underline || atom.state.overline || atom.state.strike {
+                        let run_h = atom.state.height_mul * entity_h;
+                        let signed_wf =
+                            base_wf.signum() * atom.state.width_mul * base_wf.abs();
+                        let oblique = base_oblique + atom.state.oblique_rad;
+                        let font_name = resolve_font(&atom.state, &base_font_name);
+                        let tracking = atom.state.tracking;
+                        let valign_dy = match atom.state.valign {
+                            1 => (line_max_h - run_h) * 0.5,
+                            2 => line_max_h - run_h,
+                            _ => 0.0,
+                        };
+                        let color =
+                            atom.state.color.as_ref().and_then(resolve_inline_color);
+                        let lx = cursor_x;
+                        let ly = valign_dy;
+                        let origin: [f64; 2] = [
+                            ins_x + (line_base_x + lx * cos_r - ly * sin_r) as f64,
+                            ins_y + (line_base_y + lx * sin_r + ly * cos_r) as f64,
+                        ];
+                        let body = decorated(" ", &atom.state);
+                        let (deco, _) = lff::tessellate_text_run(
+                            [0.0, 0.0],
+                            run_h,
+                            rot,
+                            signed_wf,
+                            oblique,
+                            tracking,
+                            &font_name,
+                            &body,
+                        );
+                        if !deco.is_empty() {
+                            all_strokes.push(TextStroke {
+                                strokes: deco,
+                                origin,
+                                color,
+                                fill_tris: vec![],
+                                run: None,
+                            });
+                        }
+                    }
                     if opts.want_glyph_boxes {
                         let run_h = atom.state.height_mul * entity_h;
                         let (ax, ay) = to_world(line_base_x, line_base_y, cursor_x, 0.0);
@@ -1656,6 +1863,7 @@ mod adapter_tests {
         let lines = adapt_mtext_paragraphs("a\\Pb\\Pc", 2.5, true);
         assert_eq!(lines.len(), 3);
     }
+
 }
 
 
