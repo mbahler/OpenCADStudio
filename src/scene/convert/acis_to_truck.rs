@@ -29,11 +29,11 @@ use acadrust::entities::acis::{
 };
 
 use crate::scene::convert::solid3d_tess::{
-    apply_body_transform, body_transform, collect_face_loops, cone_axis_span, tess_cone_face,
+    body_transform, collect_face_loops, cone_axis_span, finalize_mesh, tess_cone_face,
     tess_plane_face, tess_sphere_face, tess_torus_face, LodConfig, BOUNDARY_CHORD_FRAC,
     TRUCK_CHORD_FRAC,
 };
-use crate::scene::model::mesh_model::{MeshLodSet, MeshModel};
+use crate::scene::model::mesh_model::MeshLodSet;
 
 /// Slightly over 2π so revolution builders close the loop.
 const FULL: f64 = std::f64::consts::TAU + 0.2;
@@ -85,15 +85,12 @@ pub fn tessellate_sat_truck(
     color: [f32; 4],
     _facet_res: f64,
 ) -> Option<MeshLodSet> {
-    let mut mesh = MeshModel {
-        name: name.clone(),
-        verts: Vec::new(),
-        verts_low: Vec::new(),
-        normals: Vec::new(),
-        indices: Vec::new(),
-        color,
-        selected: false,
-    };
+    // Vertices accumulate in f64 world/local space; `finalize_mesh` splits them
+    // into the double-single (high, low) pair once, so a solid at UTM scale
+    // keeps full precision instead of quantizing to the f32 grid.
+    let mut verts: Vec<[f64; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
 
     for face in sat.faces().into_iter() {
         let Some(surf_rec) = sat.resolve(face.surface()) else {
@@ -105,7 +102,7 @@ pub fn tessellate_sat_truck(
                 let shell: Shell = faces.into();
                 let poly = shell.triangulation(tol).to_polygon();
                 if !poly.tri_faces().is_empty() {
-                    append_group(&mut mesh, &poly, &outward);
+                    append_group(&mut verts, &mut normals, &mut indices, &poly, &outward);
                     appended = true;
                 }
             }
@@ -113,25 +110,22 @@ pub fn tessellate_sat_truck(
         // Truck's rsweep/triangulation degenerates to zero triangles on some
         // short-arc cones (a curved wall face whose profile passes through the
         // local origin), leaving a see-through gap. Fall back to the bespoke
-        // parametric sampler for just that face — it writes body-local verts
-        // into the same buffers, so the shared body transform below still
-        // applies uniformly.
+        // parametric sampler for just that face — it writes into the same
+        // buffers, so the shared finalize below still applies uniformly.
         if !appended {
-            bespoke_face(sat, &face, surf_rec, &mut mesh);
+            bespoke_face(sat, &face, surf_rec, &mut verts, &mut normals, &mut indices);
         }
     }
 
     // Spline (NURBS) faces are meshed by direct grid sampling of the truck
     // BSplineSurface — see spline_tess — and merged into the same buffers.
-    append_spline_faces(sat, &mut mesh);
+    append_spline_faces(sat, &mut verts, &mut normals, &mut indices);
 
-    if mesh.indices.is_empty() {
+    if indices.is_empty() {
         return None;
     }
 
-    if let Some((m, tr, scale)) = body_transform(sat) {
-        apply_body_transform(&mut mesh, &m, &tr, scale);
-    }
+    let mesh = finalize_mesh(name, verts, normals, indices, color, body_transform(sat));
     Some(MeshLodSet::from_lods(vec![mesh]))
 }
 
@@ -142,9 +136,10 @@ fn bespoke_face(
     sat: &SatDocument,
     face: &SatFace,
     surf_rec: &acadrust::entities::acis::SatRecord,
-    mesh: &mut MeshModel,
+    v: &mut Vec<[f64; 3]>,
+    n: &mut Vec<[f32; 3]>,
+    i: &mut Vec<u32>,
 ) {
-    let (v, n, i) = (&mut mesh.verts, &mut mesh.normals, &mut mesh.indices);
     match surf_rec.entity_type.as_str() {
         "plane-surface" => {
             if let Some(p) = SatPlaneSurface::from_record(surf_rec) {
@@ -413,8 +408,12 @@ fn cone_boundary_arc(
 
 /// Append meshes for every `spline-surface` face, reusing the truck
 /// BSplineSurface grid sampler in `spline_tess`.
-fn append_spline_faces(sat: &SatDocument, mesh: &mut MeshModel) {
-    use crate::scene::convert::solid3d_tess::LodConfig;
+fn append_spline_faces(
+    sat: &SatDocument,
+    verts: &mut Vec<[f64; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    indices: &mut Vec<u32>,
+) {
     for face in sat.faces() {
         let Some(surf_rec) = sat.resolve(face.surface()) else {
             continue;
@@ -422,21 +421,14 @@ fn append_spline_faces(sat: &SatDocument, mesh: &mut MeshModel) {
         if surf_rec.entity_type != "spline-surface" {
             continue;
         }
-        let mut verts: Vec<[f32; 3]> = Vec::new();
-        let mut normals: Vec<[f32; 3]> = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
         crate::scene::convert::spline_tess::tess_spline_face(
             sat,
             &face,
             LodConfig::HIGH,
-            &mut verts,
-            &mut normals,
-            &mut indices,
+            verts,
+            normals,
+            indices,
         );
-        let base = mesh.verts.len() as u32;
-        mesh.verts.extend_from_slice(&verts);
-        mesh.normals.extend_from_slice(&normals);
-        mesh.indices.extend(indices.iter().map(|i| i + base));
     }
 }
 
@@ -445,14 +437,20 @@ fn append_spline_faces(sat: &SatDocument, mesh: &mut MeshModel) {
 /// Append one face's triangulation to `mesh`, computing smooth per-vertex
 /// normals from the outward rule and flipping any triangle whose winding
 /// disagrees with that outward direction.
-fn append_group(mesh: &mut MeshModel, poly: &PolygonMesh, outward: &Outward) {
+fn append_group(
+    verts: &mut Vec<[f64; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    out_indices: &mut Vec<u32>,
+    poly: &PolygonMesh,
+    outward: &Outward,
+) {
     let positions = poly.positions();
-    let base = mesh.verts.len() as u32;
+    let base = verts.len() as u32;
     for p in positions {
         let pos = [p.x, p.y, p.z];
-        mesh.verts.push([p.x as f32, p.y as f32, p.z as f32]);
+        verts.push(pos);
         let n = outward.at(pos);
-        mesh.normals.push([n[0] as f32, n[1] as f32, n[2] as f32]);
+        normals.push([n[0] as f32, n[1] as f32, n[2] as f32]);
     }
     for tri in poly.tri_faces() {
         let (i0, i1, i2) = (tri[0].pos, tri[1].pos, tri[2].pos);
@@ -468,9 +466,9 @@ fn append_group(mesh: &mut MeshModel, poly: &PolygonMesh, outward: &Outward) {
         let out = outward.at(cen);
         let (j0, j1, j2) = (base + i0 as u32, base + i1 as u32, base + i2 as u32);
         if vdot(gn, out) < 0.0 {
-            mesh.indices.extend_from_slice(&[j0, j2, j1]);
+            out_indices.extend_from_slice(&[j0, j2, j1]);
         } else {
-            mesh.indices.extend_from_slice(&[j0, j1, j2]);
+            out_indices.extend_from_slice(&[j0, j1, j2]);
         }
     }
 }

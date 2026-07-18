@@ -56,7 +56,7 @@ pub fn tess_spline_face(
     sat: &SatDocument,
     face: &SatFace,
     lod: LodConfig,
-    verts: &mut Vec<[f32; 3]>,
+    verts: &mut Vec<[f64; 3]>,
     normals: &mut Vec<[f32; 3]>,
     indices: &mut Vec<u32>,
 ) {
@@ -90,7 +90,7 @@ pub fn tess_spline_face(
             let u = u0 + (u1 - u0) * (i as f64 / su as f64);
             let p = surface.subs(u, v);
             let n = surface.normal(u, v);
-            verts.push([p.x as f32, p.y as f32, p.z as f32]);
+            verts.push([p.x, p.y, p.z]);
             normals.push([n.x as f32, n.y as f32, n.z as f32]);
         }
     }

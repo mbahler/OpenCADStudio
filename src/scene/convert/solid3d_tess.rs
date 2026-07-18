@@ -113,13 +113,16 @@ pub(crate) fn nominal_segs(frac: f64) -> usize {
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Tessellate a SAT document into mesh buffers — shared by all ACIS entities.
+/// Vertices accumulate in f64 and `finalize_mesh` splits them into the
+/// double-single pair with the body placement (`xform`) applied.
 fn tessellate_sat(
     sat: &SatDocument,
     name: String,
     color: [f32; 4],
     lod: LodConfig,
+    xform: Option<([f64; 9], [f64; 3], f64)>,
 ) -> Option<MeshModel> {
-    let mut verts: Vec<[f32; 3]> = Vec::new();
+    let mut verts: Vec<[f64; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
@@ -197,15 +200,7 @@ fn tessellate_sat(
     if indices.is_empty() {
         return None;
     }
-    Some(MeshModel {
-        name,
-        verts,
-        verts_low: Vec::new(),
-        normals,
-        indices,
-        color,
-        selected: false,
-    })
+    Some(finalize_mesh(name, verts, normals, indices, color, xform))
 }
 
 /// Tessellate an ACIS document, preferring the truck B-rep kernel and falling
@@ -879,10 +874,7 @@ fn tessellate_sat_lods(
     let mut lods: Vec<MeshModel> = Vec::with_capacity(3);
     for lod in configs {
         let scaled = scale_lod(lod, facet_res);
-        if let Some(mut m) = tessellate_sat(sat, name.clone(), color, scaled) {
-            if let Some((mat, tr, scale)) = xform {
-                apply_body_transform(&mut m, &mat, &tr, scale);
-            }
+        if let Some(m) = tessellate_sat(sat, name.clone(), color, scaled, xform) {
             lods.push(m);
         }
     }
@@ -921,38 +913,69 @@ pub(crate) fn body_transform(sat: &SatDocument) -> Option<([f64; 9], [f64; 3], f
 /// Apply a body placement transform to a mesh. ACIS treats points as row
 /// vectors (`p' = scale·(p·M) + T`), so the 3×3 is indexed transposed relative
 /// to a column-vector multiply. Normals get the rotation only, renormalized.
-pub(crate) fn apply_body_transform(mesh: &mut MeshModel, m: &[f64; 9], tr: &[f64; 3], scale: f64) {
-    // The body translation `tr` is where a solid gets its world placement, so at
-    // UTM scale this is exactly where the coordinate stops fitting in an f32.
-    // Compute each world vertex in f64 and split it into the double-single
-    // (high, low) pair the mesh shader reconstructs relative to the eye — the
-    // same treatment the feature edges already get. Without the low half the
-    // shaded faces sit on a ~0.06 m grid while their own edges stay exact, so the
-    // surface visibly crawls against its wireframe as the camera moves.
-    mesh.verts_low = Vec::with_capacity(mesh.verts.len());
-    for i in 0..mesh.verts.len() {
-        let [vx, vy, vz] = mesh.verts[i];
-        let (x, y, z) = (vx as f64, vy as f64, vz as f64);
-        let wx = scale * (x * m[0] + y * m[3] + z * m[6]) + tr[0];
-        let wy = scale * (x * m[1] + y * m[4] + z * m[7]) + tr[1];
-        let wz = scale * (x * m[2] + y * m[5] + z * m[8]) + tr[2];
+/// Build a `MeshModel` from f64 accumulation buffers. This is the ONLY place a
+/// solid mesh vertex becomes f32: the world coordinate is computed in f64 (the
+/// body placement applied, or identity when the solid stores absolute geometry)
+/// and split into the double-single (high, low) pair the mesh shader
+/// reconstructs relative to the eye — exactly the treatment the feature edges
+/// get in `attach_feature_edges`. Casting to f32 any earlier quantizes a solid
+/// placed at UTM scale to a ~0.06 m grid, so its shaded faces crawl against
+/// their own (double-single) wireframe as the camera moves. The split runs
+/// unconditionally: many solids store their geometry in absolute coordinates
+/// with no body transform, and those need it just as much as placed ones.
+pub(crate) fn finalize_mesh(
+    name: String,
+    verts: Vec<[f64; 3]>,
+    normals: Vec<[f32; 3]>,
+    indices: Vec<u32>,
+    color: [f32; 4],
+    xform: Option<([f64; 9], [f64; 3], f64)>,
+) -> MeshModel {
+    let mut hi: Vec<[f32; 3]> = Vec::with_capacity(verts.len());
+    let mut lo: Vec<[f32; 3]> = Vec::with_capacity(verts.len());
+    for [x, y, z] in verts {
+        let (wx, wy, wz) = match &xform {
+            Some((m, tr, scale)) => (
+                scale * (x * m[0] + y * m[3] + z * m[6]) + tr[0],
+                scale * (x * m[1] + y * m[4] + z * m[7]) + tr[1],
+                scale * (x * m[2] + y * m[5] + z * m[8]) + tr[2],
+            ),
+            None => (x, y, z),
+        };
         let (hx, hy, hz) = (wx as f32, wy as f32, wz as f32);
-        mesh.verts[i] = [hx, hy, hz];
-        mesh.verts_low.push([
+        hi.push([hx, hy, hz]);
+        lo.push([
             (wx - hx as f64) as f32,
             (wy - hy as f64) as f32,
             (wz - hz as f64) as f32,
         ]);
     }
-    for n in &mut mesh.normals {
-        let (x, y, z) = (n[0] as f64, n[1] as f64, n[2] as f64);
-        let nx = x * m[0] + y * m[3] + z * m[6];
-        let ny = x * m[1] + y * m[4] + z * m[7];
-        let nz = x * m[2] + y * m[5] + z * m[8];
-        let len = (nx * nx + ny * ny + nz * nz).sqrt();
-        if len > 1e-9 {
-            *n = [(nx / len) as f32, (ny / len) as f32, (nz / len) as f32];
-        }
+    let normals = match &xform {
+        Some((m, _, _)) => normals
+            .iter()
+            .map(|n| {
+                let (x, y, z) = (n[0] as f64, n[1] as f64, n[2] as f64);
+                let nx = x * m[0] + y * m[3] + z * m[6];
+                let ny = x * m[1] + y * m[4] + z * m[7];
+                let nz = x * m[2] + y * m[5] + z * m[8];
+                let len = (nx * nx + ny * ny + nz * nz).sqrt();
+                if len > 1e-9 {
+                    [(nx / len) as f32, (ny / len) as f32, (nz / len) as f32]
+                } else {
+                    *n
+                }
+            })
+            .collect(),
+        None => normals,
+    };
+    MeshModel {
+        name,
+        verts: hi,
+        verts_low: lo,
+        normals,
+        indices,
+        color,
+        selected: false,
     }
 }
 
@@ -1314,10 +1337,13 @@ pub(crate) fn resolve_point(sat: &SatDocument, v_ptr: SatPointer) -> Option<[f64
 
 // ── Mesh builder helpers ──────────────────────────────────────────────────────
 
-/// Append one quad (two triangles) to the mesh buffers.
+/// Append one quad (two triangles) to the mesh buffers. Vertices stay in f64
+/// world/local space until `finalize_mesh` splits them into the double-single
+/// (high, low) pair — casting here would quantize a solid placed at UTM scale to
+/// the ~0.06 m f32 grid.
 #[inline]
 fn push_quad(
-    verts: &mut Vec<[f32; 3]>,
+    verts: &mut Vec<[f64; 3]>,
     normals: &mut Vec<[f32; 3]>,
     indices: &mut Vec<u32>,
     p: [[f64; 3]; 4],
@@ -1326,7 +1352,7 @@ fn push_quad(
     let base = verts.len() as u32;
     let nf = [n[0] as f32, n[1] as f32, n[2] as f32];
     for &pt in &p {
-        verts.push([pt[0] as f32, pt[1] as f32, pt[2] as f32]);
+        verts.push(pt);
         normals.push(nf);
     }
     // Two CCW triangles: (0,1,2) and (0,2,3)
@@ -1340,7 +1366,7 @@ pub(crate) fn tess_plane_face(
     face: &SatFace,
     plane: &SatPlaneSurface,
     chord_frac: f64,
-    verts: &mut Vec<[f32; 3]>,
+    verts: &mut Vec<[f64; 3]>,
     normals: &mut Vec<[f32; 3]>,
     indices: &mut Vec<u32>,
 ) {
@@ -1364,7 +1390,7 @@ pub(crate) fn tess_plane_face(
 
     let base = verts.len() as u32;
     for &pt in &poly {
-        verts.push([pt[0] as f32, pt[1] as f32, pt[2] as f32]);
+        verts.push(pt);
         normals.push(nf);
     }
 
@@ -1383,7 +1409,7 @@ pub(crate) fn tess_cone_face(
     face: &SatFace,
     cone: &SatConeSurface,
     lod: LodConfig,
-    verts: &mut Vec<[f32; 3]>,
+    verts: &mut Vec<[f64; 3]>,
     normals: &mut Vec<[f32; 3]>,
     indices: &mut Vec<u32>,
 ) {
@@ -1658,7 +1684,7 @@ pub(crate) fn tess_sphere_face(
     face: &SatFace,
     sphere: &SatSphereSurface,
     lod: LodConfig,
-    verts: &mut Vec<[f32; 3]>,
+    verts: &mut Vec<[f64; 3]>,
     normals: &mut Vec<[f32; 3]>,
     indices: &mut Vec<u32>,
 ) {
@@ -1746,7 +1772,7 @@ pub(crate) fn tess_torus_face(
     face: &SatFace,
     torus: &SatTorusSurface,
     lod: LodConfig,
-    verts: &mut Vec<[f32; 3]>,
+    verts: &mut Vec<[f64; 3]>,
     normals: &mut Vec<[f32; 3]>,
     indices: &mut Vec<u32>,
 ) {
