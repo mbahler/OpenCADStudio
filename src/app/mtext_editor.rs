@@ -707,8 +707,21 @@ impl super::OpenCADStudio {
                     each(&mut cells[a..b], |p| p.set_strikethrough(on));
                 }
                 MTextFmt::Italic => {
-                    let on = !all_have(&cells[a..b], |p| p.oblique_angle == Some(15.0));
-                    each(&mut cells[a..b], |p| p.oblique_angle = on.then_some(15.0));
+                    // Italic is the editor's canonical 15° oblique. An imported
+                    // run may instead carry the font italic flag (`\f…|i1;`);
+                    // recognise that as italic too, and clear it on toggle so
+                    // the one canonical form is the oblique — otherwise an
+                    // imported italic run could never be switched off.
+                    let on = !all_have(&cells[a..b], |p| {
+                        p.oblique_angle == Some(15.0)
+                            || p.font.as_ref().is_some_and(|f| f.italic)
+                    });
+                    each(&mut cells[a..b], |p| {
+                        p.oblique_angle = on.then_some(15.0);
+                        if let Some(f) = p.font.as_mut() {
+                            f.italic = false;
+                        }
+                    });
                 }
                 MTextFmt::Bold => {
                     // Real bold: set the font's bold flag (the SDF renderer bakes

@@ -527,10 +527,16 @@ pub fn adapt_mtext_paragraphs(
                     None => 1.0,
                 },
                 width_mul: p.width_factor.map(|w| w as f32).unwrap_or(1.0),
-                oblique_rad: p
-                    .oblique_angle
-                    .map(|q| (q as f32).to_radians())
-                    .unwrap_or(0.0),
+                // Explicit `\Q` oblique wins; otherwise the font italic flag
+                // (`\f…|i1;`) renders as the same ~15° slant the editor's Italic
+                // button applies, so imported italic text isn't shown upright.
+                oblique_rad: match p.oblique_angle {
+                    Some(q) => (q as f32).to_radians(),
+                    None if p.font.as_ref().is_some_and(|f| f.italic) => {
+                        15.0_f32.to_radians()
+                    }
+                    None => 0.0,
+                },
                 tracking: p.tracking.map(|t| t as f32).unwrap_or(1.0),
                 valign: match p.line_align {
                     Some(MTextLineAlignment::Middle) => 1,
@@ -1071,7 +1077,13 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                 MTextRunKind::Glyphs(text) => {
                     let mut word = String::new();
                     for ch in text.chars() {
-                        if ch == ' ' || ch == '\u{00A0}' || ch == '\t' {
+                        if ch == '\u{00A0}' {
+                            // Non-breaking space (`\~`): keep it inside the word
+                            // so the line can't wrap here. It still renders as a
+                            // space — the font advances over the ' ' — but the
+                            // words it joins stay together.
+                            word.push(' ');
+                        } else if ch == ' ' || ch == '\t' {
                             if !word.is_empty() {
                                 atoms.push(LayoutAtom {
                                     kind: AtomKind::Word(std::mem::take(&mut word)),
@@ -2007,6 +2019,25 @@ mod adapter_tests {
 
         let (_, d) = first_run(&adapt_mtext_paragraphs("\\Lunder\\l", 2.5, true));
         assert!(d.underline);
+    }
+
+    #[test]
+    fn font_italic_flag_renders_as_oblique() {
+        // A `\f…|i1;` italic font has no true-italic glyphs in the stroke/SDF
+        // faces, so it must render as the same slant the editor's Italic button
+        // applies (~15°) — not upright.
+        let (_, it) = first_run(&adapt_mtext_paragraphs("\\fArial|i1;x", 2.5, true));
+        assert!(
+            (it.oblique_rad - 15f32.to_radians()).abs() < 1e-4,
+            "italic flag should slant, got {}",
+            it.oblique_rad
+        );
+        // A non-italic font stays upright.
+        let (_, up) = first_run(&adapt_mtext_paragraphs("\\fArial|i0;x", 2.5, true));
+        assert!(up.oblique_rad.abs() < 1e-4, "got {}", up.oblique_rad);
+        // An explicit `\Q` wins over the italic flag (no double slant).
+        let (_, q) = first_run(&adapt_mtext_paragraphs("\\Q30;\\fArial|i1;x", 2.5, true));
+        assert!((q.oblique_rad - 30f32.to_radians()).abs() < 1e-4, "got {}", q.oblique_rad);
     }
 
     #[test]
