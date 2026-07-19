@@ -349,16 +349,12 @@ pub(super) fn mtext_editor_overlay<'a>(
     ed: &'a super::super::mtext_editor::MTextEditorState,
     styles: Vec<String>,
     canvas_size: (f32, f32),
+    modal_offset: iced::Vector,
+    modal_resize: iced::Vector,
 ) -> Element<'a, Message> {
     use super::super::mtext_editor::{JustifyChoice, MTextFmt, ParaAlign};
     use iced::widget::{canvas, svg};
 
-    const PANEL_BG: Color = Color {
-        r: 0.16,
-        g: 0.16,
-        b: 0.16,
-        a: 0.98,
-    };
     const BORDER: Color = Color {
         r: 0.40,
         g: 0.40,
@@ -548,22 +544,13 @@ pub(super) fn mtext_editor_overlay<'a>(
             .on_press(Message::MTextLineSpacing(2.0))
             .padding(3)
             .style(btn_style),
-        iced::widget::Space::new().width(Fill),
-        icon_btn(
-            include_bytes!("../../../assets/icons/mt_ok.svg"),
-            Message::MTextOk
-        ),
-        icon_btn(
-            include_bytes!("../../../assets/icons/mt_cancel.svg"),
-            Message::MTextCancel
-        ),
     ]
     .spacing(4)
     .align_y(iced::Alignment::Center);
 
-    // ── Segmented Edit | Preview toggle (between toolbar and body) ────────
-    // ── Body: the rendered preview (the editor is preview-only) ─────────
-    const VIEW_H: f32 = 150.0;
+    // ── Body: the rendered preview (the editor is preview-only). It fills the
+    // space left by the toolbars, so the resizable modal's extra height flows
+    // into the text area. ─────────────────────────────────────────────────
     let body: Element<'a, Message> = {
         let segments = mtext_preview_segments(ed);
         let (mut minx, mut miny, mut maxx, mut maxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
@@ -606,7 +593,9 @@ pub(super) fn mtext_editor_overlay<'a>(
         let cv = canvas(prog)
             .width(Fill)
             .height(iced::Length::Fixed(content_h));
-        container(iced::widget::scrollable(cv).height(iced::Length::Fixed(VIEW_H)))
+        // The preview fills the space the toolbars leave, so the resizable
+        // modal's extra height goes to the text area (it scrolls if taller).
+        container(iced::widget::scrollable(cv).height(Fill))
             .style(move |_: &Theme| container::Style {
                 background: Some(Background::Color(FIELD_BG)),
                 border: Border {
@@ -618,33 +607,51 @@ pub(super) fn mtext_editor_overlay<'a>(
             })
             .padding(2)
             .width(Fill)
+            .height(Fill)
             .into()
     };
 
-    let panel = container(column![row1, row2, body].spacing(5))
-        .style(move |_: &Theme| container::Style {
-            background: Some(Background::Color(PANEL_BG)),
-            border: Border {
-                color: BORDER,
-                width: 1.0,
-                radius: 5.0.into(),
-            },
-            ..Default::default()
-        })
-        .padding(6)
-        .width(iced::Length::Fixed(640.0));
+    // ── Top action bar: Apply on the right, exactly like the style managers'
+    // toolbar strip. Closing (the modal ✕) without applying discards the
+    // buffer, so there is no separate Cancel.
+    let action_bar = container(
+        row![
+            iced::widget::Space::new().width(Fill),
+            crate::ui::style::style_manager::tb_button("Apply", Message::MTextApply, true),
+        ]
+        .align_y(iced::Alignment::Center),
+    )
+    .style(|_: &Theme| container::Style {
+        background: Some(Background::Color(crate::ui::style::style_manager::TB)),
+        ..Default::default()
+    })
+    .width(Fill)
+    .padding([5, 8]);
 
-    // Keep the whole panel on-screen: clamp the anchor so it never spills past
-    // the right/bottom edge (where its toolbar buttons would be unclickable).
-    // Width is fixed; height is the toolbar rows + the fixed VIEW_H body.
-    const PANEL_W: f32 = 640.0 + 14.0; // fixed width + padding/border
-    const PANEL_H: f32 = VIEW_H + 150.0; // body + toolbars/toggle/padding
-    let (cw, ch) = canvas_size;
-    let anchor = iced::Point::new(
-        (ed.screen_anchor.x - 10.0).clamp(0.0, (cw - PANEL_W).max(0.0)),
-        (ed.screen_anchor.y - 90.0).clamp(0.0, (ch - PANEL_H).max(0.0)),
-    );
-    position_canvas_overlay(anchor, panel.into())
+    // The shared modal frame supplies the panel background, drag title bar,
+    // ✕ (which also cancels) and the resize grip. The content is a Fill column
+    // wrapped here in a fixed box (natural 660×480, grown by the shared resize
+    // delta) so the modal frame shrinks to it and the corner grip can drag it.
+    let content = container(
+        column![action_bar, row1, row2, body]
+            .spacing(6)
+            .width(Fill)
+            .height(Fill),
+    )
+    .width(iced::Length::Fixed(660.0 + modal_resize.x))
+    .height(iced::Length::Fixed(480.0 + modal_resize.y));
+
+    let _ = canvas_size; // positioned & sized by the modal frame now
+    // `modal` sizes its stack from the base layer, so the base must fill the
+    // area (a zero-size base collapses the whole overlay to nothing). The
+    // transparent fill lets the dimmed viewport show through beneath.
+    crate::ui::modal::modal(
+        iced::widget::Space::new().width(Fill).height(Fill),
+        content,
+        Message::MTextCancel,
+        modal_offset,
+        true,
+    )
 }
 
 // ── Viewport right-click context menu ──────────────────────────────────────

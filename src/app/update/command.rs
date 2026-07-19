@@ -702,6 +702,7 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                     self.layer_delete_pending = Some((names, count));
                     self.active_modal = Some(crate::app::ModalKind::LayerDeleteWarning);
                     self.modal_offset = iced::Vector::ZERO;
+                    self.modal_resize = iced::Vector::ZERO;
                 }
                 Task::none()
     }
@@ -712,6 +713,7 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
         let i = self.active_tab;
         self.active_modal = None;
         self.modal_offset = iced::Vector::ZERO;
+        self.modal_resize = iced::Vector::ZERO;
         let Some((names, _)) = self.layer_delete_pending.take() else {
             return Task::none();
         };
@@ -1668,6 +1670,7 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 self.attr_editor_handle = Some(handle);
                 self.active_modal = Some(crate::app::ModalKind::AttributeEditor);
                 self.modal_offset = iced::Vector::ZERO;
+                self.modal_resize = iced::Vector::ZERO;
             }
             Err(msg) => self.command_line.push_error(msg),
         }
@@ -1687,6 +1690,7 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
         if self.active_modal == Some(crate::app::ModalKind::AttributeEditor) {
             self.active_modal = None;
             self.modal_offset = iced::Vector::ZERO;
+            self.modal_resize = iced::Vector::ZERO;
         }
         self.attr_editor_handle = None;
         self.attr_editor_block.clear();

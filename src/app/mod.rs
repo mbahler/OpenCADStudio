@@ -448,6 +448,12 @@ pub(super) struct OpenCADStudio {
     modal_drag_last: Option<Point>,
     /// True while the modal title bar is held (a drag is in progress).
     modal_dragging: bool,
+    /// How far the user has dragged the modal's corner resize grip from the
+    /// dialog's natural size (added to each modal's default width/height). Reset
+    /// with `modal_offset` so every dialog opens at its own size.
+    modal_resize: iced::Vector,
+    /// True while the modal's corner resize grip is held.
+    modal_resizing: bool,
     // ── Attribute editor dialog (ATTEDIT / double-click a block) ───────────
     /// INSERT whose attributes the editor modal is editing (`None` = closed).
     attr_editor_handle: Option<acadrust::Handle>,
@@ -1845,6 +1851,10 @@ pub enum Message {
     MTextCaretBlink,
     /// Commit the editor: create or update the MText entity.
     MTextOk,
+    /// Apply the buffer to the entity but leave the editor open (the button).
+    MTextApply,
+    /// Grab the resizable modal's corner grip (a drag resizes it).
+    ModalResizeGrab,
     /// Discard the editor without creating / changing the entity.
     MTextCancel,
     // ── In-place single-line TEXT editor ────────────────────────────────
@@ -2227,6 +2237,8 @@ impl OpenCADStudio {
             modal_offset: iced::Vector::ZERO,
             modal_drag_last: None,
             modal_dragging: false,
+            modal_resize: iced::Vector::ZERO,
+            modal_resizing: false,
             attr_editor_handle: None,
             attr_editor_block: String::new(),
             attr_editor_rows: Vec::new(),

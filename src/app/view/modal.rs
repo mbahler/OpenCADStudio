@@ -6,13 +6,17 @@ impl OpenCADStudio {
     /// Build the currently-open modal dialog's content (Plan B), or `None`.
     /// Each former pop-up window is constructed here and given a bounded size
     /// (About shrinks to its content). Rendered as an overlay by `view_main`.
-    pub(super) fn modal_content(&self) -> Option<Element<'_, Message>> {
-        fn sized<'a>(e: Element<'a, Message>, w: u16, h: u16) -> Element<'a, Message> {
+    pub(super) fn modal_content<'s>(&'s self) -> Option<Element<'s, Message>> {
+        // Grow every dialog by the shared corner-resize delta (grow-only, so the
+        // natural size is the floor). The delta resets to zero whenever a modal
+        // opens/closes, so each dialog starts at its own size.
+        let ex = self.modal_resize;
+        let sized = |e: Element<'s, Message>, w: u16, h: u16| -> Element<'s, Message> {
             iced::widget::container(e)
-                .width(iced::Length::Fixed(w as f32))
-                .height(iced::Length::Fixed(h as f32))
+                .width(iced::Length::Fixed(w as f32 + ex.x))
+                .height(iced::Length::Fixed(h as f32 + ex.y))
                 .into()
-        }
+        };
         Some(match self.active_modal? {
             super::super::ModalKind::About => crate::ui::window::about::view_window(),
             super::super::ModalKind::Shortcuts => {

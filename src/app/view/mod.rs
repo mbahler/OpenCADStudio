@@ -1221,7 +1221,13 @@ impl OpenCADStudio {
                     .iter()
                     .map(|s| s.name.clone())
                     .collect();
-                viewport_stack = viewport_stack.push(mtext_editor_overlay(ed, styles, canvas));
+                viewport_stack = viewport_stack.push(mtext_editor_overlay(
+                    ed,
+                    styles,
+                    canvas,
+                    self.modal_offset,
+                    self.modal_resize,
+                ));
             }
             if let Some(ed) = &self.text_inline {
                 viewport_stack = viewport_stack.push(text_inline_overlay(ed, canvas));
@@ -1536,7 +1542,13 @@ impl OpenCADStudio {
         // the native (single main window) and web builds.
         let base: Element<'_, Message> = match self.modal_content() {
             Some(content) => {
-                crate::ui::modal::modal(composed, content, Message::CloseModal, self.modal_offset)
+                crate::ui::modal::modal(
+                    composed,
+                    content,
+                    Message::CloseModal,
+                    self.modal_offset,
+                    true,
+                )
             }
             None => composed.into(),
         };
@@ -1552,6 +1564,7 @@ impl OpenCADStudio {
                 .height(iced::Length::Fixed(470.0)),
                 Message::CloseColorPicker,
                 iced::Vector::ZERO,
+                false,
             )
         } else {
             base
@@ -1596,7 +1609,12 @@ impl OpenCADStudio {
             ScaleManager => (520, 360),
             AnnoObjectScale => (360, 420),
         };
-        Some((w as f32 + EXTRA_W, h as f32 + EXTRA_H))
+        // Include the user's corner-resize growth so the drag clamp tracks the
+        // dialog's actual footprint.
+        Some((
+            w as f32 + EXTRA_W + self.modal_resize.x,
+            h as f32 + EXTRA_H + self.modal_resize.y,
+        ))
     }
 }
 

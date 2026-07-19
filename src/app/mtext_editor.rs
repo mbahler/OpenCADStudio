@@ -559,6 +559,11 @@ impl super::OpenCADStudio {
             }
         }
         self.mtext_editor = Some(state);
+        // Open centred at the editor's natural size: it renders through the
+        // shared modal frame, which `modal_offset` positions and `modal_resize`
+        // grows (both draggable, so reset on open).
+        self.modal_offset = iced::Vector::ZERO;
+        self.modal_resize = iced::Vector::ZERO;
         self.rebuild_mtext_preview();
         // Place the caret at the end so typing works without a click first.
         let end = self.mtext_vis_count();
@@ -1082,6 +1087,59 @@ impl super::OpenCADStudio {
         }
         self.refresh_properties();
         true
+    }
+
+    /// Apply the buffer to the drawing but keep the editor open — the
+    /// style-manager model, where **Apply** commits and the dialog stays up
+    /// (closing is the ✕). A brand-new MText is created on the first apply and
+    /// then updated in place on later applies, so repeated Apply never leaves
+    /// duplicate entities behind.
+    pub(super) fn mtext_apply(&mut self) {
+        let i = self.active_tab;
+        let (mut mt, editing, body_empty) = match self.mtext_editor.as_ref() {
+            Some(ed) => (
+                ed.build_mtext(),
+                ed.editing,
+                ed.content.text().trim().is_empty(),
+            ),
+            None => return,
+        };
+        if body_empty {
+            return;
+        }
+        if let Some(h) = editing {
+            self.push_undo_snapshot(i, "MTEXT");
+            match self.tabs[i].scene.document.get_entity_mut(h) {
+                Some(EntityType::MText(t)) => {
+                    t.value = mt.value;
+                    t.height = mt.height;
+                    t.attachment_point = mt.attachment_point;
+                    t.line_spacing_factor = mt.line_spacing_factor;
+                    t.rectangle_width = mt.rectangle_width;
+                }
+                Some(EntityType::MultiLeader(ml)) => {
+                    ml.context.text_string = mt.value;
+                    ml.context.text_height = mt.height;
+                    ml.context.line_spacing_factor = mt.line_spacing_factor;
+                    if mt.rectangle_width > 0.0 {
+                        ml.context.text_width = mt.rectangle_width;
+                    }
+                }
+                _ => {}
+            }
+            self.tabs[i].scene.bump_geometry();
+            self.tabs[i].dirty = true;
+        } else {
+            mt.rotation = self.tabs[i].ucs_rotation_angle();
+            self.push_undo_snapshot(i, "MTEXT");
+            let handle = self.commit_entity_handle(EntityType::MText(mt));
+            self.tabs[i].dirty = true;
+            // Bind the editor to the fresh entity so the next Apply updates it.
+            if let (Some(h), Some(ed)) = (handle, self.mtext_editor.as_mut()) {
+                ed.editing = Some(h);
+            }
+        }
+        self.refresh_properties();
     }
 
     /// Discard the editor without changing the drawing.

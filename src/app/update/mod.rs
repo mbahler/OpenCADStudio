@@ -130,8 +130,9 @@ impl OpenCADStudio {
             _ => {}
         }
         self.active_modal = None;
-        // Recentre the next dialog and drop any in-progress drag.
+        // Recentre / reset the size of the next dialog and drop any drag.
         self.modal_offset = iced::Vector::ZERO;
+        self.modal_resize = iced::Vector::ZERO;
         self.modal_drag_last = None;
         self.modal_dragging = false;
     }
@@ -2269,6 +2270,10 @@ impl OpenCADStudio {
                 let committed = self.mtext_commit();
                 self.post_editor_closed(committed)
             }
+            Message::MTextApply => {
+                self.mtext_apply();
+                Task::none()
+            }
             Message::MTextCancel => {
                 self.mtext_cancel();
                 self.post_editor_closed(false)
@@ -3200,11 +3205,33 @@ impl OpenCADStudio {
                 self.modal_drag_last = None;
                 Task::none()
             }
+            Message::ModalResizeGrab => {
+                // Start a resize; the first ModalDragMove seeds the reference.
+                self.modal_resizing = true;
+                self.modal_drag_last = None;
+                Task::none()
+            }
             Message::ModalDragMove(p) => {
-                if self.modal_dragging {
-                    if let Some(last) = self.modal_drag_last {
-                        self.modal_offset.x += p.x - last.x;
-                        self.modal_offset.y += p.y - last.y;
+                if let Some(last) = self.modal_drag_last {
+                    let (dx, dy) = (p.x - last.x, p.y - last.y);
+                    if self.modal_resizing {
+                        // The grip sits bottom-right, so dragging out grows the
+                        // box. The delta is added to each dialog's natural size,
+                        // so clamp it at zero — dragging in past the natural size
+                        // does nothing (the natural size is the floor).
+                        let nx = (self.modal_resize.x + dx).max(0.0);
+                        let ny = (self.modal_resize.y + dy).max(0.0);
+                        let (rx, ry) = (nx - self.modal_resize.x, ny - self.modal_resize.y);
+                        self.modal_resize.x = nx;
+                        self.modal_resize.y = ny;
+                        // The box is centred, so shift the centre by half the
+                        // growth to pin the top-left corner — the grip then
+                        // tracks the cursor instead of drifting at half speed.
+                        self.modal_offset.x += rx * 0.5;
+                        self.modal_offset.y += ry * 0.5;
+                    } else if self.modal_dragging {
+                        self.modal_offset.x += dx;
+                        self.modal_offset.y += dy;
                         // Clamp so the dialog stops at the window edge instead
                         // of being squeezed (the off-centre padding shrinks the
                         // dialog once it overlaps a border).
@@ -3217,12 +3244,15 @@ impl OpenCADStudio {
                             self.modal_offset.y = self.modal_offset.y.clamp(-max_y, max_y);
                         }
                     }
+                }
+                if self.modal_dragging || self.modal_resizing {
                     self.modal_drag_last = Some(p);
                 }
                 Task::none()
             }
             Message::ModalDragRelease => {
                 self.modal_dragging = false;
+                self.modal_resizing = false;
                 self.modal_drag_last = None;
                 Task::none()
             }
