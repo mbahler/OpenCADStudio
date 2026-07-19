@@ -1311,6 +1311,34 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
             }
         })
         .collect();
+    // Per-line text height — the tallest Word on the line, an empty line
+    // inheriting the previous line's height (same rule as `per_line_h`). Unlike
+    // `line_max_h` it has no `entity_h` floor, so it reflects the ACTUAL text
+    // size; used to size the empty-line caret slot to the surrounding text
+    // rather than the raw entity height (which can be many times the visible
+    // text when `\H…x;` runs shrink it).
+    let line_text_h: Vec<f32> = {
+        let mut last = entity_h;
+        sub_lines
+            .iter()
+            .map(|s| {
+                let mh = s
+                    .atoms
+                    .iter()
+                    .filter_map(|a| match &a.kind {
+                        AtomKind::Word(_) => Some(a.state.height_mul * entity_h),
+                        _ => None,
+                    })
+                    .fold(0.0_f32, f32::max);
+                if mh > 0.0 {
+                    last = mh;
+                    mh
+                } else {
+                    last
+                }
+            })
+            .collect()
+    };
     let line_y_offset: Vec<f32> = {
         let mut col_y = vec![0.0_f32; cols.count.max(1)];
         let mut started = vec![false; cols.count.max(1)];
@@ -1444,10 +1472,14 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
 
         // A paragraph break (explicit `\n` / `\P`) that started this line gets
         // a zero-width caret slot at the line start, so the MText editor can
-        // place the caret on a fresh/empty line.
+        // place the caret on a fresh/empty line. Size it to the line's own text
+        // height (the surrounding text for an empty line), not the raw entity
+        // height — otherwise a blank line's caret is entity-tall, which is many
+        // times the visible text when `\H…x;` runs shrink it.
         if opts.want_glyph_boxes && i > 0 && sub.is_first_in_paragraph {
+            let caret_h = line_text_h.get(i).copied().unwrap_or(entity_h);
             let (ax, ay) = to_world(line_base_x, line_base_y, cursor_start, 0.0);
-            let (_, by) = to_world(line_base_x, line_base_y, cursor_start, entity_h);
+            let (_, by) = to_world(line_base_x, line_base_y, cursor_start, caret_h);
             glyph_boxes.push(GlyphBox {
                 vis,
                 xmin: ax,
