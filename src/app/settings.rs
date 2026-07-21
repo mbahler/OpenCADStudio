@@ -116,6 +116,12 @@ pub struct UserSettings {
     /// instead of submitting (as if every line started with `>`), until the
     /// user toggles it back off.
     pub literal_spaces: bool,
+    /// Running object-snap set + master toggle as an `$OSMODE`-style bitmask.
+    /// App-level, not per-drawing: modern DWG (R2000+) has no file slot for
+    /// OSMODE (it moved to the registry), so the set follows the user. A
+    /// legacy R13/R14 or DXF file carrying a nonzero `$OSMODE` still overrides
+    /// it on open (see `adopt_header_sysvars`).
+    pub osmode: i32,
     /// Controls whether the TEXTEDIT command repeats automatically (0 = Multiple, 1 = Single).
     pub texteditmode: bool,
     /// TEXTFILL: fill TrueType glyphs (true) or draw them hollow (false).
@@ -148,6 +154,9 @@ impl Default for UserSettings {
             disabled_plugins: Vec::new(),
             plugin_repos: Vec::new(),
             literal_spaces: false,
+            // Snapper::default(): END|MID|CEN|NODE|QUAD|INT|NEA (575), master
+            // off (suppress bit 16384).
+            osmode: 575 | OSMODE_SUPPRESS,
             texteditmode: false,
             textfill: true,
             backup_on_save: true,

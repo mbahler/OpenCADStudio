@@ -1309,6 +1309,8 @@ impl OpenCADStudio {
                         );
                         self.snapper.enabled = modes.into_iter().collect();
                         self.snapper.snap_enabled = en;
+                        // The OSNAP set is app-level (no modern-DWG file slot).
+                        self.persist_settings_if_changed();
                     }
                 }
             }

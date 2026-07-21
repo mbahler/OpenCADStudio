@@ -76,6 +76,10 @@ impl OpenCADStudio {
             },
             plugin_repos: self.plugin_repos.clone(),
             literal_spaces: self.command_line.literal_spaces,
+            osmode: crate::app::settings::osmode_from_snaps(
+                self.snapper.enabled.iter(),
+                self.snapper.snap_enabled,
+            ),
             texteditmode: self.texteditmode,
             textfill: crate::scene::text::sdf_atlas::textfill(),
             backup_on_save: self.backup_on_save,
@@ -98,6 +102,9 @@ impl OpenCADStudio {
         self.disabled_plugins = s.disabled_plugins.iter().cloned().collect();
         self.plugin_repos = s.plugin_repos.clone();
         self.command_line.literal_spaces = s.literal_spaces;
+        let (modes, snap_enabled) = crate::app::settings::snaps_from_osmode(s.osmode);
+        self.snapper.enabled = modes.into_iter().collect();
+        self.snapper.snap_enabled = snap_enabled;
         self.texteditmode = s.texteditmode;
         crate::scene::text::sdf_atlas::set_textfill(s.textfill);
         self.backup_on_save = s.backup_on_save;
@@ -132,9 +139,15 @@ impl OpenCADStudio {
         if ortho {
             self.polar_mode = false;
         }
-        let (modes, snap_enabled) = crate::app::settings::snaps_from_osmode(osmode);
-        self.snapper.enabled = modes.into_iter().collect();
-        self.snapper.snap_enabled = snap_enabled;
+        // OSMODE has no file slot in modern DWG (R2000+ moved it to the
+        // registry), so a header value of 0 just means "absent" — keep the
+        // user's app-level set instead of wiping it. Only a legacy R13/R14 or
+        // DXF file that really carries a nonzero mask overrides.
+        if osmode != 0 {
+            let (modes, snap_enabled) = crate::app::settings::snaps_from_osmode(osmode);
+            self.snapper.enabled = modes.into_iter().collect();
+            self.snapper.snap_enabled = snap_enabled;
+        }
     }
 
     /// Stamp the live per-drawing sysvars (Ortho, running OSNAP) onto tab `i`'s

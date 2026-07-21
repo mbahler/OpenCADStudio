@@ -1548,6 +1548,7 @@ impl OpenCADStudio {
             Message::ToggleSnapEnabled => {
                 self.snapper.toggle_global();
                 self.sync_vport_display(self.active_tab);
+                self.persist_settings_if_changed();
                 Task::none()
             }
             Message::ToggleGridSnap => {
@@ -2048,6 +2049,7 @@ impl OpenCADStudio {
             }
             Message::ToggleSnap(t) => {
                 self.snapper.toggle(t);
+                self.persist_settings_if_changed();
                 Task::none()
             }
             Message::ToggleSnapPopup => {
