@@ -54,6 +54,17 @@ pub struct WireModel {
     pub pattern: [f32; 8],
     /// Rendered line width in screen pixels (half-width = line_weight_px / 2).
     pub line_weight_px: f32,
+    /// World-space band width (drawing units). `0.0` = a normal wire whose
+    /// width comes from `line_weight_px` (screen pixels). Non-zero = a wide
+    /// polyline: the shader expands this centre-line to `world_width` world
+    /// units (scaling with zoom) so the band IS the wire — the linetype dash
+    /// pattern then applies to the band instead of a separate hatch fill.
+    pub world_width: f32,
+    /// Per-point full band width (drawing units), aligned index-for-index with
+    /// [`points`], for a polyline whose width VARIES (a taper). Empty = a
+    /// constant band of `world_width`. The wire shader reads the two endpoint
+    /// widths of each segment and interpolates, so the band tapers smoothly.
+    pub taper_widths: Vec<f32>,
     /// ACI color index (1-255).  0 means true-color or unknown (no CTB lookup).
     pub aci: u8,
     /// Pre-baked snap candidates (Center, Node, Quadrant, Insertion).
@@ -73,15 +84,45 @@ pub struct WireModel {
     /// When false the linetype pattern restarts at each NaN-separated segment
     /// (DXF PLINEGEN=0).  When true the pattern runs continuously (PLINEGEN=1).
     pub plinegen: bool,
-    /// Paper-space bounding box [x0, y0, x1, y1] for GPU scissor clipping.
-    /// Set only for viewport-projected wires in paper-space layouts.
-    pub vp_scissor: Option<[f32; 4]>,
+    /// DGN line-style marker. When false (every standard linetype) the dash
+    /// pattern uses the normal phase: A-type end alignment for dash-first
+    /// patterns, else centred. When true (DGN pipe walls) the pattern is drawn
+    /// from the START vertex with continuous phase and no A-type end forcing —
+    /// DGN line styles are not end-aligned.
+    pub dash_from_start: bool,
+    /// Shared "A"-type end-dash length for MLINE elements. `Some(len)` makes the
+    /// dash shader use `len` as the begin/end solid-dash length for EVERY
+    /// parallel element (derived once from the multiline's centre-line length),
+    /// while `align_total` stays each element's own length — so all elements
+    /// share one interior phase (perpendicular dashes line up) yet each still
+    /// ends on a dash. `None` (the default) = per-wire A-type / from-start.
+    pub dash_align_end: Option<f32>,
     /// Pre-triangulated solid fill: flat vertex list, 3 per triangle (world-offset applied).
     /// Non-empty only for PolyfaceMesh / PolygonMesh entities.
     pub fill_tris: Vec<[f32; 3]>,
     /// Low residual paired with [`fill_tris`] (double-single). Empty = all-zero;
     /// tessellation from CAD f64 fills it so fills stay precise at UTM scale.
     pub fill_tris_low: Vec<[f32; 3]>,
+    /// Pre-triangulated pick-only geometry: flat vertex list, 3 per triangle.
+    /// Hit-testing treats these as solid; this wire's own draw never uses them.
+    ///
+    /// Carries the interior of things whose surface the cursor would otherwise
+    /// fall through, because [`points`] only bounds them:
+    ///
+    /// - An entity extruded by a DXF thickness (code 39) — the swept wall
+    ///   between each base segment and its extruded copy. Drawn as its four
+    ///   wireframe edges, with nothing in between to pick.
+    /// - A wide polyline (codes 43 / 40 / 41) — the solid band. It *is* drawn,
+    ///   but by the hatch pipeline off `wide_fills`, so the wire that carries
+    ///   its centreline has no fill of its own to hit-test.
+    ///
+    /// Separate from [`fill_tris`] because that channel reaches the GPU: a
+    /// thickness wall put there would render shaded and change how every such
+    /// drawing looks, and a polyline band would be drawn a second time on top
+    /// of the hatch that already draws it.
+    pub pick_tris: Vec<[f32; 3]>,
+    /// Low residual paired with [`pick_tris`] (double-single). Empty = all-zero.
+    pub pick_tris_low: Vec<[f32; 3]>,
     /// SDF glyph quads for this entity's text (TEXT / MTEXT / dimension text /
     /// block-internal text). Non-empty only when SDF text is enabled and this
     /// wire carries a text run. Rides with the wire so it is cached by the
@@ -89,6 +130,21 @@ pub struct WireModel {
     /// exactly like `points` — no separate collector pass. The renderer
     /// gathers these across all wires into the text vertex buffer.
     pub text_verts: Vec<crate::scene::pipeline::text_gpu::TextVertex>,
+    /// Block-local composed draw-order offset in (-1, 1) for a wire that must
+    /// order against its *siblings inside the block* — currently wide-polyline
+    /// bands, whose solid area would otherwise cover later-drawn siblings.
+    /// `None` (all other wires) = the whole-insert depth resolved from `name`.
+    /// `Some(local)` composes at draw time: `insert_depth + local * insert_half`,
+    /// mirroring how exploded block fills seed their depth, so bands and fills
+    /// from the same block interleave by the block's internal draw order.
+    pub depth_override: Option<f32>,
+    /// `true` when [`fill_tris`] is a real 3-D surface (PolyfaceMesh /
+    /// PolygonMesh face) that must render with hidden-surface depth and only in
+    /// shaded modes. `false` for a flat 2-D overlay fill (SOLID arrowhead,
+    /// dimension / MultiLeader text background, greek-LOD text) that draws in
+    /// every view mode. The render pass can't infer this from `fill_tris_low`
+    /// alone — a 2-D fill at UTM scale carries a low residual too.
+    pub fill_is_3d: bool,
 }
 
 impl WireModel {
@@ -136,6 +192,12 @@ impl WireModel {
     /// Create a solid wire (no dash pattern, 1px weight).
     pub fn solid(name: String, points: Vec<[f32; 3]>, color: [f32; 4], selected: bool) -> Self {
         Self {
+            taper_widths: Vec::new(),
+            world_width: 0.0,
+            depth_override: None,
+            fill_is_3d: false,
+            pick_tris: Vec::new(),
+            pick_tris_low: Vec::new(),
             text_verts: Vec::new(),
             name,
             points,
@@ -151,7 +213,8 @@ impl WireModel {
             key_vertices: vec![],
             aabb: Self::UNBOUNDED_AABB,
             plinegen: true,
-            vp_scissor: None,
+            dash_from_start: false,
+            dash_align_end: None,
             fill_tris: vec![],
             fill_tris_low: Vec::new(),
         }
@@ -353,15 +416,22 @@ impl Default for WireModel {
             pattern_length: 0.0,
             pattern: [0.0; 8],
             line_weight_px: 1.0,
+            world_width: 0.0,
+            taper_widths: Vec::new(),
             aci: 0,
             snap_pts: Vec::new(),
             tangent_geoms: Vec::new(),
             key_vertices: Vec::new(),
             aabb: Self::UNBOUNDED_AABB,
             plinegen: true,
-            vp_scissor: None,
+            dash_from_start: false,
+            dash_align_end: None,
             fill_tris: Vec::new(),
             fill_tris_low: Vec::new(),
+            depth_override: None,
+            fill_is_3d: false,
+            pick_tris: Vec::new(),
+            pick_tris_low: Vec::new(),
         }
     }
 }

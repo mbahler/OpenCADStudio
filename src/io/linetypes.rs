@@ -153,7 +153,20 @@ pub fn document_complex_lt(document: &CadDocument, name: &str) -> Option<Complex
         .line_types
         .iter()
         .find(|l| l.name.eq_ignore_ascii_case(name))?;
-    if !lt.elements.iter().any(|e| e.complex.is_some()) {
+    // Treat the linetype as complex only when an element carries *renderable*
+    // embedded content — a non-empty text string, or a shape backed by a shape
+    // file. Some DWGs store dash elements with a placeholder `complex` (shape
+    // #0, null style handle, zero scale) that draws nothing; routing those
+    // through the CPU complex-linetype path needlessly skips the normal dash
+    // shader — and with it the "A"-type endpoint alignment. Fall through to the
+    // ordinary `resolve_pattern` path for them.
+    let has_real_complex = lt.elements.iter().any(|e| {
+        e.complex.as_ref().is_some_and(|cx| match &cx.content {
+            LineTypeComplexContent::Text { text } => !text.trim().is_empty(),
+            LineTypeComplexContent::Shape { .. } => !cx.style_handle.is_null(),
+        })
+    });
+    if !has_real_complex {
         return None;
     }
     document_lt_segments(document, name)

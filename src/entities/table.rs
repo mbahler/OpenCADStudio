@@ -286,6 +286,8 @@ impl TruckConvertible for Table {
                 // Content rotation (radians) on top of table cell rotation.
                 let rot = content.map(|c| c.rotation as f32).unwrap_or(0.0) + cell.rotation as f32;
                 let layout = layout_mtext(&MTextRenderOpts {
+                    // Not an MTEXT: text in a fixed box, never columnar.
+                    columns: Default::default(),
                     value: text,
                     insertion: [text_origin.x as f64, text_origin.y as f64, origin.z as f64],
                     height: cell_h,
@@ -345,6 +347,7 @@ impl TruckConvertible for Table {
             })
             .collect();
         Some(TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Lines(pts_f64),
             snap_pts: vec![(glam::DVec3::new(self.insertion_point.x, self.insertion_point.y, self.insertion_point.z), SnapHint::Insertion)],
             tangent_geoms: vec![],
@@ -693,6 +696,8 @@ pub fn tessellate_table(
             let to = origin + h * x_offset + v_flow * y_offset;
             let rot = content.map(|c| c.rotation as f32).unwrap_or(0.0) + cell.rotation as f32;
             let layout = layout_mtext(&MTextRenderOpts {
+                // Not an MTEXT: text in a fixed box, never columnar.
+                columns: Default::default(),
                 value: text,
                 insertion: [(to.x as f64), (to.y as f64), (to.z as f64)],
                 height: cell_h,
@@ -748,6 +753,14 @@ pub fn tessellate_table(
     let mk =
         |color: [f32; 4], points: Vec<[f32; 3]>, fill_tris: Vec<[f32; 3]>, lw: f32| -> WireModel {
             WireModel {
+                taper_widths: Vec::new(),
+                world_width: 0.0,
+                depth_override: None,
+                fill_is_3d: false,
+                pick_tris: Vec::new(),
+                pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                 name: name.clone(),
                 points,
@@ -763,7 +776,6 @@ pub fn tessellate_table(
                 key_vertices: vec![],
                 aabb: WireModel::UNBOUNDED_AABB,
                 plinegen: true,
-                vp_scissor: None,
                 fill_tris,
                 // fill_tris_low intentionally empty: this fill renders on the
                 // top-level path, where consumers (face3d_gpu, xclip) treat a

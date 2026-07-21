@@ -1352,6 +1352,14 @@ fn tessellate_dimension_inner(
             let (ext1, ext2) = split_ext_lines(&geom.ext_lines);
             if !ext1.is_empty() {
                 wires.push(WireModel {
+                    taper_widths: Vec::new(),
+                    world_width: 0.0,
+                    depth_override: None,
+                    fill_is_3d: false,
+                    pick_tris: Vec::new(),
+                    pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                     name: name.clone(),
                     points: ext1,
@@ -1367,13 +1375,20 @@ fn tessellate_dimension_inner(
                     key_vertices: vec![],
                     aabb: WireModel::UNBOUNDED_AABB,
                     plinegen: true,
-                    vp_scissor: None,
                     fill_tris: vec![],
                     fill_tris_low: Vec::new(),
                 });
             }
             if !ext2.is_empty() {
                 wires.push(WireModel {
+                    taper_widths: Vec::new(),
+                    world_width: 0.0,
+                    depth_override: None,
+                    fill_is_3d: false,
+                    pick_tris: Vec::new(),
+                    pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                     name: name.clone(),
                     points: ext2,
@@ -1389,13 +1404,20 @@ fn tessellate_dimension_inner(
                     key_vertices: vec![],
                     aabb: WireModel::UNBOUNDED_AABB,
                     plinegen: true,
-                    vp_scissor: None,
                     fill_tris: vec![],
                     fill_tris_low: Vec::new(),
                 });
             }
         } else {
             wires.push(WireModel {
+                taper_widths: Vec::new(),
+                world_width: 0.0,
+                depth_override: None,
+                fill_is_3d: false,
+                pick_tris: Vec::new(),
+                pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                 name: name.clone(),
                 points: geom.ext_lines,
@@ -1411,7 +1433,6 @@ fn tessellate_dimension_inner(
                 key_vertices: vec![],
                 aabb: WireModel::UNBOUNDED_AABB,
                 plinegen: true,
-                vp_scissor: None,
                 fill_tris: vec![],
                 fill_tris_low: Vec::new(),
             });
@@ -1419,6 +1440,14 @@ fn tessellate_dimension_inner(
     }
 
     wires.push(WireModel {
+        taper_widths: Vec::new(),
+        world_width: 0.0,
+        depth_override: None,
+        fill_is_3d: false,
+        pick_tris: Vec::new(),
+        pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
         name: name.clone(),
         points: geom.dim_lines,
@@ -1434,7 +1463,6 @@ fn tessellate_dimension_inner(
         key_vertices,
         aabb: WireModel::UNBOUNDED_AABB,
         plinegen: true,
-        vp_scissor: None,
         fill_tris: geom.arrow_fill,
         // fill_tris_low intentionally empty: this fill renders on the top-level
         // path, where consumers (face3d_gpu, xclip) treat a short low half as
@@ -1458,6 +1486,14 @@ fn tessellate_dimension_inner(
                     aci_to_rgba(&c)
                 };
                 wires.push(WireModel {
+                    taper_widths: Vec::new(),
+                    world_width: 0.0,
+                    depth_override: None,
+                    fill_is_3d: false,
+                    pick_tris: Vec::new(),
+                    pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                     name: name.clone(),
                     points: vec![],
@@ -1473,7 +1509,6 @@ fn tessellate_dimension_inner(
                     key_vertices: vec![],
                     aabb: WireModel::UNBOUNDED_AABB,
                     plinegen: true,
-                    vp_scissor: None,
                     fill_tris: rect,
                     // fill_tris_low intentionally empty: this fill renders on the
                     // top-level path, where consumers (face3d_gpu, xclip) treat a

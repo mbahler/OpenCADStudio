@@ -148,6 +148,8 @@ fn to_truck(ml: &MultiLeader, document: &acadrust::CadDocument) -> Option<TruckE
                 rot += std::f32::consts::PI;
             }
             Some(layout_mtext(&MTextRenderOpts {
+                // Not an MTEXT: text in a fixed box, never columnar.
+                columns: Default::default(),
                 value: &ctx.text_string,
                 insertion: [text_loc.x, text_loc.y, text_loc.z],
                 height,
@@ -298,6 +300,7 @@ fn to_truck(ml: &MultiLeader, document: &acadrust::CadDocument) -> Option<TruckE
     }
 
     Some(TruckEntity {
+        pick_tris: Vec::new(),
         object: TruckObject::Lines(points),
         snap_pts,
         tangent_geoms: tangents,
@@ -340,6 +343,8 @@ fn text_box_geom(ml: &MultiLeader) -> (f64, [f64; 3]) {
         is_upside_down: false,
     };
     let layout = layout_mtext(&MTextRenderOpts {
+        // Not an MTEXT: text in a fixed box, never columnar.
+        columns: Default::default(),
         value: &ml.context.text_string,
         insertion: [0.0, 0.0, 0.0],
         height,
@@ -1399,6 +1404,14 @@ impl MultiLeaderTess for MultiLeader {
         // WireModels so the renderer respects per-piece coloring.
         let mut wires: Vec<WireModel> = Vec::new();
         wires.push(WireModel {
+            taper_widths: Vec::new(),
+            world_width: 0.0,
+            depth_override: None,
+            fill_is_3d: false,
+            pick_tris: Vec::new(),
+            pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: name.clone(),
             points,
@@ -1414,7 +1427,6 @@ impl MultiLeaderTess for MultiLeader {
             key_vertices: key_verts,
             aabb: WireModel::UNBOUNDED_AABB,
             plinegen: true,
-            vp_scissor: None,
             fill_tris: arrow_fill,
             // fill_tris_low intentionally empty: this fill renders on the
             // top-level path, where consumers (face3d_gpu, xclip) treat a short
@@ -1611,6 +1623,8 @@ impl MultiLeaderTess for MultiLeader {
             // fractions, …) reaches the stroke output. Stroke origins are
             // already in offset-relative space because we pass local_ins_x/y.
             let layout = layout_mtext(&MTextRenderOpts {
+                // Not an MTEXT: text in a fixed box, never columnar.
+                columns: Default::default(),
                 value: &ctx.text_string,
                 insertion: [local_ins_x as f64, local_ins_y as f64, z as f64],
                 height,
@@ -1682,6 +1696,14 @@ impl MultiLeaderTess for MultiLeader {
                         xy = xy.max(y);
                     }
                     wires.push(WireModel {
+                        taper_widths: Vec::new(),
+                        world_width: 0.0,
+                        depth_override: None,
+                        fill_is_3d: false,
+                        pick_tris: Vec::new(),
+                        pick_tris_low: Vec::new(),
+                        dash_from_start: false,
+                        dash_align_end: None,
                         text_verts: sdf_verts,
                         name: name.clone(),
                         points: vec![],
@@ -1700,7 +1722,6 @@ impl MultiLeaderTess for MultiLeader {
                         key_vertices: vec![],
                         aabb: [nx as f32, ny as f32, xx as f32, xy as f32],
                         plinegen: true,
-                        vp_scissor: None,
                         fill_tris: vec![],
                         fill_tris_low: Vec::new(),
                     });
@@ -1745,6 +1766,14 @@ impl MultiLeaderTess for MultiLeader {
                         wcs_corners[3],
                     ];
                     wires.push(WireModel {
+                        taper_widths: Vec::new(),
+                        world_width: 0.0,
+                        depth_override: None,
+                        fill_is_3d: false,
+                        pick_tris: Vec::new(),
+                        pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                         name: name.clone(),
                         points: vec![],
@@ -1760,7 +1789,6 @@ impl MultiLeaderTess for MultiLeader {
                         key_vertices: vec![],
                         aabb: WireModel::UNBOUNDED_AABB,
                         plinegen: true,
-                        vp_scissor: None,
                         fill_tris,
                         fill_tris_low: Vec::new(),
                     });
@@ -1776,6 +1804,14 @@ impl MultiLeaderTess for MultiLeader {
                         wcs_corners[0],
                     ];
                     wires.push(WireModel {
+                        taper_widths: Vec::new(),
+                        world_width: 0.0,
+                        depth_override: None,
+                        fill_is_3d: false,
+                        pick_tris: Vec::new(),
+                        pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                         name,
                         points: frame_points,
@@ -1791,7 +1827,6 @@ impl MultiLeaderTess for MultiLeader {
                         key_vertices: vec![],
                         aabb: WireModel::UNBOUNDED_AABB,
                         plinegen: true,
-                        vp_scissor: None,
                         fill_tris: vec![],
                         fill_tris_low: Vec::new(),
                     });

@@ -36,6 +36,64 @@ pub struct MeshModel {
 ///
 /// `lods` holds up to one MeshModel per LOD level (high → low). Empty
 /// slots fall back to the nearest available LOD at render time.
+/// A curved face's generator, kept so a view-dependent silhouette (DISPSILH)
+/// can be computed per frame — the silhouette is where the surface turns away
+/// from the eye, which no baked edge can capture. World-space, post body
+/// transform; base/centre points carry a double-single low half so they stay
+/// precise at UTM scale like the mesh verts. Each variant also carries the
+/// face's parametric extent so the silhouette is clipped to the actual face
+/// rather than drawn across the whole (possibly partial) surface.
+#[derive(Clone, Copy, Debug)]
+pub enum CurvedGen {
+    /// Cone / cylinder: two edge-on lines up the surface.
+    Cone {
+        base: [f32; 3],
+        base_low: [f32; 3],
+        axis: [f32; 3],
+        /// Radial frame: `u` is the θ=0 direction, `v = axis × u`.
+        u_dir: [f32; 3],
+        v_dir: [f32; 3],
+        /// Radius at the base (`h = 0`).
+        radius: f32,
+        /// `tan(half-angle)`: radius at height `h` is `radius + h * tan_a`.
+        tan_a: f32,
+        /// Height span along the axis the face covers (base is `h = 0`).
+        h_max: f32,
+        theta_min: f32,
+        theta_span: f32,
+        full: bool,
+    },
+    /// Sphere: the great circle perpendicular to the view, clipped to the
+    /// face's longitude/colatitude window.
+    Sphere {
+        center: [f32; 3],
+        center_low: [f32; 3],
+        pole: [f32; 3],
+        u_dir: [f32; 3],
+        v_dir: [f32; 3],
+        radius: f32,
+        theta_min: f32,
+        theta_span: f32,
+        full: bool,
+        phi_min: f32,
+        phi_max: f32,
+    },
+    /// Torus: the two extreme circles of the tube (outer/inner), clipped to the
+    /// revolution window the face covers.
+    Torus {
+        center: [f32; 3],
+        center_low: [f32; 3],
+        axis: [f32; 3],
+        u_dir: [f32; 3],
+        v_dir: [f32; 3],
+        major: f32,
+        minor: f32,
+        phi_min: f32,
+        phi_span: f32,
+        full: bool,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub struct MeshLodSet {
     pub lods: Vec<MeshModel>,
@@ -46,6 +104,9 @@ pub struct MeshLodSet {
     pub edge_verts: Vec<[f32; 3]>,
     /// Low residual paired with `edge_verts`.
     pub edge_verts_low: Vec<[f32; 3]>,
+    /// Curved-face generators for per-frame silhouette (DISPSILH). Empty for a
+    /// solid with no curved faces, or when silhouettes aren't wanted.
+    pub curved_gens: Vec<CurvedGen>,
     /// World XY AABB `[min_x, min_y, max_x, max_y]` of the mesh — used
     /// by the per-frame LOD selector to compute the projected pixel
     /// diagonal.
@@ -87,6 +148,7 @@ impl MeshLodSet {
             lods,
             edge_verts: Vec::new(),
             edge_verts_low: Vec::new(),
+            curved_gens: Vec::new(),
             world_aabb,
             z_aabb,
         }

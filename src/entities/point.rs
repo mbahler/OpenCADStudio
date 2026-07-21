@@ -30,16 +30,16 @@ fn pdsize_world(pdsize: f64) -> f64 {
 /// units. Shared by the header-driven path ([`to_truck`]) and the
 /// viewport-aware relative path ([`relative_truck`]).
 fn point_truck(pt: &Point, pdmode: i16, s: f64) -> TruckEntity {
-    let normal = (pt.normal.x, pt.normal.y, pt.normal.z);
-    let (wx, wy, wz) = crate::scene::view::transform::ocs_point_to_wcs(
-        (pt.location.x, pt.location.y, pt.location.z),
-        normal,
-    );
+    // POINT location is stored in WCS (the extrusion normal only orients the
+    // glyph/thickness) — remapping it through the arbitrary-axis OCS moved
+    // mirrored points (normal 0,0,-1) to the wrong side of the drawing.
+    let (wx, wy, wz) = (pt.location.x, pt.location.y, pt.location.z);
     let snap = glam::DVec3::new(wx, wy, wz);
     if pdmode == 0 {
         // Default: a single vertex (driver handles the dot pixel).
         let p = Point3::new(wx, wy, wz);
         return TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Point(builder::vertex(p)),
             snap_pts: vec![(snap, SnapHint::Node)],
             tangent_geoms: vec![],
@@ -51,6 +51,7 @@ fn point_truck(pt: &Point, pdmode: i16, s: f64) -> TruckEntity {
     if pts.is_empty() {
         // PDMODE 1 = nothing — emit an empty Lines wire so picking still works.
         return TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Lines(vec![]),
             snap_pts: vec![(snap, SnapHint::Node)],
             tangent_geoms: vec![],
@@ -59,6 +60,7 @@ fn point_truck(pt: &Point, pdmode: i16, s: f64) -> TruckEntity {
         };
     }
     TruckEntity {
+        pick_tris: Vec::new(),
         object: TruckObject::Lines(pts),
         snap_pts: vec![(snap, SnapHint::Node)],
         tangent_geoms: vec![],
@@ -108,6 +110,9 @@ fn point_glyph(cx: f64, cy: f64, z: f64, pdmode: i16, s_half: f64) -> Vec<[f64; 
     let circle = (pdmode & 32) != 0;
     let square = (pdmode & 64) != 0;
     let s = s_half;
+    // The '+' and '×' arms reach the full PDSIZE (twice the radius), so the
+    // cross pokes out past any enclosing circle/square, which sit at the radius.
+    let arm = 2.0 * s_half;
     let nan = [f64::NAN, f64::NAN, f64::NAN];
     let mut pts: Vec<[f64; 3]> = Vec::new();
     let mut push_seg = |a: [f64; 3], b: [f64; 3]| {
@@ -126,15 +131,17 @@ fn point_glyph(cx: f64, cy: f64, z: f64, pdmode: i16, s_half: f64) -> Vec<[f64; 
         }
         1 => {} // explicit nothing
         2 => {
-            push_seg([cx - s, cy, z], [cx + s, cy, z]);
-            push_seg([cx, cy - s, z], [cx, cy + s, z]);
+            push_seg([cx - arm, cy, z], [cx + arm, cy, z]);
+            push_seg([cx, cy - arm, z], [cx, cy + arm, z]);
         }
         3 => {
-            push_seg([cx - s, cy - s, z], [cx + s, cy + s, z]);
-            push_seg([cx - s, cy + s, z], [cx + s, cy - s, z]);
+            push_seg([cx - arm, cy - arm, z], [cx + arm, cy + arm, z]);
+            push_seg([cx - arm, cy + arm, z], [cx + arm, cy - arm, z]);
         }
         4 => {
-            push_seg([cx, cy - s, z], [cx, cy + s, z]);
+            // Upward tick rising from the point (length = PDSIZE/2), not a
+            // vertical line centred on it.
+            push_seg([cx, cy, z], [cx, cy + s, z]);
         }
         _ => {
             push_seg([cx - s, cy, z], [cx + s, cy, z]);

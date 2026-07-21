@@ -15,12 +15,115 @@ use crate::scene::model::mesh_model::MeshModel;
 use crate::scene::model::wire_model::WireModel;
 
 /// Pixel radius used for single-click wire detection.
-const CLICK_THRESHOLD_PX: f32 = 8.0;
+pub const CLICK_THRESHOLD_PX: f32 = 8.0;
+
+/// Pick radius for one wire, in screen pixels.
+///
+/// A wire renders as a band `line_weight_px` wide, so testing every wire at the
+/// bare [`CLICK_THRESHOLD_PX`] would leave the outer part of a heavy line
+/// unselectable — the cursor would sit on solid ink and miss. Widening to the
+/// rendered half-width keeps "looks like I'm on it" and "picks it" the same
+/// thing at any zoom: both quantities are screen-space, so the relation holds
+/// however far in the view is.
+///
+/// `lw_display` mirrors the wire shader's `select(0.5, half_width, ...)`
+/// (`wire.wgsl`) — with lineweight display off the line collapses to 1 px, so
+/// the pick band must collapse with it rather than stay secretly fat.
+///
+/// The standard weights all land under the threshold today (the widest, 2.11 mm,
+/// renders 7.97 px half-width), so this only bites for out-of-range weights —
+/// and it keeps the two sides from silently drifting apart if the display boost
+/// in `view::render::lineweight_to_px` ever changes.
+pub fn pick_tolerance_px(wire: &WireModel, lw_display: bool) -> f32 {
+    let half_width = if lw_display {
+        wire.line_weight_px * 0.5
+    } else {
+        0.5
+    };
+    CLICK_THRESHOLD_PX.max(half_width)
+}
+
+/// Is `aabb` — a wire's world-space XY box — further than `tol` pixels from
+/// `cursor` once projected, so the wire can be skipped without touching its
+/// geometry?
+///
+/// Only sound in a flat (untilted) view, where a point's screen x/y depends on
+/// its world x/y alone and the box therefore projects exactly. Callers must
+/// check that themselves, and must skip the unbounded sentinel.
+fn aabb_rejects(
+    aabb: [f32; 4],
+    cursor: Point,
+    tol: f32,
+    view_rot: Mat4,
+    eye: glam::DVec3,
+    bounds: Rectangle,
+) -> bool {
+    let [minx, miny, maxx, maxy] = aabb;
+    // Project all four corners — a plan view can be rotated about Z, so the
+    // screen footprint isn't axis-aligned and the two diagonal corners alone
+    // wouldn't bound it.
+    let (mut sx0, mut sy0, mut sx1, mut sy1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for (cx, cy) in [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)] {
+        let s = world_to_screen(
+            glam::DVec3::new(cx as f64, cy as f64, 0.0),
+            view_rot,
+            eye,
+            bounds,
+        );
+        sx0 = sx0.min(s.x);
+        sx1 = sx1.max(s.x);
+        sy0 = sy0.min(s.y);
+        sy1 = sy1.max(s.y);
+    }
+    cursor.x < sx0 - tol || cursor.x > sx1 + tol || cursor.y < sy0 - tol || cursor.y > sy1 + tol
+}
+
+/// Depth of the first triangle in `tris` whose screen projection contains
+/// `cursor`, as the mean NDC z of its corners; `None` when none do.
+///
+/// `tris` is a flat vertex list, 3 per triangle, and `tris_low` its
+/// double-single residual — empty meaning an all-zero low half, per the
+/// [`WireModel`] contract.
+fn tris_hit_depth(
+    cursor: Point,
+    tris: &[[f32; 3]],
+    tris_low: &[[f32; 3]],
+    view_rot: Mat4,
+    eye: glam::DVec3,
+    bounds: Rectangle,
+) -> Option<f32> {
+    let mut t = 0;
+    while t + 2 < tris.len() {
+        let mut sp = [Point::ORIGIN; 3];
+        let mut depth = 0.0f32;
+        for j in 0..3 {
+            let k = t + j;
+            let hi = tris[k];
+            let lo = tris_low.get(k).copied().unwrap_or([0.0; 3]);
+            let world = glam::DVec3::new(
+                hi[0] as f64 + lo[0] as f64,
+                hi[1] as f64 + lo[1] as f64,
+                hi[2] as f64 + lo[2] as f64,
+            );
+            let ndc = view_rot.project_point3((world - eye).as_vec3());
+            sp[j] = Point::new(
+                (ndc.x + 1.0) * 0.5 * bounds.width,
+                (1.0 - ndc.y) * 0.5 * bounds.height,
+            );
+            depth += ndc.z;
+        }
+        t += 3;
+        if point_in_polygon(cursor, &sp) {
+            return Some(depth / 3.0);
+        }
+    }
+    None
+}
 
 // ── Single-click hit test ─────────────────────────────────────────────────
 
 /// Return the `name` of the closest wire whose screen-space segments pass
-/// within `CLICK_THRESHOLD_PX` pixels of `cursor`.
+/// within that wire's [`pick_tolerance_px`] of `cursor`.
 ///
 /// Returns `None` when no wire is close enough.
 pub fn click_hit<'a>(
@@ -29,13 +132,16 @@ pub fn click_hit<'a>(
     view_rot: Mat4,
     eye: glam::DVec3,
     bounds: Rectangle,
+    lw_display: bool,
 ) -> Option<&'a str> {
     // A click outside the pane rectangle (e.g. on the paper around a floating
     // viewport) must not reach geometry scissored out of the viewport.
     if cursor.x < 0.0 || cursor.x > bounds.width || cursor.y < 0.0 || cursor.y > bounds.height {
         return None;
     }
-    let mut best_dist = CLICK_THRESHOLD_PX;
+    // Each wire brings its own threshold now (a heavy line catches over its full
+    // rendered width), so the running best can't double as the cut-off.
+    let mut best_dist = f32::MAX;
     let mut best: Option<&str> = None;
 
     // World z only shifts the *screen* x/y when the view is tilted (orbit /
@@ -48,29 +154,14 @@ pub fn click_hit<'a>(
 
     // Q: lazy projection — no Vec allocation per wire; NaN resets the segment chain.
     for wire in wires {
+        let tol = pick_tolerance_px(wire, lw_display);
         // Cheap AABB pre-reject (flat view only; never for the unbounded
         // sentinel used by previews / greeked text).
-        if z_flat && wire.aabb != WireModel::UNBOUNDED_AABB {
-            let [minx, miny, maxx, maxy] = wire.aabb;
-            // Project all four corners — a plan view can be rotated about Z, so
-            // the screen footprint isn't axis-aligned and the two diagonal
-            // corners alone wouldn't bound it.
-            let mut sx0 = f32::MAX;
-            let mut sy0 = f32::MAX;
-            let mut sx1 = f32::MIN;
-            let mut sy1 = f32::MIN;
-            for (cx, cy) in [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)] {
-                let s = world_to_screen(glam::DVec3::new(cx as f64, cy as f64, 0.0), view_rot, eye, bounds);
-                sx0 = sx0.min(s.x);
-                sx1 = sx1.max(s.x);
-                sy0 = sy0.min(s.y);
-                sy1 = sy1.max(s.y);
-            }
-            let t = CLICK_THRESHOLD_PX;
-            if cursor.x < sx0 - t || cursor.x > sx1 + t || cursor.y < sy0 - t || cursor.y > sy1 + t
-            {
-                continue;
-            }
+        if z_flat
+            && wire.aabb != WireModel::UNBOUNDED_AABB
+            && aabb_rejects(wire.aabb, cursor, tol, view_rot, eye, bounds)
+        {
+            continue;
         }
         let mut prev: Option<Point> = None;
         for (i, &[px, py, pz]) in wire.points.iter().enumerate() {
@@ -81,7 +172,7 @@ pub fn click_hit<'a>(
             let cur = world_to_screen(wp64([px, py, pz], &wire.points_low, i), view_rot, eye, bounds);
             if let Some(p0) = prev {
                 let d = dist_point_to_segment(cursor, p0, cur);
-                if d < best_dist {
+                if d < tol && d < best_dist {
                     best_dist = d;
                     best = Some(&wire.name);
                 }
@@ -104,37 +195,62 @@ pub fn click_hit<'a>(
         if wire.fill_tris.is_empty() {
             continue;
         }
-        let mut t = 0;
-        while t + 2 < wire.fill_tris.len() {
-            let mut sp = [Point::ORIGIN; 3];
-            let mut depth = 0.0f32;
-            for j in 0..3 {
-                let k = t + j;
-                let hi = wire.fill_tris[k];
-                let lo = wire.fill_tris_low.get(k).copied().unwrap_or([0.0; 3]);
-                let world = glam::DVec3::new(
-                    hi[0] as f64 + lo[0] as f64,
-                    hi[1] as f64 + lo[1] as f64,
-                    hi[2] as f64 + lo[2] as f64,
-                );
-                let ndc = view_rot.project_point3((world - eye).as_vec3());
-                sp[j] = Point::new(
-                    (ndc.x + 1.0) * 0.5 * bounds.width,
-                    (1.0 - ndc.y) * 0.5 * bounds.height,
-                );
-                depth += ndc.z;
-            }
-            t += 3;
-            if point_in_polygon(cursor, &sp) {
-                let d = depth / 3.0;
-                if best_fill.map_or(true, |(bd, _)| d < bd) {
-                    best_fill = Some((d, wire.name.as_str()));
-                }
-                break;
+        if let Some(d) = tris_hit_depth(
+            cursor,
+            &wire.fill_tris,
+            &wire.fill_tris_low,
+            view_rot,
+            eye,
+            bounds,
+        ) {
+            if best_fill.map_or(true, |(bd, _)| d < bd) {
+                best_fill = Some((d, wire.name.as_str()));
             }
         }
     }
     if let Some((_, n)) = best_fill {
+        return Some(n);
+    }
+
+    // No fill of this wire's own either. `pick_tris` closes the surfaces that
+    // `points` only bounds: a thickness wall (drawn as four edges with nothing
+    // between them) and a wide polyline's band (drawn, but by the hatch
+    // pipeline, so no fill hangs off this wire). Without them the cursor falls
+    // through what plainly reads as solid. Front-most wins.
+    //
+    // Ranked below `fill_tris` because that geometry is this wire's own drawn
+    // surface — where the two overlap, the nearer thing to the eye is decided
+    // by depth, but a wire that has a real fill should win on it first.
+    let mut best_wall: Option<(f32, &str)> = None;
+    for wire in wires {
+        if wire.pick_tris.is_empty() {
+            continue;
+        }
+        // This runs on every hover that misses everything else — the common case
+        // over empty space — and a wall is two triangles per base segment, so an
+        // extruded circle alone is ~128 of them. Reject on the box first or a
+        // drawing full of thickness turns every mouse move into a projection of
+        // its every wall.
+        if z_flat
+            && wire.aabb != WireModel::UNBOUNDED_AABB
+            && aabb_rejects(wire.aabb, cursor, 0.0, view_rot, eye, bounds)
+        {
+            continue;
+        }
+        if let Some(d) = tris_hit_depth(
+            cursor,
+            &wire.pick_tris,
+            &wire.pick_tris_low,
+            view_rot,
+            eye,
+            bounds,
+        ) {
+            if best_wall.map_or(true, |(bd, _)| d < bd) {
+                best_wall = Some((d, wire.name.as_str()));
+            }
+        }
+    }
+    if let Some((_, n)) = best_wall {
         return Some(n);
     }
 
@@ -184,14 +300,16 @@ pub fn click_hits_all<'a>(
     view_rot: Mat4,
     eye: glam::DVec3,
     bounds: Rectangle,
+    lw_display: bool,
 ) -> Vec<&'a str> {
     if cursor.x < 0.0 || cursor.x > bounds.width || cursor.y < 0.0 || cursor.y > bounds.height {
         return Vec::new();
     }
     let mut hits: Vec<(f32, &str)> = Vec::new();
     for wire in wires {
+        let tol = pick_tolerance_px(wire, lw_display);
         let mut prev: Option<Point> = None;
-        let mut best_for_wire = CLICK_THRESHOLD_PX;
+        let mut best_for_wire = tol;
         let mut hit = false;
         for (i, &[px, py, pz]) in wire.points.iter().enumerate() {
             if px.is_nan() {
@@ -210,6 +328,29 @@ pub fn click_hits_all<'a>(
         }
         if hit {
             hits.push((best_for_wire, &wire.name));
+        }
+    }
+    // Thickness walls join the cycle so an extruded entity picked on its wall
+    // can be stepped past to whatever sits behind it. Ranked at the threshold,
+    // below every proximity hit — same convention the text boxes below use.
+    //
+    // A wall's own edges live on the same wire, so skip any wire the loop above
+    // already caught: cycling must not offer one entity twice.
+    for wire in wires {
+        if wire.pick_tris.is_empty() || hits.iter().any(|&(_, n)| n == wire.name) {
+            continue;
+        }
+        if tris_hit_depth(
+            cursor,
+            &wire.pick_tris,
+            &wire.pick_tris_low,
+            view_rot,
+            eye,
+            bounds,
+        )
+        .is_some()
+        {
+            hits.push((CLICK_THRESHOLD_PX, &wire.name));
         }
     }
     // SDF text: include a text whose box contains the cursor (an empty-stroke
@@ -974,9 +1115,9 @@ mod aabb_reject_tests {
         let far = wire("9", vec![[0.9, 0.9, 0.0], [0.95, 0.9, 0.0]], [0.9, 0.9, 0.95, 0.9]);
 
         let eye = glam::DVec3::ZERO;
-        assert_eq!(click_hit(cursor, std::slice::from_ref(&near), vp, eye, bounds), Some("5"));
-        assert_eq!(click_hit(cursor, std::slice::from_ref(&far), vp, eye, bounds), None);
+        assert_eq!(click_hit(cursor, std::slice::from_ref(&near), vp, eye, bounds, true), Some("5"));
+        assert_eq!(click_hit(cursor, std::slice::from_ref(&far), vp, eye, bounds, true), None);
         // The far wire must be rejected without hiding the near one.
-        assert_eq!(click_hit(cursor, &[far, near], vp, eye, bounds), Some("5"));
+        assert_eq!(click_hit(cursor, &[far, near], vp, eye, bounds, true), Some("5"));
     }
 }

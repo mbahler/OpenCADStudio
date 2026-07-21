@@ -114,6 +114,14 @@ impl CadCommand for WipeoutCommand {
                 let min = p1.min(pt);
                 let max = p1.max(pt);
                 Some(WireModel {
+                    taper_widths: Vec::new(),
+                    world_width: 0.0,
+                    depth_override: None,
+                    fill_is_3d: false,
+                    pick_tris: Vec::new(),
+                    pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                     name: "wipeout_preview".into(),
                     points: vec![
@@ -135,7 +143,6 @@ impl CadCommand for WipeoutCommand {
                     key_vertices: vec![],
                     aabb: WireModel::UNBOUNDED_AABB,
                     plinegen: true,
-                    vp_scissor: None,
                     fill_tris: vec![],
                     fill_tris_low: Vec::new(),
                 })
@@ -156,6 +163,14 @@ impl CadCommand for WipeoutCommand {
                     self.poly_pts[0].z as f32,
                 ]);
                 Some(WireModel {
+                    taper_widths: Vec::new(),
+                    world_width: 0.0,
+                    depth_override: None,
+                    fill_is_3d: false,
+                    pick_tris: Vec::new(),
+                    pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                     name: "wipeout_poly_preview".into(),
                     points: pts,
@@ -171,7 +186,6 @@ impl CadCommand for WipeoutCommand {
                     key_vertices: vec![],
                     aabb: WireModel::UNBOUNDED_AABB,
                     plinegen: true,
-                    vp_scissor: None,
                     fill_tris: vec![],
                     fill_tris_low: Vec::new(),
                 })

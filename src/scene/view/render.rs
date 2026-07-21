@@ -37,6 +37,11 @@ pub struct ViewportData {
     /// reused by a different viewport and reset its (index-addressed) caches.
     pub(in crate::scene) instance_id: u64,
     pub(in crate::scene) wires: Arc<Vec<WireModel>>,
+    /// This content viewport's non-rectangular clip boundary (paper layouts
+    /// only), as a polygon already projected into the viewport's render-target
+    /// NDC. The GPU stamps it into the stencil so content is clipped to the
+    /// shape. Empty for rectangular viewports, the paper sheet, and Model space.
+    pub(in crate::scene) clip_boundary_ndc: Arc<Vec<[f32; 2]>>,
     /// Live command-preview / interim / grip-drag overlay wires. Kept out of
     /// the main `wires` buffer so a drag re-uploads only this small set each
     /// frame, never the resident base buffer. Drawn on top in the wire pass.
@@ -55,13 +60,17 @@ pub struct ViewportData {
     /// by the wire / face3d pipelines as a clip-z bias. WireModels carry no
     /// depth field (84 construction sites); the bias is looked up by handle
     /// at GPU-upload time from this map instead.
-    pub(in crate::scene) draw_depths: Arc<rustc_hash::FxHashMap<u64, f32>>,
+    pub(in crate::scene) draw_depths: Arc<rustc_hash::FxHashMap<u64, [f32; 2]>>,
     pub(in crate::scene) hatches: Arc<Vec<HatchModel>>,
     /// Wipeout fills — rendered in a separate pass AFTER wires.
     pub(in crate::scene) wipeout_hatches: Arc<Vec<HatchModel>>,
     pub(in crate::scene) images: Arc<Vec<ImageModel>>,
     pub(in crate::scene) meshes: Arc<Vec<MeshLodSet>>,
     pub(in crate::scene) uniforms: Uniforms,
+    /// World-space camera forward — the parallel view direction. DISPSILH
+    /// silhouettes use this alone (not the eye position), so the outline follows
+    /// the view angle and doesn't shift with pan / perspective foreshortening.
+    pub(in crate::scene) view_dir: glam::Vec3,
     /// Camera rotation matrix derived from the quaternion.
     /// Used by the ViewCube pipeline — no gimbal lock.
     pub(in crate::scene) cam_rotation: Mat4,
@@ -87,6 +96,9 @@ pub struct ViewportData {
     /// rendered on top of fills. Most shaded modes turn this off; the
     /// `*WithEdges` variants and the pure wireframes leave it on.
     pub(in crate::scene) show_3d_edges: bool,
+    /// DISPSILH — draw view-dependent silhouette outlines on curved solid faces.
+    /// A document-header global (default off), orthogonal to the visual style.
+    pub(in crate::scene) display_silhouette: bool,
     /// HiddenLine routes 3D fills through a depth-only prepass so edges
     /// occluded by closer geometry are culled by the LessEqual depth
     /// test on the wire passes that follow.
@@ -375,10 +387,7 @@ impl shader::Primitive for Primitive {
                 #[cfg(not(target_arch = "wasm32"))]
                 let mut _patched = false;
                 #[cfg(not(target_arch = "wasm32"))]
-                if crate::scene::wire_gpu_patch_enabled()
-                    && inner.wire_const_bgl.is_some()
-                    && crate::scene::pipeline::wire_arena::is_arena_eligible(&vp.wires)
-                {
+                if crate::scene::wire_gpu_patch_enabled() && inner.wire_const_bgl.is_some() {
                     use crate::scene::pipeline::wire_arena::{self, WireArena};
                     // Split the resident set into the regular 2D wires and the
                     // mesh/solid EDGE wires (which need the mesh-edge draw
@@ -555,9 +564,15 @@ impl shader::Primitive for Primitive {
                 vp.uniforms.eye_high[1] as f64 + vp.uniforms.eye_low[1] as f64,
                 vp.uniforms.eye_high[2] as f64 + vp.uniforms.eye_low[2] as f64,
             );
-            inner.compute_wire_scissors(view_rot, eye, clip_size.width, clip_size.height);
-            inner.compute_wipeout_scissors(view_rot, eye, clip_size.width, clip_size.height);
-            inner.compute_image_scissors(view_rot, eye, clip_size.width, clip_size.height);
+            // DISPSILH: rebuild view-dependent silhouettes each frame (off by
+            // default, so this is a no-op unless the drawing enables it). Only
+            // in modes that draw edges — pure shaded hides them.
+            if vp.display_silhouette && (vp.view_wireframe || vp.show_3d_edges) {
+                inner.upload_silhouettes(device, &vp.meshes[..], vp.view_dir);
+            } else {
+                inner.upload_silhouettes(device, &[], vp.view_dir);
+            }
+            inner.upload_clip_boundary(device, &vp.clip_boundary_ndc);
             inner.compute_hatch_lod(queue, view_rot, eye, clip_size.width, clip_size.height);
             inner.compute_wipeout_lod(view_rot, eye, clip_size.width, clip_size.height);
             inner.compute_mesh_lod(view_rot, eye, clip_size.width, clip_size.height);
@@ -982,6 +997,7 @@ impl Scene {
         &self,
         wires: &[WireModel],
         wire_content_id: u64,
+        source_key: u64,
     ) -> std::sync::Arc<Vec<crate::scene::pipeline::text_gpu::TextVertex>> {
         use std::sync::Arc;
         {
@@ -992,11 +1008,13 @@ impl Scene {
         }
         // A new content id (every geometry edit) misses the cache — but if no
         // text-bearing entity changed since the last build, the glyphs are
-        // identical, so reuse them instead of re-walking every wire.
+        // identical, so reuse them instead of re-walking every wire. Reuse is
+        // per `source_key`: another source's glyphs are a different wire set,
+        // not an older build of this one (#403).
         {
             let reuse = {
                 let last = self.last_sdf_text.borrow();
-                match &*last {
+                match last.get(&source_key) {
                     Some((epoch, arc)) if self.text_unchanged(*epoch) => Some(arc.clone()),
                     _ => None,
                 }
@@ -1005,7 +1023,9 @@ impl Scene {
                 self.sdf_text_cache
                     .borrow_mut()
                     .insert(wire_content_id, arc.clone());
-                *self.last_sdf_text.borrow_mut() = Some((self.geometry_epoch, arc.clone()));
+                self.last_sdf_text
+                    .borrow_mut()
+                    .insert(source_key, (self.geometry_epoch, arc.clone()));
                 return arc;
             }
         }
@@ -1024,7 +1044,13 @@ impl Scene {
             }
             cache.insert(wire_content_id, verts.clone());
         }
-        *self.last_sdf_text.borrow_mut() = Some((self.geometry_epoch, verts.clone()));
+        {
+            let mut last = self.last_sdf_text.borrow_mut();
+            if last.len() > 8 {
+                last.clear();
+            }
+            last.insert(source_key, (self.geometry_epoch, verts.clone()));
+        }
         verts
     }
 
@@ -1274,6 +1300,23 @@ impl Scene {
         // bleed past the viewport borders whenever model coords overlap the
         // paper area. Content viewports keep the full set (the model camera +
         // per-viewport scissor place / clip them correctly).
+        // Per-viewport frozen-layer set for a paper content viewport. Content
+        // viewports must hide FILLS / IMAGES / SOLIDS on their frozen layers too,
+        // not just wires (which `model_wires_for_viewport_arc` already filters).
+        // Empty for the sheet, model tiles and the implicit-model view — none of
+        // which carry a per-viewport freeze — so those reuse the shared sets.
+        let vp_frozen: rustc_hash::FxHashSet<Handle> = if !inst.paper_sheet
+            && inst.tile_idx.is_none()
+            && inst.handle != acadrust::Handle::NULL
+        {
+            match self.document.get_entity(inst.handle) {
+                Some(EntityType::Viewport(vp)) => vp.frozen_layers.iter().cloned().collect(),
+                _ => rustc_hash::FxHashSet::default(),
+            }
+        } else {
+            rustc_hash::FxHashSet::default()
+        };
+
         let (hatches, wipeout_hatches) = if inst.paper_sheet {
             let mut v: Vec<HatchModel> = Vec::new();
             if let Some(sheet) = self.paper_sheet_fill() {
@@ -1282,12 +1325,15 @@ impl Scene {
             v.extend(self.paper_canvas_hatches().iter().cloned());
             (Arc::new(v), self.paper_canvas_wipeouts())
         } else {
-            (self.hatch_models_arc(), self.wipeout_models_arc())
+            (
+                self.hatch_models_for_viewport(&vp_frozen),
+                self.wipeout_models_for_viewport(&vp_frozen),
+            )
         };
         let images = if inst.paper_sheet {
             self.paper_sheet_images()
         } else {
-            self.images_arc()
+            self.images_for_viewport(&vp_frozen)
         };
         // The paper sheet shows the layout's own 2-D content (fills, borders,
         // annotation) — never the model's 3-D solids. Those are drawn inside
@@ -1299,7 +1345,7 @@ impl Scene {
         let meshes = if inst.paper_sheet {
             Arc::new(Vec::new())
         } else {
-            self.meshes_arc()
+            self.meshes_for_viewport(&vp_frozen)
         };
 
         // SDF text quads (behind OCS_TEXT_SDF). The glyph quads ride on each
@@ -1309,7 +1355,22 @@ impl Scene {
         // internal text and the paper sheet's own annotation alike — each set
         // draws only the text that belongs to it. Cached on the wire content
         // id so an unchanged wire set is not re-walked every frame.
-        let text_verts = self.gather_text_verts(&all_wires, wire_content_id);
+        // The reuse fallback inside the gather is keyed per wire SOURCE — the
+        // sheet, a Model tile, a content viewport and the implicit view carry
+        // different glyph sets even at the same geometry epoch (#403). Tiles
+        // share the resident Model set, so they share one key; the implicit
+        // view mixes in the current layout block (BEDIT swaps sets without a
+        // geometry delta).
+        let text_source_key: u64 = if inst.tile_idx.is_some() {
+            0x1000_0000_0000_0000
+        } else if inst.paper_sheet {
+            0x2000_0000_0000_0000
+        } else if inst.handle == acadrust::Handle::NULL {
+            0x4000_0000_0000_0000 | self.current_layout_block_handle().value()
+        } else {
+            0x3000_0000_0000_0000 | inst.handle.value()
+        };
+        let text_verts = self.gather_text_verts(&all_wires, wire_content_id, text_source_key);
         // Grip-drag / command-preview glyphs, excluded from the epoch-cached base
         // gather above. Two sources, both tiny (one operation's worth) and walked
         // per frame: the overlay wires' own glyphs (MOVE / COPY / ROTATE / SCALE /
@@ -1337,9 +1398,24 @@ impl Scene {
         } else {
             0x3000_0000_0000_0000 | inst.handle.value()
         };
+        // A paper content viewport with a non-rectangular clip entity gets its
+        // boundary projected into this render target's NDC (paper shape mapped
+        // through the same visible-sub-rect crop as the content). Rectangular
+        // viewports, the paper sheet and Model tiles clip via their own render
+        // rectangle and need no stencil boundary.
+        let clip_boundary_ndc = if !inst.paper_sheet
+            && inst.tile_idx.is_none()
+            && inst.handle != acadrust::Handle::NULL
+            && self.current_layout != "Model"
+        {
+            Arc::new(self.viewport_clip_boundary_ndc(inst.handle, uo, vo, us, vs))
+        } else {
+            Arc::new(vec![])
+        };
         Some(ViewportData {
             instance_id,
             wires: all_wires,
+            clip_boundary_ndc,
             preview_wires,
             face3d_wires,
             text_verts,
@@ -1350,6 +1426,7 @@ impl Scene {
             images,
             meshes,
             uniforms,
+            view_dir: (inst.camera.rotation * glam::Vec3::NEG_Z).normalize_or(glam::Vec3::NEG_Z),
             cam_rotation: inst.camera.view_rotation_mat() * self.viewcube_ucs_mat(),
             compass_rotation: inst.camera.view_rotation_mat(),
             // Only the active viewport gets the hovered-region highlight.
@@ -1362,6 +1439,7 @@ impl Scene {
             view_wireframe,
             mesh_fill: flags.mesh_fill,
             show_3d_edges: flags.show_3d_edges,
+            display_silhouette: self.document.header.display_silhouette,
             hidden_line: flags.hidden_line,
             // Interaction LOD: suppress the costly hatch pass while the view is
             // actively moving; the scene-render cache holds the full-quality

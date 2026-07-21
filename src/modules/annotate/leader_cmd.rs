@@ -163,6 +163,14 @@ fn preview_wire(pts: &[Vec3]) -> WireModel {
         points.push([w2.x, w2.y, w2.z]);
     }
     WireModel {
+        taper_widths: Vec::new(),
+        world_width: 0.0,
+        depth_override: None,
+        fill_is_3d: false,
+        pick_tris: Vec::new(),
+        pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
         name: "leader_preview".into(),
         points,
@@ -178,7 +186,6 @@ fn preview_wire(pts: &[Vec3]) -> WireModel {
         key_vertices: vec![],
         aabb: WireModel::UNBOUNDED_AABB,
         plinegen: true,
-        vp_scissor: None,
         fill_tris: vec![],
         fill_tris_low: Vec::new(),
     }

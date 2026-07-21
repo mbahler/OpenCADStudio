@@ -6,7 +6,7 @@ use crate::entities::common::{
     center_grip, edit_prop as edit, parse_f64, ro_prop as ro, square_grip,
 };
 use crate::entities::traits::TruckConvertible;
-use crate::scene::convert::acad_to_truck::{TruckEntity, TruckObject};
+use crate::scene::convert::acad_to_truck::{extrusion_wall_tris, TruckEntity, TruckObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection};
 use crate::scene::model::wire_model::{SnapHint, TangentGeom};
 
@@ -56,17 +56,17 @@ fn to_truck(arc: &Arc) -> TruckEntity {
         let n = 32usize;
         let ccw_end = if ea >= sa { ea } else { ea + TAU };
         let (start_a, end_a) = (sa, ccw_end);
+        let base: Vec<[f64; 3]> = (0..=n)
+            .map(|i| {
+                let p = arc_pt(start_a + (end_a - start_a) * (i as f64 / n as f64));
+                [p.x, p.y, p.z]
+            })
+            .collect();
         let mut pts: Vec<[f64; 3]> = Vec::with_capacity((n + 1) * 2 + 8);
-        for i in 0..=n {
-            let a = start_a + (end_a - start_a) * (i as f64 / n as f64);
-            let p = arc_pt(a);
-            pts.push([p.x, p.y, p.z]);
-        }
+        pts.extend_from_slice(&base);
         pts.push([f64::NAN; 3]);
-        for i in 0..=n {
-            let a = start_a + (end_a - start_a) * (i as f64 / n as f64);
-            let p = arc_pt(a);
-            pts.push([p.x + t * nx, p.y + t * ny, p.z + t * nz]);
+        for &[x, y, z] in &base {
+            pts.push([x + t * nx, y + t * ny, z + t * nz]);
         }
         pts.push([f64::NAN; 3]);
         let ps = arc_pt(sa);
@@ -77,6 +77,7 @@ fn to_truck(arc: &Arc) -> TruckEntity {
         pts.push([pe.x, pe.y, pe.z]);
         pts.push([pe.x + t * nx, pe.y + t * ny, pe.z + t * nz]);
         return TruckEntity {
+            pick_tris: extrusion_wall_tris(&base, [t * nx, t * ny, t * nz]),
             object: TruckObject::Lines(pts),
             snap_pts: vec![(cv, SnapHint::Center), (mv, SnapHint::Midpoint)],
             tangent_geoms: vec![tangent],
@@ -92,6 +93,7 @@ fn to_truck(arc: &Arc) -> TruckEntity {
     let v_end = builder::vertex(p_end);
     let edge = builder::circle_arc(&v_start, &v_end, p_mid);
     TruckEntity {
+        pick_tris: Vec::new(),
         object: TruckObject::Curve(edge),
         snap_pts: vec![(cv, SnapHint::Center), (mv, SnapHint::Midpoint)],
         tangent_geoms: vec![tangent],

@@ -58,11 +58,9 @@ struct HatchWebUniform {
 pub struct HatchWebGpu {
     pub vertex_buffer: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
-    /// Reserved for viewport-clip scissor / per-frame AABB LOD (mirrors
-    /// `WipeoutGpu`); not yet wired into the web hatch draw loop — the native
-    /// batched path doesn't do per-hatch scissor/LOD either.
-    #[allow(dead_code)]
-    pub vp_scissor: Option<[f32; 4]>,
+    /// Reserved for per-frame AABB LOD (mirrors `WipeoutGpu`); not yet wired
+    /// into the web hatch draw loop — the native batched path doesn't do
+    /// per-hatch LOD either.
     #[allow(dead_code)]
     pub world_aabb: [f32; 4],
     _uniform_buf: wgpu::Buffer,
@@ -107,12 +105,20 @@ impl HatchWebGpu {
         bgl1: &wgpu::BindGroupLayout,
     ) -> Self {
         // ── Decode pattern mode (mirrors WipeoutGpu::new) ─────────────────
+        // The gradient shape (kind + invert bit) rides in the mode's high
+        // bits — the 96-byte uniform has no spare slot.
         let (mode, color2, grad_cos, grad_sin) = match &model.pattern {
             HatchPattern::Solid => (1u32, [0.0f32; 4], 0.0f32, 0.0f32),
             HatchPattern::Pattern(_) => (0u32, [0.0f32; 4], 0.0f32, 0.0f32),
-            HatchPattern::Gradient { angle_deg, color2 } => {
-                let r = angle_deg.to_radians();
-                (2u32, *color2, r.cos(), r.sin())
+            HatchPattern::Gradient { angle_deg, color2, kind, invert } => {
+                let gk = (kind.shader_kind() | if *invert { 16 } else { 0 }) << 8;
+                if kind.radial() {
+                    // Radial: centre is the local origin; grad_cos/sin unused.
+                    (3u32 | gk, *color2, 0.0, 0.0)
+                } else {
+                    let r = angle_deg.to_radians();
+                    (2u32 | gk, *color2, r.cos(), r.sin())
+                }
             }
         };
 
@@ -181,6 +187,16 @@ impl HatchWebGpu {
                 // Floor matches the desktop hatch renderer (hatch_gpu.rs).
                 (proj_min, (proj_max - proj_min).max(1.0))
             }
+        } else if mode == 3 {
+            // Radial: range = the farthest boundary vertex from the centre.
+            let radius = model
+                .boundary
+                .iter()
+                .filter(|v| v[0].is_finite() && v[1].is_finite())
+                .map(|&[x, y]| (x * x + y * y).sqrt())
+                .fold(0.0_f32, f32::max)
+                .max(1.0);
+            (0.0, radius)
         } else {
             (0.0, 1.0)
         };
@@ -329,7 +345,6 @@ impl HatchWebGpu {
         Self {
             vertex_buffer,
             bind_group,
-            vp_scissor: model.vp_scissor,
             world_aabb,
             _uniform_buf,
             _data_tex: data_tex,

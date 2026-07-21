@@ -6,7 +6,7 @@ use crate::entities::common::{
     center_grip, edit_prop as edit, parse_f64, ro_prop as ro, square_grip,
 };
 use crate::entities::traits::TruckConvertible;
-use crate::scene::convert::acad_to_truck::{TruckEntity, TruckObject};
+use crate::scene::convert::acad_to_truck::{extrusion_wall_tris, TruckEntity, TruckObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection};
 use crate::scene::model::wire_model::{SnapHint, TangentGeom};
 
@@ -64,14 +64,16 @@ fn to_truck(circle: &Circle) -> TruckEntity {
                 cwz + r * (c * ax.2 + s * ay.2),
             )
         };
+        let base: Vec<[f64; 3]> = (0..=n)
+            .map(|i| {
+                let (x, y, z) = circ_pt(i as f64 * tau / n as f64);
+                [x, y, z]
+            })
+            .collect();
         let mut pts: Vec<[f64; 3]> = Vec::with_capacity((n + 1) * 2 + 4 * 3);
-        for i in 0..=n {
-            let (x, y, z) = circ_pt(i as f64 * tau / n as f64);
-            pts.push([x, y, z]);
-        }
+        pts.extend_from_slice(&base);
         pts.push([f64::NAN; 3]);
-        for i in 0..=n {
-            let (x, y, z) = circ_pt(i as f64 * tau / n as f64);
+        for &[x, y, z] in &base {
             pts.push([x + t * nx, y + t * ny, z + t * nz]);
         }
         pts.push([f64::NAN; 3]);
@@ -84,6 +86,7 @@ fn to_truck(circle: &Circle) -> TruckEntity {
             }
         }
         return TruckEntity {
+            pick_tris: extrusion_wall_tris(&base, [t * nx, t * ny, t * nz]),
             object: TruckObject::Lines(pts),
             snap_pts,
             tangent_geoms: vec![tangent],
@@ -98,6 +101,7 @@ fn to_truck(circle: &Circle) -> TruckEntity {
     let lower = builder::circle_arc(&left, &right, p_bot);
     let wire: Wire = [upper, lower].into_iter().collect();
     TruckEntity {
+        pick_tris: Vec::new(),
         object: TruckObject::Contour(wire),
         snap_pts,
         tangent_geoms: vec![tangent],

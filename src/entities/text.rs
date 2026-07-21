@@ -113,6 +113,7 @@ fn to_truck(t: &Text, document: &acadrust::CadDocument) -> TruckEntity {
         &value,
     );
     TruckEntity {
+        pick_tris: Vec::new(),
         object: TruckObject::Text(vec![TextStroke {
             strokes,
             origin: p.origin,

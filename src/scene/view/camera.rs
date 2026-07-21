@@ -11,6 +11,8 @@
 //
 // Coordinate convention: Z-up world space (same as the rest of OpenCADStudio).
 
+use glam::camera::rh::proj::directx::{orthographic, perspective};
+use glam::camera::rh::view::look_at_mat4;
 use glam::{DVec3, Mat4, Quat, Vec3};
 use iced::{Point, Rectangle};
 
@@ -126,19 +128,19 @@ impl Camera {
         let aspect = bounds.width / bounds.height;
         let up_dir = self.rotation * Vec3::Y;
 
-        let mut view = Mat4::look_at_rh(self.eye().as_vec3(), self.target.as_vec3(), up_dir);
+        let mut view = look_at_mat4(self.eye().as_vec3(), self.target.as_vec3(), up_dir);
         // Zero the translation column → pure rotation (world→view basis).
         view.w_axis = glam::vec4(0.0, 0.0, 0.0, 1.0);
 
         let proj = match self.projection {
             Projection::Perspective => {
-                Mat4::perspective_rh(self.fov_y, aspect, self.distance * 0.001, self.distance * 1000.0)
+                perspective(self.fov_y, aspect, self.distance * 0.001, self.distance * 1000.0)
             }
             Projection::Orthographic => {
                 let h = self.ortho_size();
                 let w = h * aspect;
                 let (near, far) = self.ortho_depth_range();
-                Mat4::orthographic_rh(-w, w, -h, h, near, far)
+                orthographic(-w, w, -h, h, near, far)
             }
         };
         OPENGL_TO_WGPU * proj * view

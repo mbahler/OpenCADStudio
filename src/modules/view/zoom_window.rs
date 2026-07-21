@@ -65,6 +65,14 @@ impl CadCommand for ZoomWindowCommand {
         let max = p1.max(pt);
         // Draw a rectangle preview
         Some(WireModel {
+            taper_widths: Vec::new(),
+            world_width: 0.0,
+            depth_override: None,
+            fill_is_3d: false,
+            pick_tris: Vec::new(),
+            pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: "zoom_window_preview".into(),
             points: vec![
@@ -86,7 +94,6 @@ impl CadCommand for ZoomWindowCommand {
             key_vertices: vec![],
             aabb: WireModel::UNBOUNDED_AABB,
             plinegen: true,
-            vp_scissor: None,
             fill_tris: vec![],
             fill_tris_low: Vec::new(),
         })

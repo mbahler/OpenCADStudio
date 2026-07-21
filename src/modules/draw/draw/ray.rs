@@ -84,6 +84,14 @@ impl CadCommand for RayCommand {
         let dir = (pt - base).normalize_or_zero();
         let far = base + dir * DISPLAY_EXTENT;
         Some(WireModel {
+            taper_widths: Vec::new(),
+            world_width: 0.0,
+            depth_override: None,
+            fill_is_3d: false,
+            pick_tris: Vec::new(),
+            pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: "ray_preview".into(),
             points: vec![[base.x, base.y, base.z], [far.x, far.y, far.z]],
@@ -99,7 +107,6 @@ impl CadCommand for RayCommand {
             key_vertices: vec![],
             aabb: WireModel::UNBOUNDED_AABB,
             plinegen: true,
-            vp_scissor: None,
             fill_tris: vec![],
             fill_tris_low: Vec::new(),
         })
@@ -175,6 +182,14 @@ impl CadCommand for XLineCommand {
         let far_pos = base + dir * DISPLAY_EXTENT;
         let far_neg = base - dir * DISPLAY_EXTENT;
         Some(WireModel {
+            taper_widths: Vec::new(),
+            world_width: 0.0,
+            depth_override: None,
+            fill_is_3d: false,
+            pick_tris: Vec::new(),
+            pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: "xline_preview".into(),
             points: vec![
@@ -193,7 +208,6 @@ impl CadCommand for XLineCommand {
             key_vertices: vec![],
             aabb: WireModel::UNBOUNDED_AABB,
             plinegen: true,
-            vp_scissor: None,
             fill_tris: vec![],
             fill_tris_low: Vec::new(),
         })

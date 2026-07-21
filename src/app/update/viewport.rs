@@ -1172,7 +1172,7 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
                         p
                     } else if needs_entity {
                         let hover_handle =
-                            scene::pick::hit_test::click_hit(p, &all_wires[..], view_rot, eye, bounds)
+                            scene::pick::hit_test::click_hit(p, &all_wires[..], view_rot, eye, bounds, self.tabs[i].scene.document.header.lineweight_display)
                                 .and_then(|s| Scene::handle_from_wire_name(s))
                                 .unwrap_or(acadrust::Handle::NULL);
                         let mut p = self.tabs[i]
@@ -1235,6 +1235,14 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
                                 let far_pos = base + dir * far;
                                 let far_neg = base - dir * far;
                                 let guide = crate::scene::WireModel {
+                                    taper_widths: Vec::new(),
+                                    world_width: 0.0,
+                                    depth_override: None,
+                                    fill_is_3d: false,
+                                    pick_tris: Vec::new(),
+                                    pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                                     name: "__polar_guide__".into(),
                                     points: vec![
@@ -1253,7 +1261,6 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
                                     key_vertices: vec![],
                                     aabb: crate::scene::WireModel::UNBOUNDED_AABB,
                                     plinegen: true,
-                                    vp_scissor: None,
                                     fill_tris: vec![],
                                     fill_tris_low: Vec::new(),
                                 };
@@ -1269,6 +1276,14 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
                             let far_pos = h.base + h.dir * far;
                             let far_neg = h.base - h.dir * far;
                             previews.push(crate::scene::WireModel {
+                                taper_widths: Vec::new(),
+                                world_width: 0.0,
+                                depth_override: None,
+                                fill_is_3d: false,
+                                pick_tris: Vec::new(),
+                                pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
                                 name: "__otrack_guide__".into(),
                                 points: vec![
@@ -1287,7 +1302,6 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
                                 key_vertices: vec![],
                                 aabb: crate::scene::WireModel::UNBOUNDED_AABB,
                                 plinegen: true,
-                                vp_scissor: None,
                                 fill_tris: vec![],
                                 fill_tris_low: Vec::new(),
                             });
@@ -2013,7 +2027,7 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
                         .unwrap_or(false)
                     {
                         let (view_rot2, eye2, all_wires2) = self.pick_view(i, &edit_cam, bounds);
-                        let hit = scene::pick::hit_test::click_hit(p, &all_wires2[..], view_rot2, eye2, bounds)
+                        let hit = scene::pick::hit_test::click_hit(p, &all_wires2[..], view_rot2, eye2, bounds, self.tabs[i].scene.document.header.lineweight_display)
                             .and_then(|s| Scene::handle_from_wire_name(s));
                         if let Some(handle) = hit {
                             // Some commands (e.g. SS_CATCHMENT) need the entity
@@ -2354,6 +2368,7 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
                                     view_rot,
                                     eye,
                                     bounds,
+                                    self.tabs[i].scene.document.header.lineweight_display,
                                 )
                                 .into_iter()
                                 .filter_map(|s| Scene::handle_from_wire_name(s))
@@ -2369,7 +2384,7 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
 
                             if !handled_by_cycling {
                                 let hit =
-                                    scene::pick::hit_test::click_hit(p, &all_wires[..], view_rot, eye, bounds)
+                                    scene::pick::hit_test::click_hit(p, &all_wires[..], view_rot, eye, bounds, self.tabs[i].scene.document.header.lineweight_display)
                                         .and_then(|s| Scene::handle_from_wire_name(s))
                                         .or_else(|| {
                                             scene::pick::hit_test::click_hit_hatch(
@@ -2564,7 +2579,7 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
                         // Resolve the double-clicked object — its wire, or (for a
                         // block/solid with no wire under the cursor) its shaded
                         // body, which maps to the parent INSERT.
-                        let hit = scene::pick::hit_test::click_hit(p, &all_wires[..], view_rot, eye, bounds)
+                        let hit = scene::pick::hit_test::click_hit(p, &all_wires[..], view_rot, eye, bounds, self.tabs[i].scene.document.header.lineweight_display)
                             .and_then(|s| Scene::handle_from_wire_name(s))
                             .or_else(|| self.tabs[i].scene.solid_click_hit(p, view_rot, eye, bounds));
                         if let Some(handle) = hit {
@@ -2653,7 +2668,7 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
                         let wire_hit: Option<acadrust::Handle> = {
                             let (view_rot, eye) = { let c = self.tabs[i].scene.camera.borrow(); (c.view_proj_rte(bounds), c.eye()) };
                             let all_wires = self.tabs[i].scene.hit_test_wires();
-                            scene::pick::hit_test::click_hit(p, &all_wires[..], view_rot, eye, bounds)
+                            scene::pick::hit_test::click_hit(p, &all_wires[..], view_rot, eye, bounds, self.tabs[i].scene.document.header.lineweight_display)
                                 .and_then(|s| Scene::handle_from_wire_name(s))
                                 .and_then(|h| {
                                     if let Some(AcadEntityType::Viewport(vp)) =
@@ -2964,7 +2979,7 @@ pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
                 // Mirror the click-selection pick order so the rollover
                 // highlights every selectable object: wire → hatch →
                 // block-internal hatch → shaded 3D solid body.
-                let hovered = scene::pick::hit_test::click_hit(p, &all_wires[..], view_rot, eye, bounds)
+                let hovered = scene::pick::hit_test::click_hit(p, &all_wires[..], view_rot, eye, bounds, self.tabs[i].scene.document.header.lineweight_display)
                     .and_then(|s| Scene::handle_from_wire_name(s))
                     .or_else(|| {
                         scene::pick::hit_test::click_hit_hatch(

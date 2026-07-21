@@ -201,6 +201,8 @@ fn build_attr_truck(input: AttrTextInputs<'_>, document: &acadrust::CadDocument)
             is_upside_down: false,
         };
         let layout = layout_mtext(&MTextRenderOpts {
+            // Not an MTEXT: text in a fixed box, never columnar.
+            columns: Default::default(),
             value: &display_value,
             insertion: [anchor_pt.x, anchor_pt.y, anchor_pt.z],
             height: input.height as f32,
@@ -216,6 +218,7 @@ fn build_attr_truck(input: AttrTextInputs<'_>, document: &acadrust::CadDocument)
         let _ = input.line_count;
         let _ = input.is_multiline;
         return TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Text(layout.strokes),
             snap_pts: vec![(snap_pt, SnapHint::Insertion)],
             tangent_geoms: vec![],
@@ -232,9 +235,14 @@ fn build_attr_truck(input: AttrTextInputs<'_>, document: &acadrust::CadDocument)
         .split('\n')
         .map(|l| l.to_string())
         .collect();
-    // Tag-style fallback when there is no value (ATTDEF preview style).
+    // An empty attribute value renders nothing — matching AutoCAD, where a
+    // filled-in INSERT attribute left blank shows no text. The old `[value]`
+    // fallback only ever fired when the value was already empty (and never
+    // carried the tag), so it drew stray "[]" brackets for every blank
+    // attribute. An ATTDEF preview passes its tag as the value (non-empty), so
+    // it never reached this branch and is unaffected.
     let lines: Vec<String> = if plain.iter().all(|l| l.is_empty()) {
-        vec![format!("[{}]", input.value)]
+        Vec::new()
     } else {
         plain
     };
@@ -313,6 +321,7 @@ fn build_attr_truck(input: AttrTextInputs<'_>, document: &acadrust::CadDocument)
     let _ = input.line_count; // round-trip only — recomputed above
 
     TruckEntity {
+        pick_tris: Vec::new(),
         object: TruckObject::Text(strokes_all),
         snap_pts: vec![(snap_pt, SnapHint::Insertion)],
         tangent_geoms: vec![],
@@ -325,8 +334,10 @@ fn build_attr_truck(input: AttrTextInputs<'_>, document: &acadrust::CadDocument)
 
 impl TruckConvertible for AttributeDefinition {
     fn to_truck(&self, document: &acadrust::CadDocument) -> Option<TruckEntity> {
+        // An attribute definition previews its tag when it has no default
+        // value, so the placeholder is visible where a block will prompt for
+        // input. (Passed as a non-empty value, so it renders as-is.)
         let display_value = if self.default_value.is_empty() {
-            // tag-only preview path: build_attr_truck wraps in brackets.
             self.tag.clone()
         } else {
             self.default_value.clone()

@@ -75,6 +75,11 @@ impl OpenCADStudio {
                 v
             },
             plugin_repos: self.plugin_repos.clone(),
+            literal_spaces: self.command_line.literal_spaces,
+            osmode: crate::app::settings::osmode_from_snaps(
+                self.snapper.enabled.iter(),
+                self.snapper.snap_enabled,
+            ),
             texteditmode: self.texteditmode,
             textfill: crate::scene::text::sdf_atlas::textfill(),
             backup_on_save: self.backup_on_save,
@@ -96,6 +101,10 @@ impl OpenCADStudio {
         self.default_assoc_prompted = s.default_assoc_prompted;
         self.disabled_plugins = s.disabled_plugins.iter().cloned().collect();
         self.plugin_repos = s.plugin_repos.clone();
+        self.command_line.literal_spaces = s.literal_spaces;
+        let (modes, snap_enabled) = crate::app::settings::snaps_from_osmode(s.osmode);
+        self.snapper.enabled = modes.into_iter().collect();
+        self.snapper.snap_enabled = snap_enabled;
         self.texteditmode = s.texteditmode;
         crate::scene::text::sdf_atlas::set_textfill(s.textfill);
         self.backup_on_save = s.backup_on_save;
@@ -130,9 +139,15 @@ impl OpenCADStudio {
         if ortho {
             self.polar_mode = false;
         }
-        let (modes, snap_enabled) = crate::app::settings::snaps_from_osmode(osmode);
-        self.snapper.enabled = modes.into_iter().collect();
-        self.snapper.snap_enabled = snap_enabled;
+        // OSMODE has no file slot in modern DWG (R2000+ moved it to the
+        // registry), so a header value of 0 just means "absent" — keep the
+        // user's app-level set instead of wiping it. Only a legacy R13/R14 or
+        // DXF file that really carries a nonzero mask overrides.
+        if osmode != 0 {
+            let (modes, snap_enabled) = crate::app::settings::snaps_from_osmode(osmode);
+            self.snapper.enabled = modes.into_iter().collect();
+            self.snapper.snap_enabled = snap_enabled;
+        }
     }
 
     /// Stamp the live per-drawing sysvars (Ortho, running OSNAP) onto tab `i`'s
@@ -296,7 +311,8 @@ impl OpenCADStudio {
             .clamp(crate::app::recent::RECENT_MIN, crate::app::recent::RECENT_MAX);
         self.recent_files.truncate(self.recent_limit);
         self.recent_limit_input = self.recent_limit.to_string();
-        self.refresh_recent_thumbs();
+        // Thumbnails are decoded by a background task queued at boot
+        // (`refresh_recent_thumbs`) — never here on the boot path.
         self.statusbar_config = cfg.statusbar;
         self.ribbon.set_collapse_mode(cfg.ribbon.collapse);
         self.plot_dialog = cfg.plot;
@@ -396,7 +412,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                         caches.corrupt_dropped
                     ));
                 }
-                self.push_recent(path.clone());
+                let thumbs_task = self.push_recent(path.clone());
 
                 let current_is_empty = {
                     let t = &self.tabs[self.active_tab];
@@ -587,7 +603,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 self.tabs[i].dirty = false;
                 self.tabs[i].history = crate::app::document::HistoryState::default();
                 self.refresh_selected_grips();
-                self.drain_pending_open()
+                Task::batch([thumbs_task, self.drain_pending_open()])
     }
 
     pub(super) fn on_wblock_save_result_some(&mut self, block_name: String, path: std::path::PathBuf) -> Task<Message> {
@@ -845,7 +861,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     let close = self.close_save_dialog_window();
                     let pick = Task::perform(
                         async move {
-                            let mut dlg = rfd::AsyncFileDialog::new()
+                            let mut dlg = crate::sys::file_dialog()
                                 .set_title("Save Drawing As")
                                 .set_file_name(default_name)
                                 .add_filter(filter_label, &[filter_ext]);
@@ -1165,7 +1181,11 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                 // Determine paper size and drawing offset.
                 let (paper_w, paper_h, mut draw_ox, mut draw_oy, rotation_deg) =
                     if let Some(((x0, y0), (x1, y1))) = scene.paper_limits() {
-                        let (pw, ph) = (x1 - x0, y1 - y0);
+                        // `paper_limits()` is in paper-space units; the PDF page is
+                // physical millimetres, so scale the sheet size back to mm via
+                // the layout's unit factor (identity for millimetre layouts).
+                let uf = scene.paper_space_unit_factor();
+                let (pw, ph) = ((x1 - x0) / uf, (y1 - y0) / uf);
 
                         // If PlotSettings says Extents, use model space extents instead.
                         let use_extents = ps_snap
@@ -1379,7 +1399,11 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
         let ps_snap = scene.effective_plot_settings();
         let (paper_w, paper_h, draw_ox, draw_oy, rotation_deg) =
             if let Some(((x0, y0), (x1, y1))) = scene.paper_limits() {
-                let (pw, ph) = (x1 - x0, y1 - y0);
+                // `paper_limits()` is in paper-space units; the PDF page is
+                // physical millimetres, so scale the sheet size back to mm via
+                // the layout's unit factor (identity for millimetre layouts).
+                let uf = scene.paper_space_unit_factor();
+                let (pw, ph) = ((x1 - x0) / uf, (y1 - y0) / uf);
                 let use_extents = ps_snap
                     .as_ref()
                     .map(|ps| matches!(ps.plot_type, PlotType::Extents))
@@ -2196,7 +2220,7 @@ pub(super) fn on_open_file(&mut self) -> Task<Message> {
                     .unwrap_or("export.ctb".into());
                 Task::perform(
                     async move {
-                        rfd::AsyncFileDialog::new()
+                        crate::sys::file_dialog()
                             .set_title("Save Plot Style Table")
                             .set_file_name(&default_name)
                             .add_filter("Plot Style Files", &["ctb", "stb", "CTB", "STB"])

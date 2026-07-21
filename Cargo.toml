@@ -1,6 +1,6 @@
 [package]
 name = "OpenCADStudio"
-version = "0.8.3"
+version = "0.8.5"
 edition = "2021"
 build = "build.rs"
 
@@ -109,6 +109,10 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 # Web gets the dependency-free manifest/ribbon contract only (no plugin host).
 ocs_plugin_api = { path = "crates/ocs_plugin_api" }
 console_error_panic_hook = "0.1"
+# Log facade (already in the tree via wgpu/iced): lets the web build install a
+# logger that mirrors wgpu/naga pipeline errors into a copyable on-page banner —
+# a WebGL2 pipeline that fails to build otherwise just leaves the canvas empty.
+log = "0.4"
 # ahash (via acadrust) pulls getrandom 0.3, which needs the `wasm_js` backend
 # enabled to support wasm32-unknown-unknown (plus the matching rustflag in
 # .cargo/config.toml).
@@ -132,6 +136,11 @@ web-sys = { version = "0.3", features = [
     # Async clipboard read for paste into the text/MText editors (iced's own
     # clipboard read is a no-op on the web).
     "Clipboard",
+    # Error banner (web_diag): forward wgpu/naga errors to the browser console
+    # and inject a copyable DOM overlay (document.body → append_child).
+    "console",
+    "Node",
+    "HtmlElement",
 ] }
 # Browsers without WebGPU (e.g. Firefox by default) need wgpu's WebGL2 backend;
 # `webgl` enables it. `fira-sans` embeds the default UI font — the web has no

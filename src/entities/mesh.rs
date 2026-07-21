@@ -13,7 +13,7 @@ use crate::scene::model::wire_model::SnapHint;
 /// from vertex 0 is only valid for convex faces — a concave face (e.g. an
 /// L-shaped mesh face) fans into triangles that spill outside the outline. Ear
 /// clipping handles both. Falls back to a fan when the polygon is degenerate.
-fn triangulate_planar(poly: &[[f64; 3]]) -> Vec<[f64; 3]> {
+pub(crate) fn triangulate_planar(poly: &[[f64; 3]]) -> Vec<[f64; 3]> {
     let n = poly.len();
     if n < 3 {
         return Vec::new();
@@ -195,6 +195,7 @@ impl TruckConvertible for Face3D {
         }
 
         Some(TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Lines(pts),
             snap_pts: vec![
                 (Vec3::from(p0f).as_dvec3(), SnapHint::Node),
@@ -369,6 +370,7 @@ impl TruckConvertible for PolygonMesh {
         }
 
         Some(TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Lines(pts),
             snap_pts: vec![],
             tangent_geoms: vec![],
@@ -524,6 +526,7 @@ impl TruckConvertible for PolyfaceMesh {
         }
 
         Some(TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Lines(pts),
             snap_pts: vec![],
             tangent_geoms: vec![],
@@ -690,6 +693,7 @@ impl TruckConvertible for Mesh {
         let key_vertices: Vec<[f64; 3]> = self.vertices.iter().map(|v| [v.x, v.y, v.z]).collect();
 
         Some(TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Lines(pts),
             snap_pts,
             tangent_geoms: vec![],

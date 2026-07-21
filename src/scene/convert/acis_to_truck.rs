@@ -7,8 +7,10 @@
 //
 //   plane-surface   → planar face from the sampled boundary loop
 //   cone-surface    → surface of revolution (cylinder / cone) via rsweep
-//   sphere-surface  → meridian revolved about the pole
-//   torus-surface   → tube circle revolved about the spine
+//   sphere-surface  → bespoke sampler, clipped to the boundary window (truck
+//                     builds a full ball and cannot trim it to a partial face)
+//   torus-surface   → bespoke sampler, clipped to the revolution arc between
+//                     the tube's end caps (truck builds a full closed ring)
 //   spline-surface  → truck BSplineSurface, grid-sampled (see spline_tess)
 //
 // Each face is meshed independently and its triangles are oriented outward
@@ -26,24 +28,18 @@ use acadrust::entities::acis::{
     SatConeSurface, SatDocument, SatFace, SatPlaneSurface, SatSphereSurface, SatTorusSurface,
 };
 
-use crate::scene::model::mesh_model::{MeshLodSet, MeshModel};
 use crate::scene::convert::solid3d_tess::{
-    apply_body_transform, body_transform, collect_face_loops, cone_axis_span, tess_cone_face,
-    tess_plane_face, tess_sphere_face, tess_torus_face, LodConfig,
+    body_transform, collect_face_loops, cone_axis_span, finalize_mesh, tess_cone_face,
+    tess_plane_face, tess_sphere_face, tess_torus_face, LodConfig, BOUNDARY_CHORD_FRAC,
+    TRUCK_CHORD_FRAC,
 };
+use crate::scene::model::mesh_model::MeshLodSet;
 
 /// Slightly over 2π so revolution builders close the loop.
 const FULL: f64 = std::f64::consts::TAU + 0.2;
-/// Boundary sampling density for planar faces with curved (circular) edges.
-const BOUNDARY_SEGS: usize = 64;
 /// Triangle mesh chord tolerance (world units) for planar faces, where the
 /// surface itself adds no curvature.
 const MESH_TOL: f64 = 0.01;
-/// Chord tolerance for curved faces, as a fraction of the surface radius, so
-/// the facet count is radius-independent instead of exploding on large radii.
-/// `0.1` = 10% chord error (~7 facets per full circle) — a deliberately coarse
-/// setting that keeps the solid triangle budget low.
-const CURVE_REL_TOL: f64 = 0.1;
 
 /// Analytic outward-normal rule for a face, used to orient triangles and
 /// supply smooth per-vertex normals (truck's face orientation is unreliable
@@ -57,14 +53,6 @@ enum Outward {
         axis: [f64; 3],
         sin: f64,
         cos: f64,
-    },
-    /// Sphere: radial from the centre.
-    Sphere { center: [f64; 3] },
-    /// Torus: from the nearest point on the spine circle.
-    Torus {
-        center: [f64; 3],
-        axis: [f64; 3],
-        major: f64,
     },
 }
 
@@ -83,23 +71,6 @@ impl Outward {
                 let radial = vnorm(vsub(d, vscale(*axis, h)));
                 vnorm(vsub(vscale(radial, *cos), vscale(*axis, *sin)))
             }
-            Outward::Sphere { center } => vnorm(vsub(p, *center)),
-            Outward::Torus {
-                center,
-                axis,
-                major,
-            } => {
-                let d = vsub(p, *center);
-                let h = vdot(d, *axis);
-                let radial = vsub(d, vscale(*axis, h));
-                let rl = vlen(radial);
-                let spine = if rl > 1e-9 {
-                    vadd(*center, vscale(radial, major / rl))
-                } else {
-                    *center
-                };
-                vnorm(vsub(p, spine))
-            }
         }
     }
 }
@@ -114,15 +85,12 @@ pub fn tessellate_sat_truck(
     color: [f32; 4],
     _facet_res: f64,
 ) -> Option<MeshLodSet> {
-    let mut mesh = MeshModel {
-        name: name.clone(),
-        verts: Vec::new(),
-        verts_low: Vec::new(),
-        normals: Vec::new(),
-        indices: Vec::new(),
-        color,
-        selected: false,
-    };
+    // Vertices accumulate in f64 world/local space; `finalize_mesh` splits them
+    // into the double-single (high, low) pair once, so a solid at UTM scale
+    // keeps full precision instead of quantizing to the f32 grid.
+    let mut verts: Vec<[f64; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
 
     for face in sat.faces().into_iter() {
         let Some(surf_rec) = sat.resolve(face.surface()) else {
@@ -134,7 +102,7 @@ pub fn tessellate_sat_truck(
                 let shell: Shell = faces.into();
                 let poly = shell.triangulation(tol).to_polygon();
                 if !poly.tri_faces().is_empty() {
-                    append_group(&mut mesh, &poly, &outward);
+                    append_group(&mut verts, &mut normals, &mut indices, &poly, &outward);
                     appended = true;
                 }
             }
@@ -142,25 +110,22 @@ pub fn tessellate_sat_truck(
         // Truck's rsweep/triangulation degenerates to zero triangles on some
         // short-arc cones (a curved wall face whose profile passes through the
         // local origin), leaving a see-through gap. Fall back to the bespoke
-        // parametric sampler for just that face — it writes body-local verts
-        // into the same buffers, so the shared body transform below still
-        // applies uniformly.
+        // parametric sampler for just that face — it writes into the same
+        // buffers, so the shared finalize below still applies uniformly.
         if !appended {
-            bespoke_face(sat, &face, surf_rec, &mut mesh);
+            bespoke_face(sat, &face, surf_rec, &mut verts, &mut normals, &mut indices);
         }
     }
 
     // Spline (NURBS) faces are meshed by direct grid sampling of the truck
     // BSplineSurface — see spline_tess — and merged into the same buffers.
-    append_spline_faces(sat, &mut mesh);
+    append_spline_faces(sat, &mut verts, &mut normals, &mut indices);
 
-    if mesh.indices.is_empty() {
+    if indices.is_empty() {
         return None;
     }
 
-    if let Some((m, tr, scale)) = body_transform(sat) {
-        apply_body_transform(&mut mesh, &m, &tr, scale);
-    }
+    let mesh = finalize_mesh(name, verts, normals, indices, color, body_transform(sat));
     Some(MeshLodSet::from_lods(vec![mesh]))
 }
 
@@ -171,13 +136,14 @@ fn bespoke_face(
     sat: &SatDocument,
     face: &SatFace,
     surf_rec: &acadrust::entities::acis::SatRecord,
-    mesh: &mut MeshModel,
+    v: &mut Vec<[f64; 3]>,
+    n: &mut Vec<[f32; 3]>,
+    i: &mut Vec<u32>,
 ) {
-    let (v, n, i) = (&mut mesh.verts, &mut mesh.normals, &mut mesh.indices);
     match surf_rec.entity_type.as_str() {
         "plane-surface" => {
             if let Some(p) = SatPlaneSurface::from_record(surf_rec) {
-                tess_plane_face(sat, face, &p, LodConfig::HIGH.circ_segs, v, n, i);
+                tess_plane_face(sat, face, &p, LodConfig::HIGH.chord_frac, v, n, i);
             }
         }
         "cone-surface" => {
@@ -187,12 +153,12 @@ fn bespoke_face(
         }
         "sphere-surface" => {
             if let Some(s) = SatSphereSurface::from_record(surf_rec) {
-                tess_sphere_face(&s, LodConfig::HIGH, v, n, i);
+                tess_sphere_face(sat, face, &s, LodConfig::HIGH, v, n, i);
             }
         }
         "torus-surface" => {
             if let Some(t) = SatTorusSurface::from_record(surf_rec) {
-                tess_torus_face(&t, LodConfig::HIGH, v, n, i);
+                tess_torus_face(sat, face, &t, LodConfig::HIGH, v, n, i);
             }
         }
         _ => {}
@@ -208,7 +174,7 @@ fn build_face_group(
     // Chord tolerance scaled to a curved surface's radius, so the facet count
     // is radius-independent (matching the circle/arc wire tessellation) rather
     // than exploding on large radii.
-    let curve_tol = |radius: f64| (radius.abs() * CURVE_REL_TOL).max(1e-6);
+    let curve_tol = |radius: f64| (radius.abs() * TRUCK_CHORD_FRAC).max(1e-6);
     match surf_rec.entity_type.as_str() {
         "plane-surface" => {
             let plane = SatPlaneSurface::from_record(surf_rec)?;
@@ -227,30 +193,17 @@ fn build_face_group(
             let (faces, out) = cone_faces(sat, face, &cone)?;
             Some((faces, out, tol))
         }
-        "sphere-surface" => {
-            let sphere = SatSphereSurface::from_record(surf_rec)?;
-            let (cx, cy, cz) = sphere.center();
-            let tol = curve_tol(sphere.radius());
-            Some((
-                sphere_faces(&sphere),
-                Outward::Sphere { center: [cx, cy, cz] },
-                tol,
-            ))
-        }
-        "torus-surface" => {
-            let torus = SatTorusSurface::from_record(surf_rec)?;
-            let (cx, cy, cz) = torus.center();
-            let (nx, ny, nz) = torus.normal();
-            // Tube (minor) curvature is the tighter of the two, so sampling it
-            // to the circle tolerance keeps the whole torus at least that smooth.
-            let tol = curve_tol(torus.minor_radius());
-            let out = Outward::Torus {
-                center: [cx, cy, cz],
-                axis: vnorm([nx, ny, nz]),
-                major: torus.major_radius(),
-            };
-            Some((torus_faces(&torus), out, tol))
-        }
+        // Truck builds a sphere as a full revolution and cannot trim it to the
+        // face's boundary, so a partial sphere renders as a whole ball. Route
+        // sphere faces to the bespoke sampler instead — it meshes only the
+        // boundary's parametric window (see `tess_sphere_face`).
+        "sphere-surface" => None,
+        // Like a sphere, truck builds a torus as a full revolution and cannot
+        // trim it to the face's boundary, so an open "C" tube renders as a whole
+        // closed ring. Route torus faces to the bespoke sampler, which meshes
+        // only the revolution arc between the tube's end caps (see
+        // `tess_torus_face` / `torus_phi_range`).
+        "torus-surface" => None,
         _ => None,
     }
 }
@@ -266,7 +219,7 @@ fn plane_face(sat: &SatDocument, face: &SatFace) -> Option<Face> {
     // the first wire and cuts the rest as holes, letting truck's mesher trim
     // them. ACIS records no outer-vs-hole flag — the kernel classifies loops at
     // runtime from geometry — so we derive the outer boundary here. (#123)
-    let loops = collect_face_loops(sat, face, BOUNDARY_SEGS);
+    let loops = collect_face_loops(sat, face, BOUNDARY_CHORD_FRAC);
     if loops.is_empty() {
         return None;
     }
@@ -379,7 +332,8 @@ fn cone_faces(
     };
 
     // Angular extent of this face from its boundary loop (seam-robust).
-    let poly = crate::scene::convert::solid3d_tess::collect_face_polygon(sat, face, BOUNDARY_SEGS);
+    let poly =
+        crate::scene::convert::solid3d_tess::collect_face_polygon(sat, face, BOUNDARY_CHORD_FRAC);
     let (theta0, sweep) = cone_boundary_arc(&poly, [cx, cy, cz], axis, udir, vdir);
     // Radial direction at the arc's start angle (u rotated by theta0 about axis).
     let rad0 = udir * theta0.cos() + vdir * theta0.sin();
@@ -450,56 +404,16 @@ fn cone_boundary_arc(
     (start, span)
 }
 
-// ── Sphere face ──────────────────────────────────────────────────────────────
-
-fn sphere_faces(sphere: &SatSphereSurface) -> Vec<Face> {
-    let (cx, cy, cz) = sphere.center();
-    let r = sphere.radius();
-    let (px, py, pz) = sphere.pole();
-    let (ux, uy, uz) = sphere.u_direction();
-
-    let center = Point3::new(cx, cy, cz);
-    let pole = norm(Vector3::new(px, py, pz));
-    let mut perp = Vector3::new(ux, uy, uz);
-    if perp.magnitude2() < 1e-12 || perp.dot(pole).abs() > 0.999 {
-        perp = perpendicular(pole);
-    } else {
-        perp = norm(perp - pole * perp.dot(pole));
-    }
-
-    let top = builder::vertex(center + pole * r);
-    let meridian: Wire = builder::rsweep(&top, center, perp, Rad(std::f64::consts::PI));
-    let shell: Shell = builder::cone(&meridian, pole, Rad(FULL));
-    shell.face_iter().cloned().collect()
-}
-
-// ── Torus face ───────────────────────────────────────────────────────────────
-
-fn torus_faces(torus: &SatTorusSurface) -> Vec<Face> {
-    let (cx, cy, cz) = torus.center();
-    let (nx, ny, nz) = torus.normal();
-    let (ux, uy, uz) = torus.u_direction();
-    let major = torus.major_radius();
-    let minor = torus.minor_radius();
-
-    let center = Point3::new(cx, cy, cz);
-    let axis = norm(Vector3::new(nx, ny, nz));
-    let udir = norm(Vector3::new(ux, uy, uz));
-    let binormal = norm(axis.cross(udir));
-
-    let ring_center = center + udir * major;
-    let tube_start = builder::vertex(ring_center + axis * minor);
-    let tube: Wire = builder::rsweep(&tube_start, ring_center, binormal, Rad(FULL));
-    let shell: Shell = builder::rsweep(&tube, center, axis, Rad(FULL));
-    shell.face_iter().cloned().collect()
-}
-
 // ── Spline faces (NURBS) ─────────────────────────────────────────────────────
 
 /// Append meshes for every `spline-surface` face, reusing the truck
 /// BSplineSurface grid sampler in `spline_tess`.
-fn append_spline_faces(sat: &SatDocument, mesh: &mut MeshModel) {
-    use crate::scene::convert::solid3d_tess::LodConfig;
+fn append_spline_faces(
+    sat: &SatDocument,
+    verts: &mut Vec<[f64; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    indices: &mut Vec<u32>,
+) {
     for face in sat.faces() {
         let Some(surf_rec) = sat.resolve(face.surface()) else {
             continue;
@@ -507,21 +421,14 @@ fn append_spline_faces(sat: &SatDocument, mesh: &mut MeshModel) {
         if surf_rec.entity_type != "spline-surface" {
             continue;
         }
-        let mut verts: Vec<[f32; 3]> = Vec::new();
-        let mut normals: Vec<[f32; 3]> = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
         crate::scene::convert::spline_tess::tess_spline_face(
             sat,
             &face,
             LodConfig::HIGH,
-            &mut verts,
-            &mut normals,
-            &mut indices,
+            verts,
+            normals,
+            indices,
         );
-        let base = mesh.verts.len() as u32;
-        mesh.verts.extend_from_slice(&verts);
-        mesh.normals.extend_from_slice(&normals);
-        mesh.indices.extend(indices.iter().map(|i| i + base));
     }
 }
 
@@ -530,14 +437,20 @@ fn append_spline_faces(sat: &SatDocument, mesh: &mut MeshModel) {
 /// Append one face's triangulation to `mesh`, computing smooth per-vertex
 /// normals from the outward rule and flipping any triangle whose winding
 /// disagrees with that outward direction.
-fn append_group(mesh: &mut MeshModel, poly: &PolygonMesh, outward: &Outward) {
+fn append_group(
+    verts: &mut Vec<[f64; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    out_indices: &mut Vec<u32>,
+    poly: &PolygonMesh,
+    outward: &Outward,
+) {
     let positions = poly.positions();
-    let base = mesh.verts.len() as u32;
+    let base = verts.len() as u32;
     for p in positions {
         let pos = [p.x, p.y, p.z];
-        mesh.verts.push([p.x as f32, p.y as f32, p.z as f32]);
+        verts.push(pos);
         let n = outward.at(pos);
-        mesh.normals.push([n[0] as f32, n[1] as f32, n[2] as f32]);
+        normals.push([n[0] as f32, n[1] as f32, n[2] as f32]);
     }
     for tri in poly.tri_faces() {
         let (i0, i1, i2) = (tri[0].pos, tri[1].pos, tri[2].pos);
@@ -553,9 +466,9 @@ fn append_group(mesh: &mut MeshModel, poly: &PolygonMesh, outward: &Outward) {
         let out = outward.at(cen);
         let (j0, j1, j2) = (base + i0 as u32, base + i1 as u32, base + i2 as u32);
         if vdot(gn, out) < 0.0 {
-            mesh.indices.extend_from_slice(&[j0, j2, j1]);
+            out_indices.extend_from_slice(&[j0, j2, j1]);
         } else {
-            mesh.indices.extend_from_slice(&[j0, j1, j2]);
+            out_indices.extend_from_slice(&[j0, j1, j2]);
         }
     }
 }
@@ -577,25 +490,11 @@ fn norm(v: Vector3) -> Vector3 {
     }
 }
 
-/// Any unit vector perpendicular to `v`.
-fn perpendicular(v: Vector3) -> Vector3 {
-    let a = if v.x.abs() < 0.9 {
-        Vector3::unit_x()
-    } else {
-        Vector3::unit_y()
-    };
-    norm(v.cross(a))
-}
-
 // ── Vector helpers ([f64; 3]) ────────────────────────────────────────────────
 
 #[inline]
 fn vsub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-#[inline]
-fn vadd(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 #[inline]
 fn vscale(a: [f64; 3], s: f64) -> [f64; 3] {

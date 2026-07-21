@@ -10,6 +10,70 @@ use super::*;
 /// the exact stored step. `x0/y0` are filled in by the caller (from the stored
 /// `base_point`, relative to `world_origin`) once the boundary anchor is known;
 /// they set the pattern origin, observable for dashed / offset patterns.
+/// Order a hatch boundary path's sampled edges into one tip-to-tail loop.
+///
+/// Real files do not store boundary edges as a sequential walk: associative
+/// hatches list them in boundary-source-entity order, with arbitrary
+/// direction — the next edge in the list may attach to either end of the
+/// chain built so far, or belong to the far side of the loop entirely.
+/// Concatenating them verbatim draws a self-crossing "bowtie" outline and
+/// flips the even-odd fill over the wrong region.
+///
+/// Greedy nearest-endpoint assembly: keep the chain open at both ends and, at
+/// each step, attach the unused edge whose endpoint lies closest to either
+/// end (reversing / prepending as needed). Distance comparison, no tolerance:
+/// a correctly-ordered file matches at distance 0 and reproduces exactly.
+fn chain_path_edges(mut polys: Vec<Vec<[f64; 2]>>) -> Vec<[f64; 2]> {
+    let d2 = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2);
+    polys.retain(|p| !p.is_empty());
+    if polys.is_empty() {
+        return Vec::new();
+    }
+    let mut chain: std::collections::VecDeque<[f64; 2]> = polys.swap_remove(0).into();
+    while !polys.is_empty() {
+        let head = *chain.front().unwrap();
+        let tail = *chain.back().unwrap();
+        // (distance, index, reverse-points, attach-at-front)
+        let mut best = (f64::MAX, 0usize, false, false);
+        for (i, p) in polys.iter().enumerate() {
+            let s = p[0];
+            let e = *p.last().unwrap();
+            for c in [
+                (d2(tail, s), i, false, false),
+                (d2(tail, e), i, true, false),
+                (d2(head, e), i, false, true),
+                (d2(head, s), i, true, true),
+            ] {
+                if c.0 < best.0 {
+                    best = c;
+                }
+            }
+        }
+        let (_, idx, rev, at_front) = best;
+        let mut p = polys.swap_remove(idx);
+        if rev {
+            p.reverse();
+        }
+        if at_front {
+            if d2(p[p.len() - 1], head) < 1e-18 {
+                p.pop();
+            }
+            for q in p.into_iter().rev() {
+                chain.push_front(q);
+            }
+        } else {
+            let mut it = p.into_iter();
+            if let Some(first) = it.next() {
+                if d2(first, tail) >= 1e-18 {
+                    chain.push_back(first);
+                }
+            }
+            chain.extend(it);
+        }
+    }
+    chain.into()
+}
+
 fn family_from_stored_line(
     ln: &acadrust::entities::hatch::HatchPatternLine,
 ) -> crate::scene::model::hatch_model::PatFamily {
@@ -71,12 +135,13 @@ impl Scene {
             None
         };
         let facet_res = self.document.header.facet_resolution;
+        let isolines = self.document.header.isolines.max(0) as usize;
         let mesh_seed = if matches!(
             &entity,
             EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) | EntityType::Surface(_)
         ) {
             let color = self.render_style(&entity).0;
-            crate::entities::solid3d::tessellate_volume(&entity, color, facet_res)
+            crate::entities::solid3d::tessellate_volume(&entity, color, facet_res, isolines)
                 .map(|m| offset_mesh_lod_set(m))
         } else {
             None
@@ -247,12 +312,13 @@ impl Scene {
             None
         };
         let facet_res = self.document.header.facet_resolution;
+        let isolines = self.document.header.isolines.max(0) as usize;
         let mesh_seed = if matches!(
             &entity,
             EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) | EntityType::Surface(_)
         ) {
             let color = self.render_style(&entity).0;
-            crate::entities::solid3d::tessellate_volume(&entity, color, facet_res)
+            crate::entities::solid3d::tessellate_volume(&entity, color, facet_res, isolines)
                 .map(|m| offset_mesh_lod_set(m))
         } else {
             None
@@ -327,6 +393,7 @@ impl Scene {
                     None
                 };
                 let facet_res = self.document.header.facet_resolution;
+                let isolines = self.document.header.isolines.max(0) as usize;
                 let mesh_seed = if matches!(
                     entity,
                     EntityType::Solid3D(_)
@@ -335,7 +402,7 @@ impl Scene {
                         | EntityType::Surface(_)
                 ) {
                     let color = self.render_style(entity).0;
-                    crate::entities::solid3d::tessellate_volume(entity, color, facet_res)
+                    crate::entities::solid3d::tessellate_volume(entity, color, facet_res, isolines)
                         .map(offset_mesh_lod_set)
                 } else {
                     None
@@ -565,7 +632,10 @@ impl Scene {
         self.bump_geometry();
     }
 
-    pub(super) fn synced_hatch_models(&self) -> Vec<HatchModel> {
+    pub(super) fn synced_hatch_models(
+        &self,
+        frozen: Option<&rustc_hash::FxHashSet<Handle>>,
+    ) -> Vec<HatchModel> {
         let layout_block = self.current_layout_block_handle();
 
         let layer_hidden = |layer: &str| {
@@ -603,6 +673,11 @@ impl Scene {
                 if c.invisible || layer_hidden(&c.layer) {
                     return false;
                 }
+                // Per-viewport layer freeze: a content viewport that freezes
+                // this layer hides its fills too, not just its wires.
+                if self.layer_frozen_in(&c.layer, frozen) {
+                    return false;
+                }
                 // Reject block-defn-only hatches (entities owned by a
                 // BLOCK record that's neither model nor a paper layout
                 // block) — they're tessellated separately via Insert
@@ -623,12 +698,32 @@ impl Scene {
                 // emitted first so LessEqual layering keeps it underneath.
                 let mut backdrop: Option<HatchModel> = None;
                 if let Some(e) = entity {
-                    m.color = self.render_style(e).0;
+                    // A gradient's colour is its first stop (already baked into
+                    // the cached model); only solid / pattern fills take the
+                    // entity's resolved colour.
+                    if !matches!(m.pattern, model::hatch_model::HatchPattern::Gradient { .. }) {
+                        m.color = self.render_style(e).0;
+                    }
                     if let EntityType::Hatch(dxf) = e {
                         if let Some(bg) = crate::entities::hatch::background_color(dxf) {
                             let mut b = m.clone();
                             b.pattern = model::hatch_model::HatchPattern::Solid;
-                            b.color = crate::scene::convert::tess_util::aci_to_rgba(&bg);
+                            // ByLayer / ByBlock backgrounds resolve through the
+                            // normal style chain instead of the raw ACI table
+                            // (#415).
+                            b.color = match bg {
+                                acadrust::types::Color::ByLayer => {
+                                    crate::scene::view::render::layer_render_style(
+                                        &self.document,
+                                        &dxf.common.layer,
+                                    )
+                                    .color
+                                }
+                                acadrust::types::Color::ByBlock => self.render_style(e).0,
+                                other => {
+                                    crate::scene::convert::tess_util::aci_to_rgba(&other)
+                                }
+                            };
                             b.name = "SOLID".into();
                             backdrop = Some(b);
                         }
@@ -659,7 +754,7 @@ impl Scene {
                 if self.selected.contains(&handle) {
                     m.color = [0.15, 0.55, 1.00, m.color[3]];
                 }
-                let d = depth_map.get(&handle.value()).copied().unwrap_or(0.0);
+                let d = depth_map.get(&handle.value()).map_or(0.0, |d| d[0]);
                 m.draw_depth = d;
                 if let Some(b) = &mut backdrop {
                     b.draw_depth = d;
@@ -678,52 +773,14 @@ impl Scene {
         // layout block and materialize its fills at world position. Shared with
         // the export path so a plot draws them identically. (tint_selected =
         // true applies the screen selection highlight.)
-        models.extend(self.exploded_insert_hatch_models(layout_block, hatch_bg, true));
+        models.extend(self.exploded_insert_hatch_models(layout_block, hatch_bg, true, frozen));
 
-        // Wide LWPolyline and Polyline2D fills
-        for entity in self.document.entities() {
-            let (common, fill_origin, fills) = match entity {
-                EntityType::LwPolyline(pl) => {
-                    let (o, f) = crate::entities::lwpolyline::wide_fills(pl);
-                    (&pl.common, o, f)
-                }
-                EntityType::Polyline2D(pl) => {
-                    let (o, f) = crate::entities::polyline::wide_fills(pl);
-                    (&pl.common, o, f)
-                }
-                _ => continue,
-            };
-            if fills.is_empty() {
-                continue;
-            }
-            if common.invisible || layer_hidden(&common.layer) {
-                continue;
-            }
-            if !self.belongs_to_visible_block(common.handle, common.owner_handle, layout_block) {
-                continue;
-            }
-            let base_color = self.render_style(entity).0;
-            let selected = self.selected.contains(&common.handle);
-            let color = if selected {
-                [0.15, 0.55, 1.00, 1.0]
-            } else {
-                base_color
-            };
-            for boundary in fills {
-                models.push(HatchModel {
-                    boundary: Arc::new(boundary),
-                    boundary_wcs: None,
-                    pattern: model::hatch_model::HatchPattern::Solid,
-                    name: "SOLID".into(),
-                    color,
-                    angle_offset: 0.0,
-                    scale: 1.0,
-                    world_origin: fill_origin,
-                    vp_scissor: None,
-                    draw_depth: depth_map.get(&common.handle.value()).copied().unwrap_or(0.0),
-                });
-            }
-        }
+        // Wide LwPolyline / Polyline2D bands are no longer hatch fills at
+        // model level: a flat band is drawn by expanding its centre-line wire
+        // to `world_width` in the shader (depth-tested, linetype-dashed), and a
+        // thickened one is extruded into a 3-D tube by the tessellator. Only
+        // block-internal wide polylines still band via the hatch path (see
+        // `push_block_wide_fills`), where it scales with the insert transform.
 
         models
     }
@@ -747,6 +804,7 @@ impl Scene {
         layout_block: Handle,
         hatch_bg: [f32; 4],
         tint_selected: bool,
+        frozen: Option<&rustc_hash::FxHashSet<Handle>>,
     ) -> Vec<HatchModel> {
         let layer_hidden = |layer: &str| {
             self.document
@@ -756,6 +814,21 @@ impl Scene {
                 .unwrap_or(false)
         };
         let mut models: Vec<HatchModel> = Vec::new();
+        // Draw-order composition (#408): every fill inherits its INSERT's
+        // draw-depth slot, offset by the child's rank INSIDE its block
+        // (draw_depth_map ranks per owning block), scaled to stay within the
+        // insert's half-gap in the host ordering. Without this every block /
+        // xref fill landed at depth 0 and the stack's LIFO pop reversed the
+        // block's internal stacking.
+        let depth_map = self.draw_depth_map();
+        let block_count = |name: &str| -> usize {
+            self.document
+                .block_records
+                .get(name)
+                .map(|br| br.entity_handles.len())
+                .unwrap_or(1)
+                .max(1)
+        };
         // Exploding an INSERT materializes (clones) every child of its block —
         // including 3D solids that each carry megabytes of SAB geometry — just
         // to scan the result for hatch fills. On xref-heavy drawings whose
@@ -776,6 +849,11 @@ impl Scene {
                 continue;
             };
             if ins.common.invisible || layer_hidden(&ins.common.layer) {
+                continue;
+            }
+            // Per-viewport freeze: an INSERT on a layer frozen in this content
+            // viewport hides the whole instance, its internal fills included.
+            if self.layer_frozen_in(&ins.common.layer, frozen) {
                 continue;
             }
             if !self.belongs_to_visible_block(
@@ -811,17 +889,22 @@ impl Scene {
                 &self.document,
                 &ins.common.layer,
             );
+            let [base_depth, half_gap] = depth_map
+                .get(&ins.common.handle.value())
+                .copied()
+                .unwrap_or([0.0, 0.0]);
             let mut stack: Vec<(
                 EntityType,
                 usize,
                 [f32; 4],
                 crate::scene::view::render::InheritStyle,
+                (f32, f32),
             )> = ins
                 .explode_from_document(&self.document)
                 .into_iter()
-                .map(|e| (normalize(e), 0usize, ins_color, l0))
+                .map(|e| (normalize(e), 0usize, ins_color, l0, (base_depth, half_gap)))
                 .collect();
-            while let Some((sub, depth, sub_ins_color, sub_l0)) = stack.pop() {
+            while let Some((sub, depth, sub_ins_color, sub_l0, (d_base, d_half))) = stack.pop() {
                 match sub {
                     EntityType::Insert(nins) => {
                         if depth >= 32 {
@@ -853,8 +936,22 @@ impl Scene {
                                 &nins.common.layer,
                             )
                         };
+                        // Nested insert: its slot = parent slot + its rank in
+                        // the parent block, subdivided by its own block size.
+                        let nd_base = d_base
+                            + depth_map
+                                .get(&nins.common.handle.value())
+                                .map_or(0.0, |d| d[0])
+                                * d_half;
+                        let nd_half = d_half / (block_count(&nins.block_name) as f32 + 1.0);
                         for e in nins.explode_from_document(&self.document) {
-                            stack.push((normalize(e), depth + 1, child_ins_color, child_l0));
+                            stack.push((
+                                normalize(e),
+                                depth + 1,
+                                child_ins_color,
+                                child_l0,
+                                (nd_base, nd_half),
+                            ));
                         }
                     }
                     EntityType::Hatch(dxf) => {
@@ -879,6 +976,12 @@ impl Scene {
                         if let Some(mut model) =
                             Self::hatch_model_from_dxf(&dxf, color)
                         {
+                            // In-block rank → within the insert's depth slot.
+                            model.draw_depth = d_base
+                                + depth_map
+                                    .get(&dxf.common.handle.value())
+                                    .map_or(0.0, |d| d[0])
+                                    * d_half;
                             if let Some(poly) = &clip_poly {
                                 let clipped = pick::xclip::clip_hatch_boundary(
                                     &model.boundary,
@@ -896,45 +999,11 @@ impl Scene {
                             models.push(model);
                         }
                     }
-                    // Wide LwPolyline / Polyline2D inside a block: materialize its
-                    // width bands at world position, same as a block-internal
-                    // hatch. Without this a wide polyline in a block drew at zero
-                    // width (its centreline came from the wire path, the band
-                    // fill only from the model-space loop that skips blocks). (#222)
-                    EntityType::LwPolyline(pl) => {
-                        if pl.common.invisible || layer_hidden(&pl.common.layer) {
-                            continue;
-                        }
-                        let (origin, fills) =
-                            crate::entities::lwpolyline::wide_fills(&pl);
-                        self.push_block_wide_fills(
-                            &mut models,
-                            &EntityType::LwPolyline(pl),
-                            origin,
-                            fills,
-                            sub_ins_color,
-                            sub_l0,
-                            &clip_poly,
-                            selected,
-                        );
-                    }
-                    EntityType::Polyline2D(pl) => {
-                        if pl.common.invisible || layer_hidden(&pl.common.layer) {
-                            continue;
-                        }
-                        let (origin, fills) =
-                            crate::entities::polyline::wide_fills(&pl);
-                        self.push_block_wide_fills(
-                            &mut models,
-                            &EntityType::Polyline2D(pl),
-                            origin,
-                            fills,
-                            sub_ins_color,
-                            sub_l0,
-                            &clip_poly,
-                            selected,
-                        );
-                    }
+                    // Wide LwPolyline / Polyline2D bands inside a block are drawn
+                    // by the shader wire path — block_cache carries each centre-
+                    // line's `world_width` and scales it by the insert transform
+                    // (`emit_wire`) — not as hatch fills here. Same depth-tested,
+                    // linetype-dashed band as at model level. (#222)
                     _ => {}
                 }
             }
@@ -942,67 +1011,12 @@ impl Scene {
         models
     }
 
-    /// Materialize a block-exploded wide polyline's width bands (from
-    /// `wide_fills`, already in world coords) as solid `HatchModel`s: resolve the
-    /// block-child colour inheritance (NO background adaptation — a width band is
-    /// the polyline's own colour, not a hatch) and apply any XCLIP. Shared by the
-    /// LwPolyline / Polyline2D arms of the block-explode fill walk. (#222)
-    #[allow(clippy::too_many_arguments)]
-    fn push_block_wide_fills(
-        &self,
-        models: &mut Vec<HatchModel>,
-        sub_entity: &EntityType,
-        origin: [f64; 2],
-        fills: Vec<Vec<[f32; 2]>>,
-        sub_ins_color: [f32; 4],
-        sub_l0: crate::scene::view::render::InheritStyle,
-        clip_poly: &Option<Vec<[f32; 2]>>,
-        selected: bool,
-    ) {
-        if fills.is_empty() {
-            return;
-        }
-        let mut color = crate::scene::view::render::render_style_for_block_sub(
-            &self.document,
-            sub_entity,
-            sub_ins_color,
-            0.0,
-            [0.0; 8],
-            0.0,
-            sub_l0,
-        )
-        .0;
-        if selected {
-            color = [0.15, 0.55, 1.00, color[3]];
-        }
-        for boundary in fills {
-            let ring = if let Some(poly) = clip_poly {
-                let clipped = pick::xclip::clip_hatch_boundary(&boundary, origin, poly);
-                if clipped.is_empty() {
-                    continue;
-                }
-                clipped
-            } else {
-                boundary
-            };
-            models.push(HatchModel {
-                boundary: Arc::new(ring),
-                boundary_wcs: None,
-                pattern: model::hatch_model::HatchPattern::Solid,
-                name: "SOLID".into(),
-                color,
-                angle_offset: 0.0,
-                scale: 1.0,
-                world_origin: origin,
-                vp_scissor: None,
-                draw_depth: 0.0,
-            });
-        }
-    }
-
     /// Wipeout fill models — rendered in a separate pass AFTER wires so that
     /// wipeouts correctly mask everything below them in the draw order.
-    pub(crate) fn wipeout_models(&self) -> Vec<HatchModel> {
+    pub(crate) fn wipeout_models(
+        &self,
+        frozen: Option<&rustc_hash::FxHashSet<Handle>>,
+    ) -> Vec<HatchModel> {
         let is_paper = self.current_layout != "Model";
         let bg_color: [f32; 4] = if is_paper {
             self.paper_bg_color
@@ -1032,6 +1046,11 @@ impl Scene {
             {
                 continue;
             }
+            // Per-viewport freeze: a wipeout on a layer frozen in this content
+            // viewport is hidden along with the rest of that layer.
+            if self.layer_frozen_in(&entity.common().layer, frozen) {
+                continue;
+            }
             // Per-entity world_offset selection so paper-layout content
             // viewports still see model-block wipeouts at the right local
             // coordinates (same rationale as hatches).
@@ -1050,7 +1069,6 @@ impl Scene {
                     angle_offset: 0.0,
                     scale: 1.0,
                     world_origin: fill_origin,
-                    vp_scissor: None,
                     draw_depth: 0.0,
                 });
             }
@@ -1163,6 +1181,7 @@ impl Scene {
             }
             let path_start = boundary.len();
 
+            let mut edge_polys: Vec<Vec<[f64; 2]>> = Vec::new();
             for edge in &path.edges {
                 match edge {
                     BoundaryEdge::Polyline(poly) => {
@@ -1213,8 +1232,10 @@ impl Scene {
                         }
                     }
                     BoundaryEdge::Line(line) => {
-                        boundary.push(to_xy(line.start.x, line.start.y));
-                        boundary.push(to_xy(line.end.x, line.end.y));
+                        edge_polys.push(vec![
+                            to_xy(line.start.x, line.start.y),
+                            to_xy(line.end.x, line.end.y),
+                        ]);
                     }
                     BoundaryEdge::CircularArc(arc) => {
                         let (sa, span) = convert::tess_util::arc_signed_span(
@@ -1227,13 +1248,15 @@ impl Scene {
                             span.abs(),
                             convert::tess_util::fill_chord_tol(arc.radius),
                         );
+                        let mut pts = Vec::with_capacity(segs as usize + 1);
                         for i in 0..=segs {
                             let t = sa + span * (i as f64 / segs as f64);
-                            boundary.push(to_xy(
+                            pts.push(to_xy(
                                 arc.center.x + arc.radius * t.cos(),
                                 arc.center.y + arc.radius * t.sin(),
                             ));
                         }
+                        edge_polys.push(pts);
                     }
                     BoundaryEdge::EllipticArc(ell) => {
                         let r_maj = (ell.major_axis_endpoint.x * ell.major_axis_endpoint.x
@@ -1255,15 +1278,17 @@ impl Scene {
                             convert::tess_util::fill_chord_tol(r_maj),
                         );
                         let (cr, sr) = (rot.cos(), rot.sin());
+                        let mut pts = Vec::with_capacity(segs as usize + 1);
                         for i in 0..=segs {
                             let t = sa + span * (i as f64 / segs as f64);
                             let lx = r_maj * t.cos();
                             let ly = r_min * t.sin();
-                            boundary.push(to_xy(
+                            pts.push(to_xy(
                                 ell.center.x + lx * cr - ly * sr,
                                 ell.center.y + lx * sr + ly * cr,
                             ));
                         }
+                        edge_polys.push(pts);
                     }
                     BoundaryEdge::Spline(spline) => {
                         // DXF spline control_points pack (x, y, weight) into
@@ -1308,6 +1333,7 @@ impl Scene {
                         .sqrt();
                         let tol = convert::tess_util::fill_chord_tol(diag.max(1.0));
 
+                        let mut epts: Vec<[f64; 2]> = Vec::new();
                         let mut sampled = false;
                         if knot_ok {
                             if spline.rational {
@@ -1325,7 +1351,7 @@ impl Scene {
                                 let (t0, t1) = curve.range_tuple();
                                 let (_, pts) = curve.parameter_division((t0, t1), tol);
                                 for p in pts {
-                                    boundary.push(to_xy(p.x, p.y));
+                                    epts.push(to_xy(p.x, p.y));
                                 }
                                 sampled = true;
                             } else {
@@ -1338,7 +1364,7 @@ impl Scene {
                                 let (t0, t1) = bspl.range_tuple();
                                 let (_, pts) = bspl.parameter_division((t0, t1), tol);
                                 for p in pts {
-                                    boundary.push(to_xy(p.x, p.y));
+                                    epts.push(to_xy(p.x, p.y));
                                 }
                                 sampled = true;
                             }
@@ -1355,17 +1381,19 @@ impl Scene {
                             };
                             if !pts.is_empty() {
                                 for p in pts {
-                                    boundary.push(to_xy(p.x, p.y));
+                                    epts.push(to_xy(p.x, p.y));
                                 }
                             } else {
                                 for cp in &spline.control_points {
-                                    boundary.push(to_xy(cp.x, cp.y));
+                                    epts.push(to_xy(cp.x, cp.y));
                                 }
                             }
                         }
+                        edge_polys.push(epts);
                     }
                 }
             }
+            boundary.extend(chain_path_edges(edge_polys));
 
             if boundary.len() == path_start {
                 boundary.truncate(before_path);
@@ -1418,16 +1446,26 @@ impl Scene {
             && !dxf.gradient_color.is_enabled()
             && !dxf.pattern.lines.is_empty();
 
+        // The gradient's first stop is the fill's start colour (not the
+        // entity colour); capture it so the HatchModel draws stop-0 → stop-1.
+        let mut gradient_color1: Option<[f32; 4]> = None;
         let mut pattern = if dxf.gradient_color.is_enabled() {
-            let color2 = dxf
-                .gradient_color
-                .colors
-                .get(1)
-                .and_then(|e| e.color.rgb())
-                .map(|(r, g, b)| [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0])
-                .unwrap_or(color);
+            let stop = |i: usize| {
+                dxf.gradient_color.colors.get(i).and_then(|e| e.color.rgb()).map(
+                    |(r, g, b)| [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0],
+                )
+            };
+            gradient_color1 = stop(0);
+            let color2 = stop(1).unwrap_or(color);
             let angle_deg = dxf.pattern_angle.to_degrees() as f32;
-            model::hatch_model::HatchPattern::Gradient { angle_deg, color2 }
+            let (kind, invert) =
+                model::hatch_model::GradientKind::from_name(&dxf.gradient_color.name);
+            model::hatch_model::HatchPattern::Gradient {
+                angle_deg,
+                color2,
+                kind,
+                invert,
+            }
         } else if dxf.is_solid {
             model::hatch_model::HatchPattern::Solid
         } else if prebaked {
@@ -1568,11 +1606,12 @@ impl Scene {
             boundary_wcs: None,
             pattern,
             name,
-            color,
+            // A gradient starts from its first stop; other fills use the
+            // entity colour.
+            color: gradient_color1.unwrap_or(color),
             angle_offset: if prebaked { 0.0 } else { dxf.pattern_angle as f32 },
             scale: if prebaked { 1.0 } else { dxf.pattern_scale as f32 },
             world_origin,
-            vp_scissor: None,
             draw_depth: 0.0,
         })
     }
@@ -1598,6 +1637,27 @@ impl Scene {
             }
         }
         self.bump_geometry();
+    }
+
+    /// Rebuild the cached fill model (hatch / DXF SOLID) for `handle` after
+    /// its document entity was edited in place. The fill models are prebuilt
+    /// at load, so a pattern-scale / background / boundary edit stays
+    /// invisible until the cached model is refreshed (#415).
+    pub fn refresh_fill_model(&mut self, handle: Handle) {
+        let new_model = match self.document.get_entity(handle) {
+            Some(EntityType::Hatch(dxf)) => {
+                let color = convert::tess_util::aci_to_rgba(&dxf.common.color);
+                Self::hatch_model_from_dxf(dxf, color)
+            }
+            Some(EntityType::Solid(s)) => {
+                let color = convert::tess_util::aci_to_rgba(&s.common.color);
+                Some(Self::solid_hatch_model(s, color))
+            }
+            _ => None,
+        };
+        if let Some(model) = new_model {
+            self.hatches.insert(handle, model);
+        }
     }
 
     pub fn populate_hatches_from_document(&mut self) {
@@ -1705,13 +1765,14 @@ impl Scene {
 
         use crate::par::prelude::*;
         let facet_res = self.document.header.facet_resolution;
+        let isolines = self.document.header.isolines.max(0) as usize;
         // Top-level solids: offset into the render frame, drawn flat.
         // Block-definition solids: keep block-local coords for per-INSERT
         // instancing (no offset applied here).
         let built: Vec<(Handle, MeshLodSet, bool)> = entries
             .into_par_iter()
             .filter_map(|(handle, entity, color, top_level)| {
-                crate::entities::solid3d::tessellate_volume(&entity, color, facet_res).map(|m| {
+                crate::entities::solid3d::tessellate_volume(&entity, color, facet_res, isolines).map(|m| {
                     let m = if top_level { offset_mesh_lod_set(m) } else { m };
                     (handle, m, top_level)
                 })
@@ -1745,11 +1806,20 @@ impl Scene {
         // `hatch_model_from_dxf` uses. Casting the absolute WCS corner straight
         // to f32 costs ~0.06 units of resolution at UTM magnitudes (~1e6), so
         // the quad snapped to a grid and the fill drifted off its outline.
+        // SOLID corners are stored in OCS (like ARC/LWPOLYLINE) — map through
+        // the arbitrary axis so a mirrored solid (normal 0,0,-1) fills on the
+        // correct side of the drawing.
+        let n = (solid.normal.x, solid.normal.y, solid.normal.z);
+        let w = |v: &acadrust::types::Vector3| -> [f64; 2] {
+            let (x, y, _) =
+                crate::scene::view::transform::ocs_point_to_wcs((v.x, v.y, v.z), n);
+            [x, y]
+        };
         let corners: [[f64; 2]; 4] = [
-            [solid.first_corner.x, solid.first_corner.y],
-            [solid.second_corner.x, solid.second_corner.y],
-            [solid.fourth_corner.x, solid.fourth_corner.y],
-            [solid.third_corner.x, solid.third_corner.y],
+            w(&solid.first_corner),
+            w(&solid.second_corner),
+            w(&solid.fourth_corner),
+            w(&solid.third_corner),
         ];
         let mut min = [f64::INFINITY; 2];
         let mut max = [f64::NEG_INFINITY; 2];
@@ -1786,7 +1856,6 @@ impl Scene {
             angle_offset: 0.0,
             scale: 1.0,
             world_origin,
-            vp_scissor: None,
             draw_depth: 0.0,
         }
     }
@@ -1864,6 +1933,50 @@ impl Scene {
         } else {
             1.0
         };
+        // A gradient fill must be encoded on the DXF entity itself: the render
+        // model is rebuilt from the entity below (`add_entity` →
+        // `hatch_model_from_dxf`), so a gradient kept only on the command's
+        // model silently degraded to a plain pattern hatch.
+        if let crate::scene::model::hatch_model::HatchPattern::Gradient {
+            angle_deg,
+            color2,
+            kind,
+            invert,
+        } = &model.pattern
+        {
+            let to_color = |c: [f32; 4]| acadrust::types::Color::Rgb {
+                r: (c[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+                g: (c[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+                b: (c[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+            };
+            dxf.is_solid = true;
+            dxf.gradient_color.enabled = true;
+            dxf.gradient_color.name = kind.dxf_name(*invert).to_string();
+            // The render model reads the gradient angle from pattern_angle
+            // (radians); the gradient record keeps its own copy for the file.
+            dxf.pattern_angle = (*angle_deg as f64).to_radians();
+            dxf.gradient_color.angle = (*angle_deg as f64).to_radians();
+            dxf.gradient_color.is_single_color = false;
+            // Linear has no INV name in the standard set: persist an inverted
+            // linear by swapping the colour stops instead.
+            let (c0, c1) =
+                if *invert && matches!(kind, crate::scene::model::hatch_model::GradientKind::Linear)
+                {
+                    (*color2, model.color)
+                } else {
+                    (model.color, *color2)
+                };
+            dxf.gradient_color.colors = vec![
+                acadrust::entities::hatch::GradientColorEntry {
+                    value: 0.0,
+                    color: to_color(c0),
+                },
+                acadrust::entities::hatch::GradientColorEntry {
+                    value: 1.0,
+                    color: to_color(c1),
+                },
+            ];
+        }
 
         // `add_entity` already builds the render model from the DXF entity via
         // `hatch_model_from_dxf` and inserts it with a correct `world_origin`

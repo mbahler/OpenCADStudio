@@ -493,6 +493,7 @@ impl TruckConvertible for Tolerance {
         }
 
         Some(TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Text(groups),
             snap_pts: vec![(snap_pt, SnapHint::Insertion)],
             tangent_geoms: vec![],

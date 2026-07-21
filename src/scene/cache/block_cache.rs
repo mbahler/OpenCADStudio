@@ -48,6 +48,11 @@ pub struct LocalWire {
     pub tangent_geoms: Vec<TangentGeom>,
     pub fill_tris: Vec<[f32; 3]>,
     pub fill_tris_low: Vec<[f32; 3]>,
+    /// Thickness-wall pick geometry, transformed by the insert like `points`
+    /// so a block child's extruded wall stays selectable at the instance's
+    /// place and scale. Never reaches the GPU.
+    pub pick_tris: Vec<[f32; 3]>,
+    pub pick_tris_low: Vec<[f32; 3]>,
     /// Per-wire colour from the tessellator output. For most entities this
     /// equals the sub-entity's resolved colour. For colour-split MTEXT
     /// (`\C`/`\c` inline overrides) each wire carries its own override colour.
@@ -56,6 +61,10 @@ pub struct LocalWire {
     pub pattern_length: f32,
     pub pattern: [f32; 8],
     pub line_weight_px: f32,
+    /// World-space band width for a wide polyline (see `WireModel.world_width`).
+    /// Block-local; the expand-time transform scales it by the insert so the
+    /// shader band grows with a scaled insert. `0.0` = a normal wire.
+    pub world_width: f32,
     pub plinegen: bool,
     /// Set at construction; used to discriminate fill-only GPU batches from
     /// stroke batches in [`StyleKey`]. Derived from
@@ -76,6 +85,11 @@ pub struct LocalWire {
     /// expand-time: transform corners by the Insert transform → world AABB
     /// → test against the camera's world-space view rect.
     pub aabb_local: [f32; 4],
+    /// This child's signed draw-order rank in (-1,1) within its owning block
+    /// (from the scene draw-depth map, so SortEntitiesTable overrides apply).
+    /// Composed at expand time into a `depth_override` for wide-polyline
+    /// bands so a band orders against its block siblings.
+    pub local_rank: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -110,6 +124,9 @@ pub struct NestedRef {
     /// expansion it is mapped to world by the accumulated transform and the
     /// nested wires are clipped to it.
     pub clip_poly: Option<Vec<[f64; 2]>>,
+    /// The nested INSERT's own signed draw-order rank in (-1,1) within the
+    /// parent block — narrows the depth sub-range its children may occupy.
+    pub local_rank: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +143,11 @@ pub struct BlockDefn {
     /// the wire renderer is 2D-dominant. Expressed in this defn's *offset*
     /// Absolute world-space XY (the double-single render path keeps it precise).
     pub aabb_local: [f32; 4],
+    /// Raw entity count of the source block record (`entity_handles.len()`).
+    /// Divisor for nested depth composition: a nested insert's children get a
+    /// sub-range of `parent_scale / (child_count + 1)` — the same formula the
+    /// exploded-fill path uses, so bands and fills stay on one depth scale.
+    pub child_count: usize,
 }
 
 #[derive(Default, Debug)]
@@ -147,7 +169,15 @@ impl BlockCache {
     /// included too. The Model_Space / Paper_Space block_records are skipped
     /// because their entities are emitted as top-level wires, not via the
     /// cache.
-    pub fn build(doc: &CadDocument, anno_scale: f32, bg_color: [f32; 4]) -> Self {
+    pub fn build(
+        doc: &CadDocument,
+        anno_scale: f32,
+        bg_color: [f32; 4],
+        // Scene draw-depth map ([depth, half] per handle) — source of each
+        // block child's in-block rank, so band depth composition agrees with
+        // the SortEntitiesTable-aware ranking the fill explosion uses.
+        depth_map: &HashMap<u64, [f32; 2]>,
+    ) -> Self {
         use crate::par::prelude::*;
         let mut cache = Self::new();
         let referenced = collect_referenced_blocks(doc);
@@ -159,7 +189,12 @@ impl BlockCache {
         // post-pass (it resolves nested references and is comparatively cheap).
         cache.defns = referenced
             .par_iter()
-            .map(|name| (name.clone(), Arc::new(build_defn(doc, name, anno_scale, bg_color))))
+            .map(|name| {
+                (
+                    name.clone(),
+                    Arc::new(build_defn(doc, name, anno_scale, bg_color, depth_map)),
+                )
+            })
             .collect();
         cache.compute_block_aabbs(&referenced);
         cache
@@ -276,6 +311,7 @@ fn build_defn(
     block_name: &str,
     anno_scale: f32,
     bg_color: [f32; 4],
+    depth_map: &HashMap<u64, [f32; 2]>,
 ) -> BlockDefn {
     let br = match doc.block_records.get(block_name) {
         Some(br) => br,
@@ -307,14 +343,26 @@ fn build_defn(
             continue;
         }
         match entity {
-            EntityType::Block(_)
-            | EntityType::BlockEnd(_)
-            | EntityType::AttributeDefinition(_) => continue,
+            EntityType::Block(_) | EntityType::BlockEnd(_) => continue,
+            // A non-constant ATTDEF is only a template — the insert supplies an
+            // ATTRIB with the real value (tessellated separately). A CONSTANT
+            // attribute has no ATTRIB; its value lives in the block itself, so
+            // it must render as part of the block content (unless flagged
+            // invisible).
+            EntityType::AttributeDefinition(ad) if !ad.flags.constant || ad.flags.invisible => {
+                continue
+            }
             EntityType::Insert(nested_ins) => {
-                subs.push(LocalSub::Nested(build_nested_ref(nested_ins, doc, bg_color)));
+                subs.push(LocalSub::Nested(build_nested_ref(
+                    nested_ins, doc, bg_color, depth_map,
+                )));
             }
             _ => {
-                for lw in tessellate_sub_local(doc, entity, anno_scale, bg_color) {
+                // A wide polyline inside a block carries its `world_width` on
+                // the LocalWire; `emit_wire` scales it by the insert transform
+                // so the shader band matches the scaled geometry (same band the
+                // top-level path draws — depth-tested + linetype-dashed).
+                for lw in tessellate_sub_local(doc, entity, anno_scale, bg_color, depth_map) {
                     subs.push(LocalSub::Wire(lw));
                 }
             }
@@ -323,6 +371,7 @@ fn build_defn(
     BlockDefn {
         subs,
         aabb_local: [0.0; 4],
+        child_count: br.entity_handles.len(),
     }
 }
 
@@ -330,6 +379,7 @@ fn build_nested_ref(
     nested_ins: &acadrust::entities::Insert,
     doc: &CadDocument,
     bg_color: [f32; 4],
+    depth_map: &HashMap<u64, [f32; 2]>,
 ) -> NestedRef {
     // Store the RAW colour — `adapt_to_bg` runs at emit time
     // (`Batches::finalize`) so the same cached defn can serve renders
@@ -370,6 +420,9 @@ fn build_nested_ref(
         l0,
         instance_offsets: array_offsets(nested_ins),
         clip_poly,
+        local_rank: depth_map
+            .get(&nested_ins.common.handle.value())
+            .map_or(0.0, |d| d[0]),
     }
 }
 
@@ -378,6 +431,7 @@ fn tessellate_sub_local(
     sub: &EntityType,
     anno_scale: f32,
     bg_color: [f32; 4],
+    depth_map: &HashMap<u64, [f32; 2]>,
 ) -> Vec<LocalWire> {
     let h = sub.common().handle;
 
@@ -439,11 +493,16 @@ fn tessellate_sub_local(
         // SDF text wires have no points/fills — fold in the glyph-quad positions
         // so the view-frustum cull uses the text's real box, not a degenerate
         // point at the block origin (which would drop the text entirely).
+        // `pick_tris` is in here for the same reason `fill_tris` is: hit-testing
+        // rejects on this box before it looks at the triangles, so a box drawn
+        // only around `points` would make a block child's thickness wall or wide
+        // polyline band unpickable — `points` merely bounds those.
         let aabb_local = aabb_from_points_iter(
             wire.points
                 .iter()
                 .copied()
                 .chain(wire.fill_tris.iter().copied())
+                .chain(wire.pick_tris.iter().copied())
                 .chain(wire.text_verts.iter().map(|v| v.pos)),
         );
         let is_fill_only = wire.points.is_empty() && !wire.fill_tris.is_empty();
@@ -464,11 +523,14 @@ fn tessellate_sub_local(
             tangent_geoms: wire.tangent_geoms,
             fill_tris: wire.fill_tris,
             fill_tris_low: wire.fill_tris_low,
+            pick_tris: wire.pick_tris,
+            pick_tris_low: wire.pick_tris_low,
             color: wire.color,
             aci,
             pattern_length: pat_len,
             pattern: pat,
             line_weight_px: lw_px,
+            world_width: wire.world_width,
             plinegen: wire.plinegen,
             is_fill_only,
             color_is_byblock: color_is_byblock && wire_on_base_color,
@@ -478,6 +540,7 @@ fn tessellate_sub_local(
             lt_l0,
             lw_l0,
             aabb_local,
+            local_rank: depth_map.get(&h.value()).map_or(0.0, |d| d[0]),
         });
     }
     result
@@ -666,7 +729,7 @@ pub fn expand_insert(
             is_xref,
             bg_color,
         };
-        expand_defn(defn, &base_xform, &ctx, &mut batches, &mut visited, 0);
+        expand_defn(defn, &base_xform, &ctx, &mut batches, &mut visited, 0, (0.0, 1.0));
     }
     Some(batches.finalize(&name, selected, bg_color))
 }
@@ -720,6 +783,10 @@ struct StyleKey {
     pattern_length: u32,
     pattern: [u32; 8],
     line_weight_px: u32,
+    /// Wide-polyline band width (bit-cast). Keeps bands of different widths — and
+    /// bands vs thin wires of the same colour/style — in separate batches so the
+    /// finalized WireModel carries one correct `world_width`.
+    world_width: u32,
     aci: u8,
     plinegen: bool,
     /// Marks batches that emit only `fill_tris` with no wire `points`. The
@@ -727,6 +794,10 @@ struct StyleKey {
     /// discriminator, so greek fills must stay in their own batches even
     /// when their color/style would otherwise collide with regular wires.
     is_fill_only: bool,
+    /// Bit-cast composed block-local depth for band wires (`0` = no override).
+    /// Keeps bands of different in-block draw ranks in separate batches so
+    /// each finalized WireModel carries one correct `depth_override`.
+    depth_bits: u32,
 }
 
 #[derive(Default, Debug)]
@@ -735,8 +806,12 @@ struct BatchEntry {
     pattern_length: f32,
     pattern: [f32; 8],
     line_weight_px: f32,
+    world_width: f32,
     aci: u8,
     plinegen: bool,
+    /// Composed block-local draw-order offset for a band batch (see
+    /// `WireModel::depth_override`). `None` for every other batch.
+    local_depth: Option<f32>,
     points: Vec<[f32; 3]>,
     points_low: Vec<[f32; 3]>,
     snap_pts: Vec<(glam::DVec3, SnapHint)>,
@@ -748,6 +823,10 @@ struct BatchEntry {
     /// reconstructs `high + low`). Without it absolute f32 fills quantize to
     /// ~0.5 m and the greek-text rectangles shear.
     fill_tris_low: Vec<[f32; 3]>,
+    /// Accumulated thickness-wall pick geometry, paired high/low like
+    /// `fill_tris`. Pick-only — no GPU batch reads this.
+    pick_tris: Vec<[f32; 3]>,
+    pick_tris_low: Vec<[f32; 3]>,
     /// Accumulated SDF glyph quads (world space) for block-instance text.
     text_verts: Vec<crate::scene::pipeline::text_gpu::TextVertex>,
     min_x: f32,
@@ -781,6 +860,7 @@ impl BatchEntry {
         pat_len: f32,
         pat: [f32; 8],
         lw_px: f32,
+        world_width: f32,
         aci: u8,
         plinegen: bool,
         _is_fill_only: bool,
@@ -795,6 +875,7 @@ impl BatchEntry {
             pattern_length: pat_len,
             pattern: pat,
             line_weight_px: lw_px,
+            world_width,
             aci,
             plinegen,
             min_x: f32::INFINITY,
@@ -826,6 +907,14 @@ impl Batches {
                 // the cached defn.
                 let color = crate::scene::view::render::adapt_to_bg(b.color, bg_color);
                 WireModel {
+                    taper_widths: Vec::new(),
+                    world_width: b.world_width,
+                    depth_override: b.local_depth,
+                    fill_is_3d: false,
+                    pick_tris: b.pick_tris,
+                    pick_tris_low: b.pick_tris_low,
+                    dash_from_start: false,
+                    dash_align_end: None,
                     text_verts: b.text_verts,
                     name: name.to_string(),
                     points: b.points,
@@ -841,7 +930,6 @@ impl Batches {
                     key_vertices: b.key_vertices,
                     aabb,
                     plinegen: b.plinegen,
-                    vp_scissor: None,
                     fill_tris: b.fill_tris,
                     fill_tris_low: b.fill_tris_low,
                 }
@@ -863,9 +951,11 @@ fn style_key(
     pat_len: f32,
     pat: [f32; 8],
     lw_px: f32,
+    world_width: f32,
     aci: u8,
     plinegen: bool,
     is_fill_only: bool,
+    local_depth: Option<f32>,
 ) -> StyleKey {
     StyleKey {
         color: [
@@ -886,9 +976,11 @@ fn style_key(
             pat[7].to_bits(),
         ],
         line_weight_px: lw_px.to_bits(),
+        world_width: world_width.to_bits(),
         aci,
         plinegen,
         is_fill_only,
+        depth_bits: local_depth.map_or(0, f32::to_bits),
     }
 }
 
@@ -899,6 +991,10 @@ fn expand_defn(
     out: &mut Batches,
     visited: &mut Vec<String>,
     depth: usize,
+    // Block-local depth sub-range `(base, scale)` accumulated through nested
+    // inserts: a child at rank r lands at `base + r * scale`, all within
+    // (-1,1) of the top-level insert. Seeded `(0.0, 1.0)` by `expand_insert`.
+    d_range: (f32, f32),
 ) {
     if depth > MAX_NESTING_DEPTH {
         eprintln!("block_cache: nested-block depth > {MAX_NESTING_DEPTH}, truncating");
@@ -931,7 +1027,7 @@ fn expand_defn(
                         continue;
                     }
                 }
-                emit_wire(lw, accum_xform, ctx, out);
+                emit_wire(lw, accum_xform, ctx, out, d_range);
             }
             LocalSub::Nested(nref) => {
                 if visited.iter().any(|n| n == &nref.block_name) {
@@ -1009,6 +1105,12 @@ fn expand_defn(
                     bg_color: ctx.bg_color,
                 };
                 visited.push(nref.block_name.clone());
+                // Children of this nested insert stack inside the slot its own
+                // rank owns — same composition the exploded-fill path applies.
+                let nested_range = (
+                    d_range.0 + nref.local_rank * d_range.1,
+                    d_range.1 / (nested_defn.child_count.max(1) as f32 + 1.0),
+                );
                 if let Some(cp) = &nref.clip_poly {
                     // XCLIP'd nested insert: expand into an isolated batch set,
                     // finalize to whole wires, clip them to the boundary mapped
@@ -1019,7 +1121,15 @@ fn expand_defn(
                     // instance would differ).
                     let composed = nref.xform.then(accum_xform);
                     let mut sub = Batches::default();
-                    expand_defn(nested_defn, &composed, &inner_ctx, &mut sub, visited, depth + 1);
+                    expand_defn(
+                        nested_defn,
+                        &composed,
+                        &inner_ctx,
+                        &mut sub,
+                        visited,
+                        depth + 1,
+                        nested_range,
+                    );
                     let mut wires = sub.finalize("", ctx.selected, ctx.bg_color);
                     let world_poly: Vec<[f64; 2]> = cp
                         .iter()
@@ -1047,6 +1157,7 @@ fn expand_defn(
                             out,
                             visited,
                             depth + 1,
+                            nested_range,
                         );
                     }
                 }
@@ -1083,8 +1194,13 @@ fn emit_wire(
     accum_xform: &Transform,
     ctx: &ExpandCtx,
     out: &mut Batches,
+    d_range: (f32, f32),
 ) {
-    if lw.points.is_empty() && lw.fill_tris.is_empty() && lw.text_verts.is_empty() {
+    if lw.points.is_empty()
+        && lw.fill_tris.is_empty()
+        && lw.text_verts.is_empty()
+        && lw.pick_tris.is_empty()
+    {
         return;
     }
 
@@ -1108,14 +1224,38 @@ fn emit_wire(
     let final_pat_len = final_pat_len * ctx.pslt_factor;
     let final_pat = final_pat.map(|v| v * ctx.pslt_factor);
 
+    // A wide polyline's band width is baked in block-local units; scale it by
+    // the insert transform so the shader band matches the scaled geometry.
+    // Average the X and Y axis image lengths — exact for a uniform insert, a
+    // sensible mean for a non-uniform one (the band carries one width).
+    let final_world_width = if lw.world_width > 0.0 {
+        let o = accum_xform.apply(Vector3::new(0.0, 0.0, 0.0));
+        let ax = accum_xform.apply(Vector3::new(1.0, 0.0, 0.0));
+        let ay = accum_xform.apply(Vector3::new(0.0, 1.0, 0.0));
+        let sx = ((ax.x - o.x).powi(2) + (ax.y - o.y).powi(2) + (ax.z - o.z).powi(2)).sqrt();
+        let sy = ((ay.x - o.x).powi(2) + (ay.y - o.y).powi(2) + (ay.z - o.z).powi(2)).sqrt();
+        lw.world_width * ((sx + sy) * 0.5) as f32
+    } else {
+        0.0
+    };
+
+    // Only band wires take a per-child composed depth: their solid area is
+    // what covers siblings, and their width already splits them into their own
+    // batches — thin wires keep the shared whole-insert depth so same-style
+    // batches stay merged.
+    let local_depth = (lw.world_width > 0.0)
+        .then(|| d_range.0 + lw.local_rank * d_range.1);
+
     let key = style_key(
         final_color,
         final_pat_len,
         final_pat,
         final_lw_px,
+        final_world_width,
         lw.aci,
         lw.plinegen,
         lw.is_fill_only,
+        local_depth,
     );
 
     // If the open batch for this style would exceed wgpu's per-buffer limit
@@ -1133,11 +1273,13 @@ fn emit_wire(
             final_pat_len,
             final_pat,
             final_lw_px,
+            final_world_width,
             lw.aci,
             lw.plinegen,
             lw.is_fill_only,
         )
     });
+    entry.local_depth = local_depth;
 
     // NaN separator between previously-appended geometry and this wire so the
     // GPU shader treats them as disconnected polylines within one buffer.
@@ -1243,6 +1385,27 @@ fn emit_wire(
         let (hz, lz) = WireModel::split_ds(v.z);
         entry.fill_tris.push([hx, hy, hz]);
         entry.fill_tris_low.push([lx, ly, lz]);
+    }
+    // Thickness walls: same reconstruct → transform → re-split as the fills
+    // above, so a block child's wall tracks the insert's placement and scale.
+    debug_assert!(
+        lw.pick_tris_low.is_empty() || lw.pick_tris.len() == lw.pick_tris_low.len(),
+        "pick_tris_low must be empty or the same length as pick_tris (got {} vs {})",
+        lw.pick_tris.len(),
+        lw.pick_tris_low.len(),
+    );
+    for (idx, p) in lw.pick_tris.iter().enumerate() {
+        let pl = lw.pick_tris_low.get(idx).copied().unwrap_or([0.0; 3]);
+        let v = accum_xform.apply(Vector3::new(
+            p[0] as f64 + pl[0] as f64,
+            p[1] as f64 + pl[1] as f64,
+            p[2] as f64 + pl[2] as f64,
+        ));
+        let (hx, lx) = WireModel::split_ds(v.x);
+        let (hy, ly) = WireModel::split_ds(v.y);
+        let (hz, lz) = WireModel::split_ds(v.z);
+        entry.pick_tris.push([hx, hy, hz]);
+        entry.pick_tris_low.push([lx, ly, lz]);
     }
     // SDF glyph quads: reconstruct each block-local f64 position, apply the
     // insert transform, re-split — same path as points/fills so block-instance

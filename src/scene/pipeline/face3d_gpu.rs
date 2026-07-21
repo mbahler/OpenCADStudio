@@ -73,18 +73,28 @@ impl Face3DVertex {
 
 // ── GPU handle ─────────────────────────────────────────────────────────────
 
+/// One vertex buffer + draw count. Fill data is split into as many chunks
+/// as the device's `max_buffer_size` requires: a mesh-heavy DWG (e.g. a
+/// Navisworks import) can hold tens of millions of fill triangles, and at
+/// 44 B/vertex a single batched buffer blows past the default 256 MB limit
+/// once enough layers are thawed — wgpu then raises an uncaptured
+/// validation error and aborts the process (#358). Same scheme as the
+/// solid-mesh batch chunking in `mesh_gpu.rs` (#203).
+pub struct Face3DChunk {
+    pub vertex_buffer: wgpu::Buffer,
+    pub vertex_count: u32,
+}
+
 pub struct Face3DGpu {
     /// 3DFACE quads + PolyfaceMesh / PolygonMesh face triangles.
     /// HiddenLine routes this through the depth-only pipeline so the
     /// fragments occlude wires behind them without drawing visible
     /// pixels.
-    pub vertex_buffer_3d: wgpu::Buffer,
-    pub vertex_count_3d: u32,
+    pub chunks_3d: Vec<Face3DChunk>,
     /// Text-LOD greek dim, MultiLeader background, etc. — fills whose
     /// source wire has an empty `points` list. Always rendered with the
     /// normal face3d pipeline (visible in every mode).
-    pub vertex_buffer_2d: wgpu::Buffer,
-    pub vertex_count_2d: u32,
+    pub chunks_2d: Vec<Face3DChunk>,
 }
 
 impl Face3DGpu {
@@ -104,15 +114,10 @@ impl Face3DGpu {
         face3d_wires: &[WireModel],
         all_wires: &[WireModel],
         keep_3d_mesh_fills: bool,
-        depth_map: &rustc_hash::FxHashMap<u64, f32>,
+        depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
     ) -> Self {
-        let depth_of = |w: &WireModel| -> f32 {
-            w.name
-                .parse::<u64>()
-                .ok()
-                .and_then(|h| depth_map.get(&h).copied())
-                .unwrap_or(0.0)
-        };
+        let depth_of =
+            |w: &WireModel| -> f32 { super::wire_gpu::wire_draw_depth(w, depth_map) };
         let mut verts_3d: Vec<Face3DVertex> = Vec::with_capacity(face3d_wires.len() * 6);
         let mut verts_2d: Vec<Face3DVertex> = Vec::new();
 
@@ -176,12 +181,13 @@ impl Face3DGpu {
             // (text greek, MultiLeader / dimension backgrounds) deliberately
             // leave `fill_tris_low` empty and order by draw rank instead.
             //
-            // NOTE: classifying by `!points.is_empty()` is wrong here — the
-            // tessellator emits a mesh's edges and its fill as *separate*
-            // WireModels (points-only vs fill-only), so the fill model has no
-            // points and was being misrouted to the 2-D (draw-order-biased)
-            // buffer, which drew meshes in front of solids.
-            let is_3d_mesh_face = !wire.fill_tris_low.is_empty();
+            // NOTE: classifying by `!points.is_empty()` is wrong (a mesh emits
+            // its edges and its fill as *separate* WireModels), and so is
+            // `!fill_tris_low.is_empty()` — a 2-D overlay fill (SOLID arrowhead,
+            // dimension text background) at UTM scale carries a low residual
+            // too, and would be misrouted to the 3-D buffer where it only shows
+            // in shaded modes. The tessellator flags real surfaces explicitly.
+            let is_3d_mesh_face = wire.fill_is_3d;
             let [r, g, b, a] = wire.color;
             if is_3d_mesh_face {
                 if !keep_3d_mesh_fills {
@@ -200,7 +206,18 @@ impl Face3DGpu {
                 }
             } else {
                 let fill_color = [r, g, b, a];
-                let depth = depth_of(wire);
+                // A fill whose triangles span depth is a genuine 3-D surface (an
+                // extruded polyline tube), not a flat coplanar overlay (2-D SOLID,
+                // greek text, dimension background). Keep its real depth so the
+                // fill occludes correctly and its own edge wires — coincident with
+                // the surface — win the depth test and stay visible. A flat overlay
+                // keeps the draw-order bias that layers it in screen order.
+                let (mut zmin, mut zmax) = (f32::INFINITY, f32::NEG_INFINITY);
+                for p in &wire.fill_tris {
+                    zmin = zmin.min(p[2]);
+                    zmax = zmax.max(p[2]);
+                }
+                let depth = if zmax - zmin > 1e-4 { 0.0 } else { depth_of(wire) };
                 for (i, &position) in wire.fill_tris.iter().enumerate() {
                     verts_2d.push(Face3DVertex {
                         position,
@@ -212,22 +229,35 @@ impl Face3DGpu {
             }
         }
 
-        let vertex_buffer_3d = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("face3d.vbuf.3d"),
-            contents: bytemuck::cast_slice(&verts_3d),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let vertex_buffer_2d = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("face3d.vbuf.2d"),
-            contents: bytemuck::cast_slice(&verts_2d),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
         Self {
-            vertex_buffer_3d,
-            vertex_count_3d: verts_3d.len() as u32,
-            vertex_buffer_2d,
-            vertex_count_2d: verts_2d.len() as u32,
+            chunks_3d: upload_chunks(device, &verts_3d, "face3d.vbuf.3d"),
+            chunks_2d: upload_chunks(device, &verts_2d, "face3d.vbuf.2d"),
         }
     }
+}
+
+/// Upload `verts` as one or more VERTEX buffers, each under 90% of the
+/// device's `max_buffer_size`, split on whole-triangle boundaries. Also
+/// keeps every chunk's vertex count well below `u32::MAX` so the draw
+/// range never truncates.
+fn upload_chunks(
+    device: &wgpu::Device,
+    verts: &[Face3DVertex],
+    label: &'static str,
+) -> Vec<Face3DChunk> {
+    let budget = (device.limits().max_buffer_size as usize / 10) * 9; // 10% headroom
+    let vsize = std::mem::size_of::<Face3DVertex>();
+    // Round down to a multiple of 3 so triangles never straddle chunks.
+    let max_verts = ((budget / vsize).max(3) / 3) * 3;
+    verts
+        .chunks(max_verts)
+        .map(|c| Face3DChunk {
+            vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytemuck::cast_slice(c),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            vertex_count: c.len() as u32,
+        })
+        .collect()
 }

@@ -214,6 +214,7 @@ struct AddSelectedRestore {
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum StartSection {
     Recent,
+    Videos,
     #[default]
     Welcome,
     Supporters,
@@ -241,6 +242,18 @@ pub(super) struct OpenCADStudio {
     /// Paying Patreon supporters shown on the Start page (name, pledge cents),
     /// fetched once at boot, highest pledge first.
     patrons: Vec<(String, i64)>,
+    /// Tutorial-playlist videos for the Start page: seeded from the on-disk
+    /// cache at boot, refreshed by a live playlist fetch.
+    videos: Vec<crate::videos::VideoEntry>,
+    /// Decoded thumbnail handles keyed by video id — built once per video when
+    /// the list arrives, so the view never re-decodes JPEG bytes per frame.
+    video_thumbs: std::collections::HashMap<String, iced::widget::image::Handle>,
+    /// True while the boot-time playlist fetch is still in flight.
+    videos_loading: bool,
+    /// Block references whose properties panel shows per-axis Scale X/Y/Z even
+    /// though the three factors are currently equal — the user unchecked the
+    /// "Uniform scale" box for them (#427). Keyed by entity handle.
+    props_asym_scale: std::collections::HashSet<u64>,
     /// Which Start-page section is shown when the page is too narrow for all
     /// three side by side and falls back to a tab bar.
     start_section: StartSection,
@@ -448,6 +461,12 @@ pub(super) struct OpenCADStudio {
     modal_drag_last: Option<Point>,
     /// True while the modal title bar is held (a drag is in progress).
     modal_dragging: bool,
+    /// How far the user has dragged the modal's corner resize grip from the
+    /// dialog's natural size (added to each modal's default width/height). Reset
+    /// with `modal_offset` so every dialog opens at its own size.
+    modal_resize: iced::Vector,
+    /// True while the modal's corner resize grip is held.
+    modal_resizing: bool,
     // ── Attribute editor dialog (ATTEDIT / double-click a block) ───────────
     /// INSERT whose attributes the editor modal is editing (`None` = closed).
     attr_editor_handle: Option<acadrust::Handle>,
@@ -812,6 +831,8 @@ pub enum ColorPickTarget {
     Table(u8, &'static str),
     /// Selected entities' colour (left properties panel).
     Properties,
+    /// Selected entities' background colour (hatch / MTEXT background row).
+    PropertiesBg,
     /// Current creation colour (ribbon).
     Ribbon,
     /// A layer's colour, by panel row index.
@@ -1343,6 +1364,10 @@ pub enum Message {
     CommandHistoryNext,
     /// Toggle the dropdown listing the full command-line history.
     CommandHistoryToggle,
+    /// Toggle the persistent literal-space mode (the `>` button): while on,
+    /// every command line behaves as if it started with `>` — Space stays in
+    /// the input instead of submitting. Saved in the user config.
+    CommandLiteralToggle,
     /// Copy the full command-line history (every line) to the system
     /// clipboard as plain text — issue #232, so output can be pasted for
     /// debugging instead of screenshotted.
@@ -1772,6 +1797,12 @@ pub enum Message {
     PluginRegistryFetched(Result<Vec<crate::plugin::external::RegistryEntry>, String>),
     /// Patreon supporters fetched at boot for the Start page (name, pledge cents).
     PatronsFetched(Result<Vec<(String, i64)>, String>),
+    /// Tutorial-playlist videos fetched at boot for the Start page.
+    VideosFetched(Result<Vec<crate::videos::VideoEntry>, String>),
+    /// Recent-file DWG preview thumbnails decoded on a background thread.
+    RecentThumbsLoaded(
+        Vec<(std::path::PathBuf, Option<iced::widget::image::Handle>)>,
+    ),
     /// Installable release tags fetched for `owner/repo`.
     PluginReleasesFetched(String, Result<Vec<String>, String>),
     /// Choose a release tag for a repo (`repo`, `tag`).
@@ -1845,6 +1876,10 @@ pub enum Message {
     MTextCaretBlink,
     /// Commit the editor: create or update the MText entity.
     MTextOk,
+    /// Apply the buffer to the entity but leave the editor open (the button).
+    MTextApply,
+    /// Grab the resizable modal's corner grip (a drag resizes it).
+    ModalResizeGrab,
     /// Discard the editor without creating / changing the entity.
     MTextCancel,
     // ── In-place single-line TEXT editor ────────────────────────────────
@@ -2135,6 +2170,26 @@ pub enum Message {
 }
 
 impl OpenCADStudio {
+    /// Install the Start-page video list, decoding each thumbnail's JPEG into
+    /// an image Handle exactly once (a fresh Handle per view frame would
+    /// re-upload the texture every frame).
+    fn set_videos(&mut self, videos: Vec<crate::videos::VideoEntry>) {
+        if videos.is_empty() {
+            return;
+        }
+        self.video_thumbs = videos
+            .iter()
+            .filter_map(|v| {
+                let bytes = v.thumb.clone()?;
+                Some((
+                    v.id.clone(),
+                    iced::widget::image::Handle::from_bytes(bytes),
+                ))
+            })
+            .collect();
+        self.videos = videos;
+    }
+
     fn new() -> Self {
         // Boot with only the Welcome/Start tab. The user creates drawings
         // explicitly (File → New); we never auto-spawn Drawing1.
@@ -2153,6 +2208,10 @@ impl OpenCADStudio {
             recent_limit_input: recent::RECENT_DEFAULT.to_string(),
             command_line: CommandLine::new(),
             patrons: Vec::new(),
+            videos: Vec::new(),
+            video_thumbs: std::collections::HashMap::new(),
+            videos_loading: false,
+            props_asym_scale: std::collections::HashSet::new(),
             start_section: StartSection::default(),
             props_expanded: false,
             history_content: iced::widget::text_editor::Content::new(),
@@ -2227,6 +2286,8 @@ impl OpenCADStudio {
             modal_offset: iced::Vector::ZERO,
             modal_drag_last: None,
             modal_dragging: false,
+            modal_resize: iced::Vector::ZERO,
+            modal_resizing: false,
             attr_editor_handle: None,
             attr_editor_block: String::new(),
             attr_editor_rows: Vec::new(),
@@ -2570,6 +2631,32 @@ impl OpenCADStudio {
         );
         #[cfg(target_arch = "wasm32")]
         let patrons_fetch = Task::none();
+        // Tutorial videos: show the on-disk cache instantly, refresh from the
+        // live playlist in the background. Nothing ships in the binary. The
+        // fetch runs on its own OS thread — its several sequential HTTP
+        // requests would otherwise sit on the async executor and hold up the
+        // rest of the boot tasks (the Start page waited on it).
+        #[cfg(not(target_arch = "wasm32"))]
+        let videos_fetch = {
+            s.set_videos(crate::videos::load_cached());
+            s.videos_loading = true;
+            let (tx, rx) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::videos::fetch_playlist());
+            });
+            Task::perform(
+                async move {
+                    rx.await
+                        .unwrap_or_else(|_| Err("video fetch thread died".into()))
+                },
+                Message::VideosFetched,
+            )
+        };
+        #[cfg(target_arch = "wasm32")]
+        let videos_fetch = Task::none();
+        // Recent-file thumbnails: decoded off-thread — parsing every recent
+        // DWG's preview on the boot path held the first frame back.
+        let thumbs_fetch = s.refresh_recent_thumbs();
         (
             s,
             Task::batch([
@@ -2580,6 +2667,8 @@ impl OpenCADStudio {
                 script,
                 assoc_prompt,
                 patrons_fetch,
+                videos_fetch,
+                thumbs_fetch,
             ]),
         )
     }

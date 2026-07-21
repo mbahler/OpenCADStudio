@@ -48,6 +48,7 @@ pub fn modal<'a>(
     content: impl Into<Element<'a, Message>>,
     on_close: Message,
     offset: Vector,
+    resizable: bool,
 ) -> Element<'a, Message> {
     let close = button(crate::ui::icons::tinted(
         crate::ui::icons::CLOSE,
@@ -84,23 +85,38 @@ pub fn modal<'a>(
 
     let title_bar = row![grip, close].spacing(6).align_y(iced::Center);
 
-    // The column shrinks to the content's width; the title bar sits top-right
-    // above it, mirroring the former ✕ placement with a drag handle.
-    let framed = container(
+    let panel_style = |_: &Theme| container::Style {
+        background: Some(Background::Color(PANEL)),
+        border: Border {
+            color: BORDER_C,
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        ..Default::default()
+    };
+
+    // The dialog is always sized to its content (the caller fixes the content's
+    // width/height, growing it by the shared resize delta). When `resizable`, a
+    // corner grip is appended bottom-right; dragging it drives `ModalResizeGrab`
+    // + the shared drag move/release, which bumps that delta. The title bar sits
+    // top-right above the content either way (`align_x(Right)`).
+    let body = if resizable {
+        let resize = mouse_area(
+            container(crate::ui::icons::tinted(crate::ui::icons::RESIZE, 15.0, GRIP_C))
+                .padding([0, 2]),
+        )
+        .on_press(Message::ModalResizeGrab)
+        .interaction(iced::mouse::Interaction::Grab);
+        column![title_bar, content.into(), resize]
+    } else {
         column![title_bar, content.into()]
-            .spacing(6)
-            .align_x(iced::alignment::Horizontal::Right),
+    };
+    let framed: Element<'a, Message> = container(
+        body.spacing(6).align_x(iced::alignment::Horizontal::Right),
     )
-        .padding(10)
-        .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(PANEL)),
-            border: Border {
-                color: BORDER_C,
-                width: 1.0,
-                radius: 6.0.into(),
-            },
-            ..Default::default()
-        });
+    .padding(10)
+    .style(panel_style)
+    .into();
 
     // Position via asymmetric padding (padding is non-negative): shifting a
     // centred box by `d` on an axis needs (near − far) padding = 2·d there.

@@ -671,29 +671,78 @@ fn lwpolyline_pts(p: &LwPolyline) -> Vec<[f32; 3]> {
 // ── Command implementation ─────────────────────────────────────────────────
 
 enum Step {
-    SelectObject,
-    // `locked == None` is "through" mode: the offset magnitude follows the
-    // cursor (perpendicular distance to the picked object). Typing a value
-    // locks the magnitude; the cursor then only chooses the side.
+    /// Classic first step (#418): type the offset distance, press Enter /
+    /// Space to accept the last one, or choose Through mode.
+    Distance,
+    /// Pick the object to offset. `locked == None` is "through" mode: the
+    /// magnitude follows the cursor (perpendicular distance to the object).
+    SelectObject { locked: Option<f64> },
     PickSide {
-        #[allow(dead_code)]
-        handle: Handle,
-        entity: EntityType,
+        /// The object(s) being offset — one from a pick, or the whole
+        /// pre-selection when OFFSET starts with objects selected (#422).
+        targets: Vec<EntityType>,
         locked: Option<f64>,
+        /// True when the targets came from the pre-selection: the commit ends
+        /// the command instead of looping back for another pick.
+        from_selection: bool,
     },
 }
 
 pub struct OffsetCommand {
     step: Step,
     all_entities: Vec<EntityType>,
+    /// Pre-selected offsettable objects (pick-first, #422); consumed when the
+    /// distance step resolves.
+    preselected: Vec<EntityType>,
+}
+
+/// The entity types `compute_offset` can offset.
+pub fn is_offsettable(e: &EntityType) -> bool {
+    matches!(
+        e,
+        EntityType::Line(_)
+            | EntityType::Circle(_)
+            | EntityType::Arc(_)
+            | EntityType::LwPolyline(_)
+            | EntityType::Ellipse(_)
+            | EntityType::Spline(_)
+            | EntityType::XLine(_)
+    )
 }
 
 impl OffsetCommand {
     pub fn new(all_entities: Vec<EntityType>) -> Self {
         Self {
-            step: Step::SelectObject,
+            step: Step::Distance,
             all_entities,
+            preselected: Vec::new(),
         }
+    }
+
+    /// Pick-first flow (#422): the distance step still comes first, then the
+    /// pre-selected objects go straight to the side step.
+    pub fn with_selection(all_entities: Vec<EntityType>, targets: Vec<EntityType>) -> Self {
+        Self {
+            step: Step::Distance,
+            all_entities,
+            preselected: targets,
+        }
+    }
+
+    /// Leave the distance step with the given mode (Some = locked distance,
+    /// None = through): pre-selected objects jump to the side step, otherwise
+    /// the object-pick loop starts.
+    fn advance_from_distance(&mut self, locked: Option<f64>) -> CmdResult {
+        if self.preselected.is_empty() {
+            self.step = Step::SelectObject { locked };
+        } else {
+            self.step = Step::PickSide {
+                targets: std::mem::take(&mut self.preselected),
+                locked,
+                from_selection: true,
+            };
+        }
+        CmdResult::NeedPoint
     }
 }
 
@@ -704,23 +753,50 @@ impl CadCommand for OffsetCommand {
 
     fn prompt(&self) -> String {
         match &self.step {
-            Step::SelectObject => "OFFSET  Select object to offset:".into(),
-            Step::PickSide {
-                locked: Some(d), ..
-            } => format!("OFFSET  Click side  [distance {d:.4}, type to change]:"),
-            Step::PickSide { locked: None, .. } => format!(
-                "OFFSET  Click through point, or type a distance (last {:.4}):",
+            Step::Distance => format!(
+                "OFFSET  Specify offset distance or [Through] <{:.4}>:",
                 defaults::get_offset_dist()
             ),
+            Step::SelectObject { .. } => {
+                "OFFSET  Select object to offset (Enter to finish):".into()
+            }
+            Step::PickSide { targets, locked, .. } => {
+                let n = if targets.len() > 1 {
+                    format!(" ({} objects)", targets.len())
+                } else {
+                    String::new()
+                };
+                match locked {
+                    Some(d) => format!("OFFSET{n}  Click side  [distance {d:.4}]:"),
+                    None => format!("OFFSET{n}  Click through point:"),
+                }
+            }
+        }
+    }
+
+    fn options(&self) -> Vec<crate::command::CmdOption> {
+        match &self.step {
+            Step::Distance => vec![
+                crate::command::CmdOption::new("Through", "T"),
+                crate::command::CmdOption::enter(&format!(
+                    "{:.4}",
+                    defaults::get_offset_dist()
+                )),
+            ],
+            _ => Vec::new(),
         }
     }
 
     fn needs_entity_pick(&self) -> bool {
-        matches!(self.step, Step::SelectObject)
+        matches!(self.step, Step::SelectObject { .. })
     }
 
     fn on_entity_pick(&mut self, handle: Handle, _pt: DVec3) -> CmdResult {
-        if handle.is_null() || !matches!(self.step, Step::SelectObject) {
+        let locked = match &self.step {
+            Step::SelectObject { locked } => *locked,
+            _ => return CmdResult::NeedPoint,
+        };
+        if handle.is_null() {
             return CmdResult::NeedPoint;
         }
 
@@ -733,17 +809,11 @@ impl CadCommand for OffsetCommand {
         // Accept every type compute_offset can offset — including XLine (#296),
         // and Ellipse/Spline whose offset functions existed but weren't reachable.
         match entity {
-            Some(e @ EntityType::Line(_))
-            | Some(e @ EntityType::Circle(_))
-            | Some(e @ EntityType::Arc(_))
-            | Some(e @ EntityType::LwPolyline(_))
-            | Some(e @ EntityType::Ellipse(_))
-            | Some(e @ EntityType::Spline(_))
-            | Some(e @ EntityType::XLine(_)) => {
+            Some(e) if is_offsettable(&e) => {
                 self.step = Step::PickSide {
-                    handle,
-                    entity: e,
-                    locked: None,
+                    targets: vec![e],
+                    locked,
+                    from_selection: false,
                 };
                 CmdResult::NeedPoint
             }
@@ -751,46 +821,63 @@ impl CadCommand for OffsetCommand {
         }
     }
 
-    // The side step accepts an optional typed magnitude — through mode by
-    // default, a fixed distance once the user types one.
+    // The distance step takes a typed magnitude; the side step accepts one
+    // too, re-locking the distance mid-command.
     fn wants_text_input(&self) -> bool {
-        matches!(self.step, Step::PickSide { .. })
+        matches!(self.step, Step::Distance | Step::PickSide { .. })
     }
 
     fn dyn_field(&self) -> crate::command::DynField {
         match self.step {
-            Step::PickSide { .. } => crate::command::DynField::Scalar,
+            Step::Distance | Step::PickSide { .. } => crate::command::DynField::Scalar,
             _ => crate::command::DynField::Point,
         }
     }
 
     fn dyn_live_value(&self, cursor: DVec3) -> Option<f64> {
         match &self.step {
-            Step::PickSide { entity, locked, .. } => {
-                Some(locked.unwrap_or_else(|| perp_distance(entity, cursor.as_vec3())))
-            }
+            Step::Distance => Some(defaults::get_offset_dist()),
+            Step::PickSide { targets, locked, .. } => Some(locked.unwrap_or_else(|| {
+                targets
+                    .first()
+                    .map(|e| perp_distance(e, cursor.as_vec3()))
+                    .unwrap_or(0.0)
+            })),
             _ => None,
         }
     }
 
     fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
-        if let Step::PickSide { locked, .. } = &mut self.step {
-            let t = text.trim().replace(',', ".");
-            if !t.is_empty() {
+        let t = text.trim().replace(',', ".");
+        match &mut self.step {
+            Step::Distance => {
+                if t.eq_ignore_ascii_case("t") || t.eq_ignore_ascii_case("through") {
+                    return Some(self.advance_from_distance(None));
+                }
                 if let Ok(d) = t.parse::<f64>() {
                     let d = d.abs().max(1e-9);
                     defaults::set_offset_dist(d);
-                    *locked = Some(d);
+                    return Some(self.advance_from_distance(Some(d)));
                 }
+                Some(CmdResult::NeedPoint)
             }
-            // Stay on the side step — the click chooses which side.
-            return Some(CmdResult::NeedPoint);
+            Step::PickSide { locked, .. } => {
+                if !t.is_empty() {
+                    if let Ok(d) = t.parse::<f64>() {
+                        let d = d.abs().max(1e-9);
+                        defaults::set_offset_dist(d);
+                        *locked = Some(d);
+                    }
+                }
+                // Stay on the side step — the click chooses which side.
+                Some(CmdResult::NeedPoint)
+            }
+            _ => None,
         }
-        None
     }
 
     fn on_hover_entity(&mut self, handle: Handle, _pt: DVec3) -> Vec<WireModel> {
-        if handle.is_null() {
+        if handle.is_null() || !matches!(self.step, Step::SelectObject { .. }) {
             return vec![];
         }
         if let Some(entity) = self
@@ -812,47 +899,79 @@ impl CadCommand for OffsetCommand {
     }
 
     fn on_point(&mut self, pt: DVec3) -> CmdResult {
-        let (locked, entity) = match &self.step {
-            Step::PickSide { locked, entity, .. } => (*locked, entity.clone()),
+        let (locked, targets, from_selection) = match &self.step {
+            Step::PickSide {
+                locked,
+                targets,
+                from_selection,
+            } => (*locked, targets.clone(), *from_selection),
             _ => return CmdResult::NeedPoint,
         };
-        let mag = locked.unwrap_or_else(|| perp_distance(&entity, pt.as_vec3()));
-        if mag < 1e-9 {
+        // Each target offsets by its own through-distance (or the locked
+        // magnitude), toward the clicked side.
+        let mut news: Vec<EntityType> = Vec::new();
+        for entity in &targets {
+            let mag = locked.unwrap_or_else(|| perp_distance(entity, pt.as_vec3()));
+            if mag < 1e-9 {
+                continue;
+            }
+            if let Some(new_entity) = compute_offset(entity, mag, pt.as_vec3()) {
+                news.push(new_entity);
+            }
+        }
+        if news.is_empty() {
             return CmdResult::NeedPoint;
         }
-
-        match compute_offset(&entity, mag, pt.as_vec3()) {
-            Some(new_entity) => CmdResult::CommitAndExit(new_entity),
-            None => CmdResult::NeedPoint,
+        if from_selection {
+            // Pre-selection commit ends the command in one undo step.
+            return CmdResult::ReplaceMany(vec![], news);
+        }
+        // Classic loop (#418): commit this offset and go back to the object
+        // pick at the same distance, until Enter / Esc finishes.
+        self.step = Step::SelectObject { locked };
+        if news.len() == 1 {
+            CmdResult::CommitEntity(news.pop().unwrap())
+        } else {
+            CmdResult::ReplaceMany(vec![], news)
         }
     }
 
     fn on_preview_wires(&mut self, pt: DVec3) -> Vec<WireModel> {
-        let (locked, entity) = match &self.step {
-            Step::PickSide { locked, entity, .. } => (*locked, entity.clone()),
+        let (locked, targets) = match &self.step {
+            Step::PickSide { locked, targets, .. } => (*locked, targets.clone()),
             _ => return vec![],
         };
-        let mag = locked.unwrap_or_else(|| perp_distance(&entity, pt.as_vec3()));
-        if mag < 1e-9 {
-            return vec![];
-        }
-
-        if let Some(result) = compute_offset(&entity, mag, pt.as_vec3()) {
-            let pts = entity_wire_pts(&result);
-            if !pts.is_empty() {
-                return vec![WireModel::solid(
-                    "offset_preview".into(),
-                    pts,
-                    WireModel::CYAN,
-                    false,
-                )];
+        let mut wires = Vec::new();
+        for (n, entity) in targets.iter().enumerate() {
+            let mag = locked.unwrap_or_else(|| perp_distance(entity, pt.as_vec3()));
+            if mag < 1e-9 {
+                continue;
+            }
+            if let Some(result) = compute_offset(entity, mag, pt.as_vec3()) {
+                let pts = entity_wire_pts(&result);
+                if !pts.is_empty() {
+                    wires.push(WireModel::solid(
+                        format!("offset_preview_{n}"),
+                        pts,
+                        WireModel::CYAN,
+                        false,
+                    ));
+                }
             }
         }
-        vec![]
+        wires
     }
 
     fn on_enter(&mut self) -> CmdResult {
-        CmdResult::Cancel
+        match &self.step {
+            // Enter / Space on the distance step accepts the last distance —
+            // the "repeat the same value with just Space" flow (#418).
+            Step::Distance => {
+                let d = defaults::get_offset_dist();
+                self.advance_from_distance(Some(d.abs().max(1e-9)))
+            }
+            _ => CmdResult::Cancel,
+        }
     }
     fn on_escape(&mut self) -> CmdResult {
         CmdResult::Cancel

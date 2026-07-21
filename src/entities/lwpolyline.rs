@@ -7,7 +7,7 @@ use crate::entities::common::{
     stepper_prop as stepper,
 };
 use crate::entities::traits::TruckConvertible;
-use crate::scene::convert::acad_to_truck::{TruckEntity, TruckObject};
+use crate::scene::convert::acad_to_truck::{extrusion_wall_tris, TruckEntity, TruckObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 use crate::scene::model::wire_model::TangentGeom;
 
@@ -91,6 +91,7 @@ fn thick_segments(
         }
     }
     TruckEntity {
+        pick_tris: extrusion_wall_tris(path_pts, [t * nx, t * ny, t * nz]),
         object: TruckObject::Lines(pts),
         snap_pts: vec![],
         tangent_geoms: tangents,
@@ -99,10 +100,39 @@ fn thick_segments(
     }
 }
 
+/// Extrude a *wide* LwPolyline's band into a 3-D tube: each band segment's outer
+/// and inner boundary rises by `thickness` (along the normal) into a wall,
+/// leaving the two radial segment-end edges open (they are internal to the
+/// band). The flat bottom band is already drawn by the wide-fill path; this
+/// adds the vertical walls and their outline. Used instead of `thick_segments`
+/// (which extrudes only the centreline) when the polyline carries a width.
+fn thick_wide_band(
+    pl: &LwPolyline,
+    thickness: f64,
+    to_wcs: &dyn Fn(f64, f64) -> (f64, f64, f64),
+    normal: (f64, f64, f64),
+    key_verts: Vec<[f64; 3]>,
+    tangents: Vec<TangentGeom>,
+) -> TruckEntity {
+    let (origin, fills) = wide_fills(pl);
+    let (fill_tris, lines) =
+        crate::entities::common::thick_band_tube(origin, &fills, thickness, normal, to_wcs);
+
+    TruckEntity {
+        pick_tris: fill_tris.clone(),
+        object: TruckObject::Lines(lines),
+        snap_pts: vec![],
+        tangent_geoms: tangents,
+        key_vertices: key_verts,
+        fill_tris,
+    }
+}
+
 fn to_truck(pline: &LwPolyline) -> TruckEntity {
     let verts = &pline.vertices;
     if verts.is_empty() {
         return TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Point(builder::vertex(Point3::new(0.0, 0.0, 0.0))),
             snap_pts: vec![],
             tangent_geoms: vec![],
@@ -170,7 +200,62 @@ fn to_truck(pline: &LwPolyline) -> TruckEntity {
             kv.push([wbx, wby, wbz]);
             seg_data.push((ox0, oy0, ox1, oy1));
         }
+        // A wide polyline extrudes its whole band into a tube (outer + inner
+        // walls); a zero-width one just extrudes its centreline.
+        let is_wide = pline.constant_width > 1e-9
+            || pline
+                .vertices
+                .iter()
+                .any(|v| v.start_width > 1e-9 || v.end_width > 1e-9);
+        if is_wide {
+            return thick_wide_band(pline, pline.thickness, &to_wcs, normal, kv, tgs);
+        }
         return thick_segments(&seg_data, &path, pline.thickness, normal, kv, tgs);
+    }
+
+    // A wide polyline whose per-vertex widths VARY renders a smooth taper —
+    // handled here, before the PLINEGEN split, so both cases get it. A
+    // uniform-width polyline falls through to the constant-band paths below.
+    if let Some(band_verts) = tapered_band_verts(pline) {
+        let mut kv: Vec<[f64; 3]> = Vec::new();
+        let mut tgs: Vec<TangentGeom> = Vec::new();
+        for i in 0..seg_count {
+            let v0 = &verts[i];
+            let v1 = &verts[(i + 1) % count];
+            let p0 = to_pt(v0);
+            let p1 = to_pt(v1);
+            if i == 0 {
+                kv.push([p0.x, p0.y, p0.z]);
+            }
+            kv.push([p1.x, p1.y, p1.z]);
+            if v0.bulge.abs() < 1e-9 {
+                tgs.push(TangentGeom::Line {
+                    p1: [p0.x as f32, p0.y as f32, p0.z as f32],
+                    p2: [p1.x as f32, p1.y as f32, p1.z as f32],
+                });
+            } else if let Some(arc) = crate::entities::common::BulgeArc::from_bulge(
+                [v0.location.x, v0.location.y],
+                [v1.location.x, v1.location.y],
+                v0.bulge,
+            ) {
+                let (wcx, wcy, wcz) = to_wcs(arc.center[0], arc.center[1]);
+                tgs.push(TangentGeom::Circle {
+                    center: [wcx as f32, wcy as f32, wcz as f32],
+                    radius: arc.radius as f32,
+                });
+            }
+        }
+        let (pts, widths) =
+            crate::entities::common::tapered_band_points(&band_verts, pline.is_closed, &to_wcs);
+        let (fill_origin, fills) = wide_fills(pline);
+        return TruckEntity {
+            pick_tris: crate::entities::common::wide_band_tris(fill_origin, &fills),
+            object: TruckObject::TaperedLines(pts, widths),
+            snap_pts: vec![],
+            tangent_geoms: tgs,
+            key_vertices: kv,
+            fill_tris: vec![],
+        };
     }
 
     // plinegen=false: NaN-separated segments so the linetype pattern restarts per vertex.
@@ -220,7 +305,9 @@ fn to_truck(pline: &LwPolyline) -> TruckEntity {
                 pts.push([f64::NAN; 3]);
             }
         }
+        let (fill_origin, fills) = wide_fills(pline);
         return TruckEntity {
+            pick_tris: crate::entities::common::wide_band_tris(fill_origin, &fills),
             object: TruckObject::SegmentedLines(pts),
             snap_pts: vec![],
             tangent_geoms: tgs,
@@ -268,12 +355,40 @@ fn to_truck(pline: &LwPolyline) -> TruckEntity {
         key_verts.push([p1.x, p1.y, p1.z]);
     }
 
+    let (fill_origin, fills) = wide_fills(pline);
     TruckEntity {
+        pick_tris: crate::entities::common::wide_band_tris(fill_origin, &fills),
         object: TruckObject::Contour(edges.into_iter().collect::<Wire>()),
         snap_pts: vec![],
         tangent_geoms: tangents,
         key_vertices: key_verts,
         fill_tris: vec![],
+    }
+}
+
+/// The per-vertex `(location, bulge, start_width, end_width)` band description
+/// for a wide LwPolyline whose width VARIES — `None` when the width is uniform
+/// (a constant band) so the caller keeps the cheaper constant-width path.
+fn tapered_band_verts(pline: &LwPolyline) -> Option<Vec<([f64; 2], f64, f64, f64)>> {
+    let c = pline.constant_width;
+    let band: Vec<([f64; 2], f64, f64, f64)> = pline
+        .vertices
+        .iter()
+        .map(|v| {
+            let sw = if v.start_width > 1e-9 { v.start_width } else { c };
+            let ew = if v.end_width > 1e-9 { v.end_width } else { c };
+            ([v.location.x, v.location.y], v.bulge, sw, ew)
+        })
+        .collect();
+    let w0 = band.first().map_or(0.0, |v| v.2);
+    let varies = band
+        .iter()
+        .any(|&(_, _, sw, ew)| (sw - w0).abs() > 1e-9 || (ew - w0).abs() > 1e-9);
+    // Only a genuine, non-zero-width taper takes the per-point path.
+    if varies && w0.max(band.iter().map(|v| v.3).fold(0.0, f64::max)) > 1e-9 {
+        Some(band)
+    } else {
+        None
     }
 }
 
@@ -389,6 +504,18 @@ fn apply_geom_prop(pline: &mut LwPolyline, field: &str, value: &str) {
             } else {
                 value == "true"
             };
+            // Closing a polyline whose last vertex already sits on the first
+            // would stack two control points there (a polyline drawn back to
+            // its start point and then closed) — drop the duplicate so the
+            // closing segment replaces it (#421).
+            if pline.is_closed && pline.vertices.len() > 2 {
+                let (first, last) = (&pline.vertices[0], pline.vertices.last().unwrap());
+                let d2 = (first.location.x - last.location.x).powi(2)
+                    + (first.location.y - last.location.y).powi(2);
+                if d2 < 1e-12 {
+                    pline.vertices.pop();
+                }
+            }
             return;
         }
         "plinegen" => {
@@ -658,9 +785,12 @@ impl crate::entities::traits::Transformable for LwPolyline {
 /// UTM-scale coordinates — building them in absolute f32 collapsed the band into
 /// a string of squares far from the origin.
 pub(crate) fn wide_fills(pl: &acadrust::entities::LwPolyline) -> ([f64; 2], Vec<Vec<[f32; 2]>>) {
-    // The stored width is applied to EACH side of the centreline (not halved),
-    // so `polyline_segment_fill`'s ±offset spans the full width on either side.
-    let hw_const = pl.constant_width as f32;
+    // Codes 43 / 40 / 41 store the band's FULL width, and
+    // `polyline_segment_fill` offsets ±hw about the centreline — so halve it.
+    // Feeding the stored width in whole draws every wide polyline twice as wide
+    // as the file asks for, which on a donut (a closed 2-vertex bulge-1 polyline)
+    // shows up as a disc 1.5× its real radius.
+    let hw_const = pl.constant_width as f32 * 0.5;
     let verts = &pl.vertices;
     let n = verts.len();
     if n < 2 {
@@ -673,12 +803,12 @@ pub(crate) fn wide_fills(pl: &acadrust::entities::LwPolyline) -> ([f64; 2], Vec<
         let v0 = &verts[i];
         let v1 = &verts[(i + 1) % n];
         let hw0 = if v0.start_width > 1e-9 {
-            v0.start_width as f32
+            v0.start_width as f32 * 0.5
         } else {
             hw_const
         };
         let hw1 = if v0.end_width > 1e-9 {
-            v0.end_width as f32
+            v0.end_width as f32 * 0.5
         } else {
             hw_const
         };

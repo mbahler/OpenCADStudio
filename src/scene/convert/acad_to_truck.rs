@@ -56,6 +56,11 @@ pub enum TruckObject {
     Lines(Vec<[f64; 3]>),
     /// Like Lines but linetype pattern restarts at each NaN-separated segment (plinegen=false).
     SegmentedLines(Vec<[f64; 3]>),
+    /// A wide polyline whose band width VARIES (a taper): a continuous WCS point
+    /// list paired index-for-index with a per-point full band width. The wire
+    /// shader interpolates the two endpoint widths of each segment so the band
+    /// tapers smoothly. Points hold no NaN breaks (one continuous band).
+    TaperedLines(Vec<[f64; 3]>, Vec<f32>),
     Volume(Solid),
 }
 
@@ -70,8 +75,44 @@ pub struct TruckEntity {
     /// triangle. Non-empty for mesh-like entities (PolyfaceMesh, PolygonMesh)
     /// that need solid fill.
     pub fill_tris: Vec<[f64; 3]>,
+    /// Pre-triangulated pick-only geometry: flat list of WCS f64 vertices, 3
+    /// per triangle. Non-empty for entities carrying a DXF thickness (code 39)
+    /// — the swept wall between each base segment and its extruded copy. Kept
+    /// apart from `fill_tris` because only that one reaches the GPU; see
+    /// [`WireModel::pick_tris`](crate::scene::model::wire_model::WireModel::pick_tris).
+    pub pick_tris: Vec<[f64; 3]>,
 }
 
 pub fn convert(entity: &EntityType, document: &CadDocument) -> Option<TruckEntity> {
     entity.to_truck_entity(document)
+}
+
+/// Triangulate the wall swept by extruding `base` along `extrusion` — the
+/// geometry a DXF thickness (code 39) adds to an entity. Two triangles per
+/// base segment, in `TruckEntity::pick_tris` order (flat WCS f64, 3 per tri).
+///
+/// `base` is a point chain in the same form a wire uses, so a NaN entry breaks
+/// the sweep exactly as it breaks a segment chain — a polyline with disjoint
+/// runs extrudes into one wall per run, not a wall bridging the gap.
+pub fn extrusion_wall_tris(base: &[[f64; 3]], extrusion: [f64; 3]) -> Vec<[f64; 3]> {
+    let top = |p: [f64; 3]| {
+        [
+            p[0] + extrusion[0],
+            p[1] + extrusion[1],
+            p[2] + extrusion[2],
+        ]
+    };
+    let mut out = Vec::new();
+    let mut prev: Option<[f64; 3]> = None;
+    for &p in base {
+        if p[0].is_nan() {
+            prev = None;
+            continue;
+        }
+        if let Some(a) = prev {
+            out.extend_from_slice(&[a, p, top(p), a, top(p), top(a)]);
+        }
+        prev = Some(p);
+    }
+    out
 }

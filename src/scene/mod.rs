@@ -18,6 +18,7 @@ pub mod view;
 // blocks and/or free functions). Pure text-move from the original mod.rs.
 mod entity;
 mod group_layer;
+mod scene_markers;
 mod camera_ops;
 mod layout;
 mod modify;
@@ -235,6 +236,10 @@ pub struct OpenTimings {
 /// Build hatch / image / mesh caches from a document without needing `&mut Scene`.
 /// Intended to run on a background thread during file load.
 pub fn build_derived_caches(doc: &CadDocument) -> DerivedCaches {
+    // A new drawing must not inherit the previous one's resolved images — drop
+    // the memoised set so each reference re-reads / re-fetches once here (and
+    // stays cached across this document's later cache rebuilds).
+    crate::scene::model::image_model::clear_image_cache();
     // model-space block handle (same logic as Scene::model_space_block_handle)
     let model_block = doc
         .objects
@@ -289,7 +294,7 @@ pub fn build_derived_caches(doc: &CadDocument) -> DerivedCaches {
         let h = e.common().handle;
         match e {
             EntityType::Hatch(_) | EntityType::Solid(_) => hatch_handles.push(h),
-            EntityType::RasterImage(_) => image_handles.push(h),
+            EntityType::RasterImage(_) | EntityType::Ole2Frame(_) => image_handles.push(h),
             EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) | EntityType::Surface(_) => {
                 mesh_handles.push(h)
             }
@@ -326,12 +331,14 @@ pub fn build_derived_caches(doc: &CadDocument) -> DerivedCaches {
     // images
     let images: HashMap<Handle, ImageModel> = image_handles
         .par_iter()
-        .filter_map(|&handle| {
-            if let EntityType::RasterImage(img) = doc.get_entity(handle)? {
+        .filter_map(|&handle| match doc.get_entity(handle)? {
+            EntityType::RasterImage(img) => {
                 ImageModel::from_raster_image(img).map(|m| (handle, m))
-            } else {
-                None
             }
+            EntityType::Ole2Frame(ole) => {
+                ImageModel::from_ole2frame(ole).map(|m| (handle, m))
+            }
+            _ => None,
         })
         .collect();
 
@@ -341,6 +348,7 @@ pub fn build_derived_caches(doc: &CadDocument) -> DerivedCaches {
     // Top-level (layout-owned) solids are offset into the render frame; block
     // definition solids keep block-local coords for per-INSERT instancing. (#123)
     let facet_res = doc.header.facet_resolution;
+    let isolines = doc.header.isolines.max(0) as usize;
     // Real layout blocks come from the Layout objects' block_record handles —
     // `BlockRecord::is_layout()` is unreliable here (it flags ordinary blocks).
     let layout_blocks: std::collections::HashSet<Handle> = doc
@@ -360,7 +368,7 @@ pub fn build_derived_caches(doc: &CadDocument) -> DerivedCaches {
             let (raw, ..) = view::render::render_style_for(doc, e);
             let color = view::render::adapt_to_bg(raw, LOAD_BG);
             let top_level = layout_blocks.contains(&e.common().owner_handle);
-            crate::entities::solid3d::tessellate_volume(e, color, facet_res).map(|m| {
+            crate::entities::solid3d::tessellate_volume(e, color, facet_res, isolines).map(|m| {
                 let m = if top_level { offset_mesh_lod_set(m) } else { m };
                 (handle, m, top_level)
             })
@@ -692,6 +700,12 @@ fn transform_block_mesh_lod_set(
 ) -> MeshLodSet {
     use acadrust::types::Vector3;
     let mut out = set.clone();
+    // Silhouette generators are world-space and untransformed here, so a block
+    // instance would silhouette against the block-local pose. Drop them: a
+    // block-internal solid keeps its baked isolines and feature edges, just not
+    // the per-frame silhouette (deferred until the generators track the INSTANCE
+    // transform).
+    out.curved_gens.clear();
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;
@@ -775,12 +789,16 @@ pub struct Scene {
     sdf_text_cache: RefCell<
         HashMap<u64, std::sync::Arc<Vec<crate::scene::pipeline::text_gpu::TextVertex>>>,
     >,
-    /// `(geometry_epoch, gathered text)` of the most recent SDF-text build. When a
-    /// new content id misses the cache but the journal shows no text-bearing
-    /// entity changed since this epoch, the same glyphs are reused instead of
-    /// re-walking every wire — an edit on plain geometry never rebuilds the text.
+    /// Per wire-source `(geometry_epoch, gathered text)` of the most recent
+    /// SDF-text build. When a new content id misses the cache but the journal
+    /// shows no text-bearing entity changed since that epoch, the same glyphs
+    /// are reused instead of re-walking every wire — an edit on plain geometry
+    /// never rebuilds the text. Keyed by the render source (sheet / tile /
+    /// content viewport / implicit view): a paper frame gathers several wire
+    /// sets in one frame, and a single slot handed the sheet's glyphs to the
+    /// content viewports, hiding every model-space text entity (#403).
     last_sdf_text: RefCell<
-        Option<(u64, std::sync::Arc<Vec<crate::scene::pipeline::text_gpu::TextVertex>>)>,
+        HashMap<u64, (u64, std::sync::Arc<Vec<crate::scene::pipeline::text_gpu::TextVertex>>)>,
     >,
     /// pane_grid layout tree for the Model tab — the source of truth for the
     /// tile split layout, resize and focus. `model_tiles` (the renderer's
@@ -859,8 +877,13 @@ pub struct Scene {
     /// effective sort key (SortEntitiesTable override or own handle), then
     /// fed to the 2D pipelines as a small clip-z bias so entities of
     /// *different* types order correctly against each other. 3D meshes are
-    /// excluded (they keep real geometric depth).
-    draw_depth_cache: RefCell<Option<(u64, Arc<HashMap<u64, f32>>)>>,
+    /// excluded (they keep real geometric depth). Each value is
+    /// `[depth, half]`: `depth` = the entity's signed rank in (-1,1), `half` =
+    /// half the gap to the neighbouring ranks (`1/(block_count+1)`) — the
+    /// sub-range a block INSERT's children may occupy without crossing the
+    /// insert's siblings. Fill explosion and band wires compose child depths
+    /// as `depth + child_rank * half`.
+    draw_depth_cache: RefCell<Option<(u64, Arc<HashMap<u64, [f32; 2]>>)>>,
     /// Cached hatch fill models, keyed by geometry_epoch. View culling
     /// is handled at draw time via `hatch_skip_flags` in the pipeline,
     /// not at build time — that lets the GPU buffer stay stable across
@@ -872,12 +895,21 @@ pub struct Scene {
     /// Cached wipeout fill models, keyed by geometry_epoch. Same
     /// reasoning as `hatch_cache`.
     wipeout_cache: RefCell<Option<(u64, Arc<Vec<HatchModel>>)>>,
-    /// Cached image models, keyed by geometry_epoch. Images do their own
-    /// per-frame culling in the GPU pipeline (vp_scissor); no camera key
-    /// needed here.
+    /// Cached image models, keyed by geometry_epoch. No camera key needed here.
     image_cache: RefCell<Option<(u64, Arc<Vec<ImageModel>>)>>,
     /// Cached mesh models, keyed by geometry_epoch.
     mesh_cache: RefCell<Option<(u64, Arc<Vec<MeshLodSet>>)>>,
+    /// Per-viewport (VP-frozen-layer) filtered fill / image / mesh sets, keyed by
+    /// the order-independent signature of the viewport's frozen-layer set. A
+    /// content viewport that freezes layers must hide their hatches, 2-D solids,
+    /// images/OLE and 3-D solids too — not just wires — so these hold the
+    /// filtered variants. Viewports sharing a frozen set share one entry (like
+    /// the resident wire set). Empty for a viewport with no frozen layers (it
+    /// reuses the unfiltered `*_arc` sets directly).
+    frozen_hatch_cache: RefCell<HashMap<u64, (u64, u64, Arc<Vec<HatchModel>>)>>,
+    frozen_wipeout_cache: RefCell<HashMap<u64, (u64, Arc<Vec<HatchModel>>)>>,
+    frozen_image_cache: RefCell<HashMap<u64, (u64, Arc<Vec<ImageModel>>)>>,
+    frozen_mesh_cache: RefCell<HashMap<u64, (u64, Arc<Vec<MeshLodSet>>)>>,
     /// Cached block-INSERT hatches for hit-testing, keyed by geometry_epoch.
     /// Building this explodes every model-space INSERT, so without the cache a
     /// heavy block-instanced drawing re-explodes thousands of inserts on every
@@ -1087,7 +1119,7 @@ impl Scene {
             }]),
             active_model_tile: std::cell::Cell::new(0),
             sdf_text_cache: RefCell::new(HashMap::default()),
-            last_sdf_text: RefCell::new(None),
+            last_sdf_text: RefCell::new(HashMap::default()),
             // One pane mapped to tile 0 — matches the single default tile above.
             model_panes: iced::widget::pane_grid::State::new(0).0,
             selection: Rc::new(RefCell::new(SelectionState::default())),
@@ -1113,6 +1145,10 @@ impl Scene {
             wipeout_cache: RefCell::new(None),
             image_cache: RefCell::new(None),
             mesh_cache: RefCell::new(None),
+            frozen_hatch_cache: RefCell::new(HashMap::default()),
+            frozen_wipeout_cache: RefCell::new(HashMap::default()),
+            frozen_image_cache: RefCell::new(HashMap::default()),
+            frozen_mesh_cache: RefCell::new(HashMap::default()),
             insert_hatch_cache: RefCell::new(None),
             paper_sheet_cache: RefCell::new(None),
             paper_projected_cache: RefCell::new(HashMap::default()),
@@ -1268,7 +1304,8 @@ impl Scene {
         // its internal geometry / text / attributes must NOT be scaled
         // individually (that would double-scale — AutoCAD even forbids
         // annotative attributes inside annotative blocks for this reason).
-        let built = cache::block_cache::BlockCache::build(&self.document, 1.0, bg);
+        let built =
+            cache::block_cache::BlockCache::build(&self.document, 1.0, bg, &self.draw_depth_map());
         let arc = Arc::new(built);
         *self.block_defn_cache.borrow_mut() = Some((self.block_epoch, Arc::clone(&arc)));
         arc
@@ -1361,26 +1398,39 @@ impl Scene {
 
     /// True when no text-bearing entity changed since `last_epoch`, so cached SDF
     /// glyphs stay valid. Text comes from Text / MText / Dimension / MultiLeader /
-    /// Leader / Table / attributes and from block references (their baked text
-    /// moves with the instance) — an edit to any of those, or any removal,
-    /// invalidates it; a plain line / arc / polyline edit does not.
+    /// Leader / Table / Tolerance / attributes (incl. ATTDEF) and from block
+    /// references (their baked text moves with the instance) — an edit to any of
+    /// those, or any removal, invalidates it; a plain line / arc / polyline edit
+    /// does not.
     fn text_unchanged(&self, last_epoch: u64) -> bool {
         match self.replay_since(last_epoch) {
             Some(deltas) => deltas.iter().all(|&(h, k)| {
-                k != ChangeKind::Removed
-                    && !matches!(
-                        self.document.get_entity(h),
-                        Some(
-                            EntityType::Text(_)
-                                | EntityType::MText(_)
-                                | EntityType::Dimension(_)
-                                | EntityType::MultiLeader(_)
-                                | EntityType::Leader(_)
-                                | EntityType::Table(_)
-                                | EntityType::AttributeEntity(_)
-                                | EntityType::Insert(_)
-                        )
-                    )
+                if k == ChangeKind::Removed {
+                    return false;
+                }
+                let Some(e) = self.document.get_entity(h) else {
+                    return true;
+                };
+                if matches!(
+                    e,
+                    EntityType::Text(_)
+                        | EntityType::MText(_)
+                        | EntityType::Dimension(_)
+                        | EntityType::MultiLeader(_)
+                        | EntityType::Leader(_)
+                        | EntityType::Table(_)
+                        | EntityType::Tolerance(_)
+                        | EntityType::AttributeEntity(_)
+                        | EntityType::AttributeDefinition(_)
+                        | EntityType::Insert(_)
+                ) {
+                    return false;
+                }
+                // Complex-linetype glyphs ride the host entity's own wire, so a
+                // plain line/polyline edit still moves text when its linetype
+                // embeds text or shapes.
+                let lt = crate::scene::view::render::linetype_name_for(&self.document, e);
+                crate::io::linetypes::resolve_complex_lt(&self.document, &lt).is_none()
             }),
             None => false,
         }
@@ -2011,7 +2061,6 @@ impl Scene {
             color: self.paper_bg_color,
             angle_offset: 0.0,
             scale: 1.0,
-            vp_scissor: None,
             // Draw-order bias is signed: entity fills/wires land in (-1, 1)
             // (0 = neutral). A value below -1 forces the sheet strictly behind
             // EVERY object, in every case, with a tiny z offset (BIAS = 0.001,
@@ -2052,6 +2101,12 @@ impl Scene {
             2 => (right, top, left, bottom),
             _ => (left, bottom, right, top),
         };
+        // Plot margins are millimetres like the paper size; scale them into the
+        // layout's paper-space units so the inset matches the (already scaled)
+        // sheet rect. Without this an inch paper space insets an ~8-inch sheet
+        // by ~6 "inches" of margin and the printable rect collapses.
+        let f = self.paper_space_unit_factor();
+        let (ml, mb, mr, mt) = (ml * f, mb * f, mr * f, mt * f);
         // Nothing to show when there are no margins (printable area == sheet).
         if ml <= 0.0 && mb <= 0.0 && mr <= 0.0 && mt <= 0.0 {
             return None;
@@ -2073,9 +2128,12 @@ impl Scene {
             [0.5, 0.5, 0.5, 1.0],
             false,
         );
-        // Dashed: 4 mm dash, 3 mm gap.
-        wire.pattern_length = 7.0;
-        wire.pattern = [4.0, -3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        // Dashed: 4 mm dash, 3 mm gap. The dash lengths are millimetres, so
+        // scale them into the layout's paper-space units too (`f`) — otherwise
+        // an inch paper space draws 4-"inch" dashes (25.4× too long).
+        let ff = f as f32;
+        wire.pattern_length = 7.0 * ff;
+        wire.pattern = [4.0 * ff, -3.0 * ff, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         Some(wire)
     }
 
@@ -2139,6 +2197,55 @@ impl Scene {
         })
     }
 
+    /// PlotSettings store the paper size and plot margins in millimetres, but a
+    /// layout's paper space is laid out in its own units — its viewports,
+    /// drawing limits and the sheet the user sees can be in inches, millimetres,
+    /// or an arbitrary scaled unit. Return the factor that converts those
+    /// millimetre plot-settings values into the active layout's paper-space
+    /// units (`1.0` for a millimetre paper space, `1/25.4` for an inch one, and
+    /// anything else for a scaled layout).
+    ///
+    /// The unit is derived from the plot scale, which maps paper-space units to
+    /// the physical page: `mm_per_unit = (scale_num / scale_den) × page_unit_mm`
+    /// where `page_unit_mm` is 25.4 for an inch page (code 72 == 0) or 1 for a
+    /// millimetre page. The scale and the page unit are a matched pair, so this
+    /// is correct even when the page unit alone looks wrong (an inch page at
+    /// scale 1:25.4 is a millimetre paper space). Falls back to `1.0` when the
+    /// scale is missing or degenerate.
+    pub fn paper_space_unit_factor(&self) -> f64 {
+        if self.current_layout == "Model" {
+            return 1.0;
+        }
+        self.document
+            .objects
+            .values()
+            .find_map(|obj| match obj {
+                ObjectType::Layout(l) if l.name == self.current_layout => {
+                    Some(Self::layout_unit_factor(l))
+                }
+                _ => None,
+            })
+            .unwrap_or(1.0)
+    }
+
+    /// Millimetre → paper-space-unit factor for a specific layout (see
+    /// [`Scene::paper_space_unit_factor`]).
+    fn layout_unit_factor(l: &acadrust::objects::Layout) -> f64 {
+        // Millimetres represented by one plotted page unit: an inch page
+        // (plot_paper_units == 0) is 25.4 mm, a millimetre page is 1 mm.
+        let page_unit_mm = if l.plot_paper_units == 0 { 25.4 } else { 1.0 };
+        let (num, den) = (l.plot_scale_numerator, l.plot_scale_denominator);
+        if num > 1e-12 && den > 1e-12 {
+            // One paper-space unit spans this many millimetres on the page.
+            let mm_per_unit = (num / den) * page_unit_mm;
+            if mm_per_unit > 1e-9 {
+                return 1.0 / mm_per_unit;
+            }
+        }
+        // No usable plot scale — assume the paper space is already millimetres.
+        1.0
+    }
+
     pub fn paper_limits(&self) -> Option<((f64, f64), (f64, f64))> {
         if self.current_layout == "Model" {
             return None;
@@ -2162,6 +2269,14 @@ impl Scene {
                         } else {
                             (l.paper_width, l.paper_height)
                         };
+                        // paper_width/height are millimetres; scale them into
+                        // the layout's paper-space units so the sheet lands in
+                        // the same coordinate system as the viewports drawn on
+                        // it. An inch-based paper space would otherwise get a
+                        // 25.4× oversized sheet, shrinking the content into the
+                        // corner.
+                        let f = Self::layout_unit_factor(l);
+                        let (pw, ph) = (pw * f, ph * f);
                         let ox = l.min_limits.0.min(0.0);
                         let oy = l.min_limits.1.min(0.0);
                         return Some(((ox, oy), (ox + pw, oy + ph)));
@@ -2902,6 +3017,12 @@ impl Scene {
         let t_tess = iced::time::Instant::now();
         let mut wires =
             self.wires_for_block_culled(block, None, None, frozen_layers, anno_scale_override);
+        // Synthesized nonprint markers (geo-location daisy) live in model space
+        // only and are derived from document objects, not entities — append them
+        // to the freshly built resident set (incremental patches preserve them).
+        if block == self.model_space_block_handle() {
+            self.append_scene_markers(&mut wires, bg);
+        }
         self.apply_refedit_fade(&mut wires, bg);
         self.last_tess_ms.set(t_tess.elapsed().as_secs_f32() * 1000.0);
         self.last_tess_wires.set(wires.len());
@@ -3216,7 +3337,7 @@ impl Scene {
     /// its owning block by effective sort key (SortEntitiesTable override or
     /// own handle). The result feeds the 2D pipelines as a clip-z bias so
     /// entities of different types order correctly against each other.
-    pub(super) fn draw_depth_map(&self) -> Arc<HashMap<u64, f32>> {
+    pub(super) fn draw_depth_map(&self) -> Arc<HashMap<u64, [f32; 2]>> {
         {
             // Draw order depends on each block's entity COUNT (the rank
             // denominator) and the entities' handles / SortEntitiesTable — none of
@@ -3286,17 +3407,20 @@ impl Scene {
                 .unwrap_or(hv);
             by_block.entry(block).or_default().push((hv, eff));
         }
-        let mut depth_map: HashMap<u64, f32> = HashMap::default();
+        let mut depth_map: HashMap<u64, [f32; 2]> = HashMap::default();
         for (_block, mut v) in by_block {
             v.sort_by_key(|(_, eff)| *eff);
             let denom = (v.len() as f32) + 1.0;
+            // Adjacent ranks are 2/denom apart; a child sub-range of
+            // ±half = ±1/denom around the parent depth never crosses them.
+            let half = 1.0 / denom;
             for (rank, (hv, _)) in v.into_iter().enumerate() {
                 // Signed (-1,1): back ranks → negative, front → positive,
                 // mid → ~0. The shader applies `z -= draw_depth * BIAS`, so a
                 // default/unranked 0.0 means "no bias" (neutral) — which keeps
                 // 3D mesh faces and transient wires at their real depth.
                 let norm = (rank as f32 + 1.0) / denom; // (0,1)
-                depth_map.insert(hv, (norm - 0.5) * 2.0);
+                depth_map.insert(hv, [(norm - 0.5) * 2.0, half]);
             }
         }
         let arc = Arc::new(depth_map);
@@ -3336,7 +3460,7 @@ impl Scene {
                 return arc;
             }
         }
-        let arc = Arc::new(self.synced_hatch_models());
+        let arc = Arc::new(self.synced_hatch_models(None));
         *self.hatch_cache.borrow_mut() = Some((self.geometry_epoch, sel_sig, Arc::clone(&arc)));
         arc
     }
@@ -3379,7 +3503,7 @@ impl Scene {
                 return arc;
             }
         }
-        let arc = Arc::new(self.wipeout_models());
+        let arc = Arc::new(self.wipeout_models(None));
         *self.wipeout_cache.borrow_mut() = Some((self.geometry_epoch, Arc::clone(&arc)));
         arc
     }
@@ -3408,19 +3532,31 @@ impl Scene {
                 return arc;
             }
         }
-        let depth_map = self.draw_depth_map();
-        let arc = Arc::new(
-            self.images
-                .iter()
-                .map(|(handle, model)| {
-                    let mut m = model.clone();
-                    m.draw_depth = depth_map.get(&handle.value()).copied().unwrap_or(0.0);
-                    m
-                })
-                .collect(),
-        );
+        let arc = Arc::new(self.image_models(None));
         *self.image_cache.borrow_mut() = Some((self.geometry_epoch, Arc::clone(&arc)));
         arc
+    }
+
+    /// Model image / OLE-frame models, optionally dropping those whose layer is
+    /// frozen in a content viewport (`frozen`). `None` reproduces the full set.
+    fn image_models(&self, frozen: Option<&HashSet<Handle>>) -> Vec<ImageModel> {
+        let depth_map = self.draw_depth_map();
+        self.images
+            .iter()
+            .filter_map(|(handle, model)| {
+                if frozen.is_some() {
+                    let layer = self.document.get_entity(*handle).map(|e| e.common().layer.clone());
+                    if let Some(layer) = layer {
+                        if self.layer_frozen_in(&layer, frozen) {
+                            return None;
+                        }
+                    }
+                }
+                let mut m = model.clone();
+                m.draw_depth = depth_map.get(&handle.value()).map_or(0.0, |d| d[0]);
+                Some(m)
+            })
+            .collect()
     }
 
     /// Images owned by the active paper layout block only. The full-canvas
@@ -3441,7 +3577,7 @@ impl Scene {
                         return None;
                     }
                     let mut m = model.clone();
-                    m.draw_depth = depth_map.get(&handle.value()).copied().unwrap_or(0.0);
+                    m.draw_depth = depth_map.get(&handle.value()).map_or(0.0, |d| d[0]);
                     Some(m)
                 })
                 .collect(),
@@ -3478,12 +3614,29 @@ impl Scene {
                 return arc;
             }
         }
+        let arc = Arc::new(self.mesh_models(None));
+        *self.mesh_cache.borrow_mut() = Some((self.geometry_epoch, Arc::clone(&arc)));
+        arc
+    }
+
+    /// Solid-mesh set (top-level + block-instanced), optionally dropping those
+    /// whose layer is frozen in a content viewport (`frozen`). `None` reproduces
+    /// the full set.
+    fn mesh_models(&self, frozen: Option<&HashSet<Handle>>) -> Vec<MeshLodSet> {
         // Top-level solids: drop those whose layer is off/frozen or that are
-        // flagged invisible / isolated-hidden, mirroring the 2D wire path.
+        // flagged invisible / isolated-hidden, mirroring the 2D wire path, plus
+        // any whose layer is frozen in the requesting viewport.
         let mut all: Vec<MeshLodSet> = self
             .meshes
             .iter()
-            .filter(|(&h, _)| self.mesh_entity_visible(h))
+            .filter(|(&h, _)| {
+                self.mesh_entity_visible(h)
+                    && self
+                        .document
+                        .get_entity(h)
+                        .map(|e| !self.layer_frozen_in(&e.common().layer, frozen))
+                        .unwrap_or(true)
+            })
             .map(|(_, set)| set.clone())
             .collect();
         // Block-definition solids are instanced per INSERT of the ACTIVE space's
@@ -3493,10 +3646,9 @@ impl Scene {
         all.extend(self.instanced_block_meshes(
             self.block_edit_block
                 .unwrap_or_else(|| self.model_space_block_handle()),
+            frozen,
         ));
-        let arc = Arc::new(all);
-        *self.mesh_cache.borrow_mut() = Some((self.geometry_epoch, Arc::clone(&arc)));
-        arc
+        all
     }
 
     /// True when `layer` is turned off or frozen — entities on it never render.
@@ -3506,6 +3658,108 @@ impl Scene {
             .get(layer)
             .map(|l| l.flags.off || l.flags.frozen)
             .unwrap_or(false)
+    }
+
+    /// True when `layer`'s handle is in a content viewport's per-viewport
+    /// frozen-layer set (VP freeze). Mirrors the wire path's test in
+    /// [`Scene::resident_entity_visible`] so fills / images / meshes hide on the
+    /// same layers wires do. `None` / empty set → never frozen.
+    fn layer_frozen_in(&self, layer: &str, frozen: Option<&HashSet<Handle>>) -> bool {
+        match frozen {
+            Some(fz) if !fz.is_empty() => self
+                .document
+                .layers
+                .get(layer)
+                .map(|l| fz.contains(&l.handle))
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// Order-independent signature of a per-viewport frozen-layer set, so
+    /// viewports that freeze the same layers share one cached filtered fill /
+    /// image / mesh set. Matches the fold the resident wire cache uses.
+    fn frozen_layers_sig(frozen: &HashSet<Handle>) -> u64 {
+        let mut sig: u64 = frozen.len() as u64;
+        for h in frozen.iter() {
+            sig ^= h.value().wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+        sig
+    }
+
+    /// Hatch / 2-D-solid fills for a content viewport, with its frozen layers
+    /// removed. Cached per frozen-set signature (viewports sharing a frozen set
+    /// share the build). No frozen layers → the shared unfiltered set.
+    pub(super) fn hatch_models_for_viewport(&self, frozen: &HashSet<Handle>) -> Arc<Vec<HatchModel>> {
+        if frozen.is_empty() {
+            return self.hatch_models_arc();
+        }
+        let sig = Self::frozen_layers_sig(frozen);
+        let sel = self.selected_set_sig();
+        if let Some((e, s, arc)) = self.frozen_hatch_cache.borrow().get(&sig) {
+            if *e == self.geometry_epoch && *s == sel {
+                return Arc::clone(arc);
+            }
+        }
+        let arc = Arc::new(self.synced_hatch_models(Some(frozen)));
+        self.frozen_hatch_cache
+            .borrow_mut()
+            .insert(sig, (self.geometry_epoch, sel, Arc::clone(&arc)));
+        arc
+    }
+
+    /// Wipeout fills for a content viewport, with its frozen layers removed.
+    pub(super) fn wipeout_models_for_viewport(&self, frozen: &HashSet<Handle>) -> Arc<Vec<HatchModel>> {
+        if frozen.is_empty() {
+            return self.wipeout_models_arc();
+        }
+        let sig = Self::frozen_layers_sig(frozen);
+        if let Some((e, arc)) = self.frozen_wipeout_cache.borrow().get(&sig) {
+            if *e == self.geometry_epoch {
+                return Arc::clone(arc);
+            }
+        }
+        let arc = Arc::new(self.wipeout_models(Some(frozen)));
+        self.frozen_wipeout_cache
+            .borrow_mut()
+            .insert(sig, (self.geometry_epoch, Arc::clone(&arc)));
+        arc
+    }
+
+    /// Image / OLE models for a content viewport, with its frozen layers removed.
+    pub(super) fn images_for_viewport(&self, frozen: &HashSet<Handle>) -> Arc<Vec<ImageModel>> {
+        if frozen.is_empty() {
+            return self.images_arc();
+        }
+        let sig = Self::frozen_layers_sig(frozen);
+        if let Some((e, arc)) = self.frozen_image_cache.borrow().get(&sig) {
+            if *e == self.geometry_epoch {
+                return Arc::clone(arc);
+            }
+        }
+        let arc = Arc::new(self.image_models(Some(frozen)));
+        self.frozen_image_cache
+            .borrow_mut()
+            .insert(sig, (self.geometry_epoch, Arc::clone(&arc)));
+        arc
+    }
+
+    /// Solid meshes for a content viewport, with its frozen layers removed.
+    pub(super) fn meshes_for_viewport(&self, frozen: &HashSet<Handle>) -> Arc<Vec<MeshLodSet>> {
+        if frozen.is_empty() {
+            return self.meshes_arc();
+        }
+        let sig = Self::frozen_layers_sig(frozen);
+        if let Some((e, arc)) = self.frozen_mesh_cache.borrow().get(&sig) {
+            if *e == self.geometry_epoch {
+                return Arc::clone(arc);
+            }
+        }
+        let arc = Arc::new(self.mesh_models(Some(frozen)));
+        self.frozen_mesh_cache
+            .borrow_mut()
+            .insert(sig, (self.geometry_epoch, Arc::clone(&arc)));
+        arc
     }
 
     /// True when `handle`'s entity sits on a locked layer. Locked objects stay
@@ -3545,7 +3799,11 @@ impl Scene {
     /// One transformed mesh per block-definition solid instance reached from an
     /// INSERT owned by `layout_block`. Nested INSERTs accumulate their
     /// transform. Empty when no block solids exist. (#123)
-    fn instanced_block_meshes(&self, layout_block: Handle) -> Vec<MeshLodSet> {
+    fn instanced_block_meshes(
+        &self,
+        layout_block: Handle,
+        frozen: Option<&HashSet<Handle>>,
+    ) -> Vec<MeshLodSet> {
         if self.block_meshes.is_empty() {
             return Vec::new();
         }
@@ -3556,8 +3814,11 @@ impl Scene {
             }
             if let EntityType::Insert(ins) = e {
                 // INSERT on an off/frozen (or invisible) layer hides the whole
-                // instance, block-internal solids included.
-                if !self.mesh_entity_visible(ins.common.handle) {
+                // instance, block-internal solids included — including a layer
+                // frozen only in the requesting content viewport.
+                if !self.mesh_entity_visible(ins.common.handle)
+                    || self.layer_frozen_in(&ins.common.layer, frozen)
+                {
                     continue;
                 }
                 // Colour inheritance sources for block-internal solids (#221).

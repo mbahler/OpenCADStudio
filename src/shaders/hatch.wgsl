@@ -59,7 +59,7 @@ struct HatchInstance {
     family_count:    u32,
     draw_depth:      f32,          // signed (-1,1) draw-order bias; 0 = neutral
     poly_test:       u32,         // 1 = run in_polygon (fallback), 0 = skip
-    _pad1:           u32,
+    grad_kind:       u32,         // shape (0=linear,1=cyl,2=sph,3=hemi,4=curved), bit4=invert
     _pad2:           u32,
 }
 
@@ -190,8 +190,13 @@ fn in_polygon(p: vec2<f32>, offset: u32, count: u32) -> bool {
 // ── Per-family hatch test (same math as hatch.wgsl, dashes from
 // global DashBuffer instead of per-hatch FamilyBatch) ────────────────────
 
+// `ddx_xz`/`ddy_xz` are screen-space derivatives of `xz`, taken once in
+// fs_main: derivative builtins must run in uniform control flow, and the
+// per-family loop's early return makes later iterations non-uniform.
 fn check_family(
     xz:      vec2<f32>,
+    ddx_xz:  vec2<f32>,
+    ddy_xz:  vec2<f32>,
     fam:     LineFamily,
     cos_off: f32,
     sin_off: f32,
@@ -213,13 +218,18 @@ fn check_family(
     let k      = round(perp / perp_step);
     let dperp  = perp - k * perp_step;
     let d      = abs(dperp);
-    let half_px = length(vec2<f32>(dpdx(perp), dpdy(perp))) * 0.5;
+    // perp is linear in xz (offsets are constant), so its derivatives are the
+    // xz derivatives rotated into the family frame.
+    let half_px = length(vec2<f32>(
+        -ddx_xz.x * sin_a + ddx_xz.y * cos_a,
+        -ddy_xz.x * sin_a + ddy_xz.y * cos_a,
+    )) * 0.5;
 
     // World units per screen pixel on each axis — used to light exactly the
     // one pixel that contains a dot's centre (pixel-snapped, so the dot stays
     // a steady single pixel at any pattern angle instead of flickering).
-    let wpx = length(vec2<f32>(dpdx(xz.x), dpdy(xz.x)));
-    let wpy = length(vec2<f32>(dpdx(xz.y), dpdy(xz.y)));
+    let wpx = length(vec2<f32>(ddx_xz.x, ddy_xz.x));
+    let wpy = length(vec2<f32>(ddx_xz.y, ddy_xz.y));
 
     // A fragment within ~1px of a line may be a dot; everything further out is
     // empty fill. (A dot's pixel sits on a line, so its perp offset is < 1px.)
@@ -257,6 +267,10 @@ fn check_family(
 // ── Fragment shader ──────────────────────────────────────────────────────
 
 @fragment fn fs_main(v: VOut) -> @location(0) vec4<f32> {
+    // Taken here, in uniform control flow — see check_family.
+    let ddx_xz = dpdx(v.xz);
+    let ddy_xz = dpdy(v.xz);
+
     let inst = instances[v.instance_index];
 
     // 1. Boundary test — only on the fallback path (poly_test==1). On the
@@ -272,7 +286,29 @@ fn check_family(
         return inst.color;
     } else if inst.mode == 2u {
         let proj = v.xz.x * inst.grad_cos + v.xz.y * inst.grad_sin;
-        let t = clamp((proj - inst.grad_min) / inst.grad_range, 0.0, 1.0);
+        var t = clamp((proj - inst.grad_min) / inst.grad_range, 0.0, 1.0);
+        // Shape profile: cylinder mirrors around the middle, curved eases in.
+        let k = inst.grad_kind & 15u;
+        if k == 1u {
+            t = 1.0 - abs(2.0 * t - 1.0);
+        } else if k == 4u {
+            t = t * t;
+        }
+        if (inst.grad_kind & 16u) != 0u {
+            t = 1.0 - t;
+        }
+        return mix(inst.color, inst.color2, t);
+    } else if inst.mode == 3u {
+        // Radial gradient: centre is (grad_cos, grad_sin), radius is grad_range.
+        let d = length(v.xz - vec2<f32>(inst.grad_cos, inst.grad_sin));
+        var t = clamp(d / inst.grad_range, 0.0, 1.0);
+        // Hemispherical shades faster near the centre (dome profile).
+        if (inst.grad_kind & 15u) == 3u {
+            t = sqrt(t);
+        }
+        if (inst.grad_kind & 16u) != 0u {
+            t = 1.0 - t;
+        }
         return mix(inst.color, inst.color2, t);
     }
 
@@ -296,7 +332,7 @@ fn check_family(
     let cos_off = cos(inst.angle_offset);
     let sin_off = sin(inst.angle_offset);
     for (var i = 0u; i < inst.family_count; i++) {
-        if check_family(v.xz, families[inst.family_offset + i], cos_off, sin_off, inst.scale) {
+        if check_family(v.xz, ddx_xz, ddy_xz, families[inst.family_offset + i], cos_off, sin_off, inst.scale) {
             return inst.color;
         }
     }

@@ -13,6 +13,7 @@ mod entities;
 mod io;
 mod modules;
 mod patreon;
+mod videos;
 mod plugin;
 mod scene;
 mod snap;
@@ -27,6 +28,11 @@ fn main() -> iced::Result {
     #[cfg(target_arch = "wasm32")]
     {
         console_error_panic_hook::set_once();
+        // After the console hook so the chained panic mirror keeps it; also
+        // installs the log-facade listener that surfaces wgpu/naga errors as
+        // a copyable on-page banner (#414 — an empty canvas otherwise gives
+        // reporters nothing to paste).
+        sys::web_diag::init();
         return app::run_web();
     }
     #[cfg(not(target_arch = "wasm32"))]

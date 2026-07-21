@@ -69,6 +69,52 @@ pub struct GridParams {
 /// Returns the smallest power-of-5 multiple of 1.0 that places grid lines at
 /// least `MIN_GRID_PX` pixels apart.  This matches exactly what `draw_grid`
 /// renders, so callers can sync snap spacing to the visible grid.
+/// Clip the screen segment `p0`→`p1` to `bounds` (Liang–Barsky), returning the
+/// visible part, or `None` when it misses entirely.
+///
+/// Use this before stroking anything **dashed**. A dash pattern is measured in
+/// pixels, so the tessellator emits a quad every few pixels and a path's cost
+/// scales with its screen length. Guides are built from projected world points,
+/// which land millions of pixels away for a far or huge entity — millions of
+/// quads, gigabytes, and the process dies (#406). It is tempting to assume the
+/// canvas clips this for us; it does not — clipping happens after tessellation,
+/// so the quads are all built first. Clip up front instead.
+///
+/// The box is padded by one dash period's worth so a guide still visibly runs
+/// off the edge rather than stopping flush against it.
+fn clip_seg(p0: Point, p1: Point, bounds: iced::Rectangle) -> Option<(Point, Point)> {
+    const PAD: f32 = 16.0;
+    let (xmin, ymin) = (-PAD, -PAD);
+    let (xmax, ymax) = (bounds.width + PAD, bounds.height + PAD);
+    let (dx, dy) = (p1.x - p0.x, p1.y - p0.y);
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for (p, q) in [(-dx, p0.x - xmin), (dx, xmax - p0.x), (-dy, p0.y - ymin), (dy, ymax - p0.y)] {
+        if p == 0.0 {
+            // Parallel to this edge: outside it means the whole segment is out.
+            if q < 0.0 {
+                return None;
+            }
+            continue;
+        }
+        let r = q / p;
+        if p < 0.0 {
+            if r > t1 {
+                return None;
+            }
+            t0 = t0.max(r);
+        } else {
+            if r < t0 {
+                return None;
+            }
+            t1 = t1.min(r);
+        }
+    }
+    Some((
+        Point::new(p0.x + t0 * dx, p0.y + t0 * dy),
+        Point::new(p0.x + t1 * dx, p0.y + t1 * dy),
+    ))
+}
+
 pub fn compute_grid_step(view_rot: Mat4, bounds: iced::Rectangle) -> f32 {
     use glam::Vec3;
     // Only the per-unit screen scale is needed; project small eye-relative
@@ -736,7 +782,11 @@ impl canvas::Program<Message> for SelectionCanvas {
                                 sp.x + dx / len * 18.0,
                                 sp.y + dy / len * 18.0,
                             );
-                            frame.stroke(&canvas::Path::line(base, tip), dash);
+                            // `base` is a projected entity endpoint: clip before
+                            // stroking (see `clip_seg`).
+                            if let Some((a, b)) = clip_seg(base, tip, bounds) {
+                                frame.stroke(&canvas::Path::line(a, b), dash);
+                            }
                         }
                     }
                     let r = 5.0_f32;
@@ -847,7 +897,11 @@ impl canvas::Program<Message> for SelectionCanvas {
                             ..canvas::Stroke::default().with_color(marker).with_width(1.0)
                         };
                         let tip = Point::new(sp.x + u.x * 18.0, sp.y + u.y * 18.0);
-                        frame.stroke(&canvas::Path::line(base, tip), dash);
+                        // `base` is a projected entity endpoint: clip before
+                        // stroking (see `clip_seg`).
+                        if let Some((a, b)) = clip_seg(base, tip, bounds) {
+                            frame.stroke(&canvas::Path::line(a, b), dash);
+                        }
                     }
                     // Three dots at the snap point, strung along the extension
                     // direction (horizontal fallback when the base is unknown).
@@ -1021,9 +1075,11 @@ impl canvas::Program<Message> for SelectionCanvas {
             let len = (dx * dx + dy * dy).sqrt();
             if len > 1e-3 {
                 // Extend the alignment path well past both ends along its
-                // direction (the canvas clips it to the viewport) so it reads
-                // as a full construction line through the acquired point, not a
-                // stub between the corner and the cursor. (#219)
+                // direction so it reads as a full construction line through the
+                // acquired point, not a stub between the corner and the cursor
+                // (#219), then clip it to the viewport ourselves: the canvas
+                // clips only after tessellating, which is too late for a dash
+                // pattern (see `clip_seg`).
                 let (ux, uy) = (dx / len, dy / len);
                 const L: f32 = 5000.0;
                 let p0 = Point::new(base.x - ux * L, base.y - uy * L);
@@ -1037,7 +1093,9 @@ impl canvas::Program<Message> for SelectionCanvas {
                         .with_color(track_color)
                         .with_width(1.0)
                 };
-                frame.stroke(&canvas::Path::line(p0, p1), dash);
+                if let Some((a, b)) = clip_seg(p0, p1, bounds) {
+                    frame.stroke(&canvas::Path::line(a, b), dash);
+                }
             }
         }
         // The acquired Parallel-snap reference — a small ∥ glyph on its line so
@@ -1757,10 +1815,29 @@ impl DynInputCanvas {
     /// Guided layout: draw the guide geometry anchored at `base`, then place
     /// each box according to its role.
     fn draw_guided(&self, frame: &mut canvas::Frame, bounds: iced::Rectangle, base: Point) {
-        let cursor = self.cursor_screen;
-        let (vx, vy) = (cursor.x - base.x, cursor.y - base.y);
-        let len = (vx * vx + vy * vy).sqrt().max(1.0);
-        let (dx, dy) = (vx / len, vy / len);
+        let cursor_raw = self.cursor_screen;
+        let (vx, vy) = (cursor_raw.x - base.x, cursor_raw.y - base.y);
+        let raw_len = (vx * vx + vy * vy).sqrt().max(1.0);
+        let (dx, dy) = (vx / raw_len, vy / raw_len);
+        // Clamp the drawn length to just past the viewport.
+        //
+        // These guides are dotted, and a dash pattern is measured in PIXELS: the
+        // tessellator emits a quad every few pixels, so the cost scales with a
+        // guide's screen length, not with what it represents. Typing a large
+        // distance (5000000 into the value box) projects the cursor millions of
+        // pixels away — millions of quads, gigabytes of them — and the process
+        // dies building a frame whose content is off-screen anyway (#406).
+        //
+        // Everything past the viewport edge is invisible, so dropping it costs
+        // nothing: `dx`/`dy` keep the true direction, the angle and every
+        // read-out are computed from `raw_len` above, and only the tail nobody
+        // can see is cut. Clamping `cursor` here bounds every guide below —
+        // they all derive from it.
+        let len = raw_len.min(bounds.width.hypot(bounds.height) * 1.5);
+        let cursor = Point {
+            x: base.x + dx * len,
+            y: base.y + dy * len,
+        };
         // Perpendicular pointing to the lower half so labels sit under the line.
         let (mut nx, mut ny) = (-dy, dx);
         if ny < 0.0 {
@@ -2044,5 +2121,47 @@ impl canvas::Program<Message> for DynInputCanvas {
             (_, Some(base)) => self.draw_guided(&mut frame, bounds, base),
         }
         vec![frame.into_geometry()]
+    }
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::*;
+
+    fn b() -> iced::Rectangle {
+        iced::Rectangle { x: 0.0, y: 0.0, width: 800.0, height: 600.0 }
+    }
+
+    /// The #406 shape: a guide from a point projected millions of pixels away,
+    /// back to the cursor. Must survive, keep its direction, and come back short.
+    #[test]
+    fn clips_a_far_guide_to_a_drawable_length() {
+        let far = Point::new(-5_000_000.0, -1_500_000.0);
+        let cur = Point::new(400.0, 300.0);
+        let (a, c) = clip_seg(far, cur, b()).expect("crosses the viewport");
+        let len = ((c.x - a.x).powi(2) + (c.y - a.y).powi(2)).sqrt();
+        assert!(len < 2000.0, "clipped guide still {len} px long");
+        // Same direction as the original. Compare unit vectors, not a cross
+        // product: at these magnitudes (800 x 1.5e6) an f32 cross carries ~1e2
+        // of rounding, so only a scale-free check means anything.
+        let unit = |dx: f32, dy: f32| {
+            let l = (dx * dx + dy * dy).sqrt();
+            (dx / l, dy / l)
+        };
+        let (ux, uy) = unit(cur.x - far.x, cur.y - far.y);
+        let (vx, vy) = unit(c.x - a.x, c.y - a.y);
+        assert!(
+            (ux - vx).abs() < 1e-3 && (uy - vy).abs() < 1e-3,
+            "clip changed the direction"
+        );
+        // The end inside the viewport is kept as-is.
+        assert!((c.x - cur.x).abs() < 0.5 && (c.y - cur.y).abs() < 0.5);
+    }
+
+    #[test]
+    fn keeps_a_fully_visible_segment_and_drops_a_missing_one() {
+        let (a, c) = clip_seg(Point::new(10.0, 10.0), Point::new(700.0, 500.0), b()).unwrap();
+        assert!((a.x - 10.0).abs() < 0.01 && (c.x - 700.0).abs() < 0.01);
+        assert!(clip_seg(Point::new(-9000.0, -9000.0), Point::new(-8000.0, -8000.0), b()).is_none());
     }
 }

@@ -6,18 +6,19 @@ use crate::entities::common::{
     center_grip, edit_prop as edit, parse_f64, ro_prop as ro, square_grip,
 };
 use crate::entities::traits::TruckConvertible;
-use crate::scene::convert::acad_to_truck::{TruckEntity, TruckObject};
+use crate::scene::convert::acad_to_truck::{extrusion_wall_tris, TruckEntity, TruckObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection};
 use crate::scene::model::wire_model::TangentGeom;
 
 fn to_truck(line: &Line) -> TruckEntity {
+    // LINE endpoints are stored in WCS — unlike the planar OCS entities
+    // (ARC/CIRCLE/LWPOLYLINE/TEXT), the extrusion normal on a LINE only
+    // orients its thickness sweep. Remapping the endpoints through the
+    // arbitrary-axis OCS mirrored every line carried over from a MIRROR
+    // (normal 0,0,-1) to the wrong side of the drawing.
     let normal = (line.normal.x, line.normal.y, line.normal.z);
-    let (sx, sy, sz) = crate::scene::view::transform::ocs_point_to_wcs(
-        (line.start.x, line.start.y, line.start.z),
-        normal,
-    );
-    let (ex, ey, ez) =
-        crate::scene::view::transform::ocs_point_to_wcs((line.end.x, line.end.y, line.end.z), normal);
+    let (sx, sy, sz) = (line.start.x, line.start.y, line.start.z);
+    let (ex, ey, ez) = (line.end.x, line.end.y, line.end.z);
     let p0 = Point3::new(sx, sy, sz);
     let p1 = Point3::new(ex, ey, ez);
     let kv: Vec<[f64; 3]> = vec![[p0.x, p0.y, p0.z], [p1.x, p1.y, p1.z]];
@@ -45,6 +46,7 @@ fn to_truck(line: &Line) -> TruckEntity {
             p1t,
         ];
         return TruckEntity {
+            pick_tris: extrusion_wall_tris(&kv, [t * nx, t * ny, t * nz]),
             object: TruckObject::Lines(pts),
             snap_pts: vec![],
             tangent_geoms: vec![tangent],
@@ -57,6 +59,7 @@ fn to_truck(line: &Line) -> TruckEntity {
     let v1 = builder::vertex(p1);
     let edge = builder::line(&v0, &v1);
     TruckEntity {
+        pick_tris: Vec::new(),
         object: TruckObject::Curve(edge),
         snap_pts: vec![],
         tangent_geoms: vec![tangent],

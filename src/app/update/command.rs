@@ -165,6 +165,12 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                     {
                         entity.apply_grip_menu_value(pending.grip_id, pending.action, v);
                     }
+                    // A typed grip-menu value reshapes dimensions too — drop a
+                    // stale baked *D block (no-op for non-dims). (#398)
+                    crate::modules::draw::modify::explode::invalidate_dim_block(
+                        &mut self.tabs[i].scene.document,
+                        pending.handle,
+                    );
                     self.tabs[i].scene.bump_geometry();
                     self.tabs[i].dirty = true;
                     self.refresh_selected_grips();
@@ -254,6 +260,11 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                     // text falls through to the Enter / coordinate handling
                     // below, so a bare Enter still terminates and typed points
                     // still work when dynamic input is off. See #97.
+                    // Selection keywords (P / L) at a Select objects prompt
+                    // consume the token before any other interpretation (#426).
+                    if let Some(task) = self.try_selection_keyword(&text) {
+                        return task;
+                    }
                     if self.tabs[i]
                         .active_cmd
                         .as_ref()
@@ -555,6 +566,10 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                     self.refresh_properties();
                     let mut sel = self.tabs[i].scene.selection.borrow_mut();
                     sel.box_anchor = None;
+                    // Also drop the world-space anchor, or the next pan/zoom
+                    // re-projects it back into `box_anchor` and the cancelled
+                    // marquee springs back to life (reproject_box_anchor).
+                    sel.box_anchor_world = None;
                     sel.box_current = None;
                     sel.box_crossing = false;
                 }
@@ -702,6 +717,7 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                     self.layer_delete_pending = Some((names, count));
                     self.active_modal = Some(crate::app::ModalKind::LayerDeleteWarning);
                     self.modal_offset = iced::Vector::ZERO;
+                    self.modal_resize = iced::Vector::ZERO;
                 }
                 Task::none()
     }
@@ -712,6 +728,7 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
         let i = self.active_tab;
         self.active_modal = None;
         self.modal_offset = iced::Vector::ZERO;
+        self.modal_resize = iced::Vector::ZERO;
         let Some((names, _)) = self.layer_delete_pending.take() else {
             return Task::none();
         };
@@ -939,6 +956,12 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 if let Some(entity) = self.tabs[i].scene.document.get_entity_mut(popup.handle) {
                     entity.apply_grip_menu(popup.grip_id, item.action);
                 }
+                // Menu actions reshape dimensions too — drop a stale baked *D
+                // block so the edit is visible (no-op for non-dims). (#398)
+                crate::modules::draw::modify::explode::invalidate_dim_block(
+                    &mut self.tabs[i].scene.document,
+                    popup.handle,
+                );
                 self.tabs[i].scene.bump_geometry();
                 self.tabs[i].dirty = true;
                 self.refresh_selected_grips();
@@ -1574,7 +1597,13 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                                             );
                                         }
                                     }
-                                    "linetype_scale" | "transparency" => {
+                                    "linetype_scale" | "transparency" | "thickness" => {
+                                        // Thickness (DXF 39 extrusion) is a General-
+                                        // group common prop, not a geometry-group one:
+                                        // route it to apply_common_prop (which handles
+                                        // it via set_entity_thickness). apply_geom_prop
+                                        // ignores it, so the edit would otherwise be a
+                                        // silent no-op and revert to the old value.
                                         if let Some(entity) =
                                             self.tabs[i].scene.document.get_entity_mut(handle)
                                         {
@@ -1668,6 +1697,7 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 self.attr_editor_handle = Some(handle);
                 self.active_modal = Some(crate::app::ModalKind::AttributeEditor);
                 self.modal_offset = iced::Vector::ZERO;
+                self.modal_resize = iced::Vector::ZERO;
             }
             Err(msg) => self.command_line.push_error(msg),
         }
@@ -1687,6 +1717,7 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
         if self.active_modal == Some(crate::app::ModalKind::AttributeEditor) {
             self.active_modal = None;
             self.modal_offset = iced::Vector::ZERO;
+            self.modal_resize = iced::Vector::ZERO;
         }
         self.attr_editor_handle = None;
         self.attr_editor_block.clear();

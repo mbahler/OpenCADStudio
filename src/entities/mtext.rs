@@ -5,12 +5,30 @@ use crate::entities::common::{
     edit_prop as edit, num_prop as num_row, ro_prop as ro, square_grip, triangle_grip,
 };
 use crate::entities::text_support::{
-    layout_mtext, resolve_text_style, GlyphBox, MTextRenderOpts, MTextVAnchor,
+    layout_mtext, resolve_text_style, GlyphBox, MTextColumns, MTextRenderOpts, MTextVAnchor,
 };
 use crate::entities::traits::{Grippable, PropertyEditable, Transformable, TruckConvertible};
 use crate::scene::convert::acad_to_truck::{TruckEntity, TruckObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 use crate::scene::model::wire_model::SnapHint;
+
+/// The entity's `column_data` as the layout's column description.
+///
+/// `column_type` 0 means the MTEXT never opted into columns, so ignore whatever
+/// stale width/count sit alongside it. Static (1) and dynamic (2) both flow at
+/// the `\N` breaks in the value; the difference between them is how a *full*
+/// column spills into the next, which the layout does not model.
+fn columns_of(t: &MText) -> MTextColumns {
+    let c = &t.column_data;
+    if c.column_type == 0 {
+        return MTextColumns::default();
+    }
+    MTextColumns {
+        count: c.column_count.max(0) as usize,
+        width: c.width as f32,
+        gutter: c.gutter as f32,
+    }
+}
 
 /// Combined attachment point shown as a single justify dropdown value.
 fn attachment_str(a: &AttachmentPoint) -> &'static str {
@@ -53,6 +71,12 @@ fn drawing_dir_str(d: &DrawingDirection) -> &'static str {
 /// Per-visible-character world-space boxes for the MText editor's
 /// click-to-select preview. Uses the exact same layout opts as `to_truck`
 /// so the boxes line up with the rendered glyphs.
+/// The MTEXT string to render: the live re-evaluated value when the entity
+/// hosts a dynamic field, otherwise its stored (cached) value.
+fn display_value(t: &MText, document: &acadrust::CadDocument) -> String {
+    crate::entities::field::resolve(document, t.common.handle).unwrap_or_else(|| t.value.clone())
+}
+
 pub fn glyph_boxes(t: &MText, document: &acadrust::CadDocument) -> Vec<GlyphBox> {
     let resolved_style = resolve_text_style(&t.style, document);
     let attach_h_anchor: f32 = match t.attachment_point {
@@ -80,8 +104,9 @@ pub fn glyph_boxes(t: &MText, document: &acadrust::CadDocument) -> Vec<GlyphBox>
     } else {
         t.rotation as f32
     };
+    let display = display_value(t, document);
     let layout = layout_mtext(&MTextRenderOpts {
-        value: &t.value,
+        value: &display,
         insertion: [
             t.insertion_point.x,
             t.insertion_point.y,
@@ -96,6 +121,7 @@ pub fn glyph_boxes(t: &MText, document: &acadrust::CadDocument) -> Vec<GlyphBox>
         line_spacing_factor: t.line_spacing_factor as f32,
         vertical_text: matches!(t.drawing_direction, DrawingDirection::TopToBottom),
         want_glyph_boxes: true,
+        columns: columns_of(t),
     });
     layout.glyph_boxes
 }
@@ -127,8 +153,9 @@ fn to_truck(t: &MText, document: &acadrust::CadDocument) -> TruckEntity {
     } else {
         t.rotation as f32
     };
+    let display = display_value(t, document);
     let layout = layout_mtext(&MTextRenderOpts {
-        value: &t.value,
+        value: &display,
         insertion: [
             t.insertion_point.x,
             t.insertion_point.y,
@@ -143,6 +170,7 @@ fn to_truck(t: &MText, document: &acadrust::CadDocument) -> TruckEntity {
         line_spacing_factor: t.line_spacing_factor as f32,
         vertical_text: matches!(t.drawing_direction, DrawingDirection::TopToBottom),
         want_glyph_boxes: false,
+        columns: columns_of(t),
     });
     let insertion = glam::DVec3::new(
         t.insertion_point.x,
@@ -150,6 +178,7 @@ fn to_truck(t: &MText, document: &acadrust::CadDocument) -> TruckEntity {
         t.insertion_point.z,
     );
     TruckEntity {
+        pick_tris: Vec::new(),
         object: TruckObject::Text(layout.strokes),
         snap_pts: vec![(insertion, SnapHint::Insertion)],
         tangent_geoms: vec![],

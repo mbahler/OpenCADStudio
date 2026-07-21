@@ -313,6 +313,14 @@ impl Scene {
                 // re-expressed in paper coords — drop it (no tangent snap on
                 // projected viewport content) rather than snap to UTM.
                 out.tangent_geoms = Vec::new();
+                // Same for thickness walls: `points` above were projected and
+                // clipped into paper coords, and the clone's wall triangles are
+                // still model-space. Left in place they would hit-test at a
+                // model-scale offset — a stray catch somewhere out on the sheet.
+                // Drop them: an extruded entity inside a floating viewport stays
+                // selectable by its edges, which do get projected.
+                out.pick_tris = Vec::new();
+                out.pick_tris_low = Vec::new();
                 out.aabb = if pmnx.is_finite() {
                     [pmnx, pmny, pmxx, pmxy]
                 } else {
@@ -326,7 +334,6 @@ impl Scene {
                 // to keep dimensional consistency in the GPU shader.
                 out.pattern_length = wire.pattern_length * scale;
                 out.pattern = wire.pattern.map(|v| v * scale);
-                out.vp_scissor = Some([vp_x0, vp_y0, vp_x1, vp_y1]);
                 projected.push(out);
             }
 
@@ -338,6 +345,133 @@ impl Scene {
         }
 
         result
+    }
+
+    /// A content viewport's clip boundary, projected into that viewport's
+    /// render-target normalized device coords. Every content viewport goes
+    /// through the same stencil path: a rectangular viewport contributes its
+    /// own four corners (a full-target mask, since the render rectangle already
+    /// clips the edges), a viewport with a `clip_boundary_handle` contributes
+    /// that entity's tessellated outline. Returns empty only when the viewport
+    /// is degenerate.
+    ///
+    /// `uo/vo/us/vs` are the visible-sub-rect crop the content camera applies
+    /// (see `crop_view_proj`); the same crop is applied here so the boundary
+    /// lines up with the content even when the viewport hangs off-canvas.
+    pub(super) fn viewport_clip_boundary_ndc(
+        &self,
+        vp_handle: Handle,
+        uo: f32,
+        vo: f32,
+        us: f32,
+        vs: f32,
+    ) -> Vec<[f32; 2]> {
+        use acadrust::entities::Viewport;
+        let Some(EntityType::Viewport(vp)) = self.document.get_entity(vp_handle) else {
+            return vec![];
+        };
+        let vp: &Viewport = vp;
+        let pcx = vp.center.x as f32;
+        let pcy = vp.center.y as f32;
+        let z = vp.center.z as f32;
+        let hw = (vp.width / 2.0) as f32;
+        let hh = (vp.height / 2.0) as f32;
+        if hw.abs() < 1e-6 || hh.abs() < 1e-6 {
+            return vec![];
+        }
+        let poly = if vp.clip_boundary_handle.is_null() {
+            // Rectangular viewport → its own four corners (paper coords). These
+            // map to full-rect NDC [-1, 1], a no-op mask over a render target
+            // that already clips to the rectangle, but it keeps rect and
+            // non-rect viewports on one uniform stencil path.
+            vec![
+                [pcx - hw, pcy - hh, z],
+                [pcx + hw, pcy - hh, z],
+                [pcx + hw, pcy + hh, z],
+                [pcx - hw, pcy + hh, z],
+            ]
+        } else {
+            self.clip_boundary_polygon(vp.clip_boundary_handle, z)
+        };
+        if poly.len() < 3 {
+            return vec![];
+        }
+        // Paper point → full-rectangle NDC ([-1, 1] across the viewport rect,
+        // Y up, matching the content camera + `viewport_screen_rect`), then the
+        // same crop the content camera uses to map its visible sub-rect back to
+        // NDC [-1, 1].
+        let us = us.max(1e-6);
+        let vs = vs.max(1e-6);
+        let sx = 1.0 / us;
+        let sy = 1.0 / vs;
+        let tx = (1.0 - 2.0 * uo - us) / us;
+        let ty = -(1.0 - 2.0 * vo - vs) / vs;
+        poly.iter()
+            .map(|p| {
+                let nx = (p[0] - pcx) / hw;
+                let ny = (p[1] - pcy) / hh;
+                [sx * nx + tx, sy * ny + ty]
+            })
+            .collect()
+    }
+
+    /// Tessellated outline of a non-rectangular viewport / XCLIP clip-boundary
+    /// entity, in paper coordinates, by reusing the entity's own `to_truck`
+    /// tessellation (Lines). NaN segment breaks are dropped so the result is a
+    /// single ordered ring suitable for a stencil triangle-fan.
+    pub(super) fn clip_boundary_polygon(&self, handle: Handle, z: f32) -> Vec<[f32; 3]> {
+        use std::f64::consts::TAU;
+        let Some(entity) = self
+            .document
+            .entities()
+            .find(|e| e.common().handle == handle)
+        else {
+            return vec![];
+        };
+        // Circles and ellipses tessellate directly — their `to_truck` returns a
+        // parametric TruckObject (not `Lines`), so extracting a polygon there
+        // would come back empty. Everything else (splines, polylines, …) reuses
+        // the entity's own `Lines` tessellation.
+        const N: usize = 64;
+        match entity {
+            EntityType::Circle(c) => (0..N)
+                .map(|i| {
+                    let a = i as f64 * TAU / N as f64;
+                    [
+                        (c.center.x + a.cos() * c.radius) as f32,
+                        (c.center.y + a.sin() * c.radius) as f32,
+                        z,
+                    ]
+                })
+                .collect(),
+            EntityType::Ellipse(el) => {
+                // major_axis = center → major endpoint; minor = perp(major) × ratio.
+                let (mx, my) = (el.major_axis.x, el.major_axis.y);
+                let r = el.minor_axis_ratio;
+                (0..N)
+                    .map(|i| {
+                        let t = i as f64 * TAU / N as f64;
+                        let px = mx * t.cos() - my * r * t.sin();
+                        let py = my * t.cos() + mx * r * t.sin();
+                        [(el.center.x + px) as f32, (el.center.y + py) as f32, z]
+                    })
+                    .collect()
+            }
+            _ => {
+                use crate::entities::traits::EntityTypeOps;
+                let Some(te) = entity.to_truck_entity(&self.document) else {
+                    return vec![];
+                };
+                if let crate::scene::convert::acad_to_truck::TruckObject::Lines(pts) = te.object {
+                    pts.into_iter()
+                        .filter(|p| p[0].is_finite() && p[1].is_finite())
+                        .map(|p| [p[0] as f32, p[1] as f32, z])
+                        .collect()
+                } else {
+                    vec![]
+                }
+            }
+        }
     }
 }
 

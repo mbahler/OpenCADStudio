@@ -85,7 +85,8 @@ pub struct HatchInstance {
     /// an instance whose boundary failed to tessellate); 0 = the rasterized
     /// triangles already bound the fill, skip the test.
     pub poly_test: u32,             // 116
-    pub _pad1: u32,                 // 120
+    /// Gradient shape (`GradientKind::shader_kind`), bit 4 = inverted stops.
+    pub grad_kind: u32,             // 120
     pub _pad2: u32,                 // 124
 }
 
@@ -223,15 +224,25 @@ impl HatchGpu {
             let family_offset = families.len() as u32;
             let mut family_count = 0u32;
 
+            let mut grad_kind = 0u32;
             let (mode, color2, grad_cos, grad_sin, grad_min, grad_range) = match &h.pattern {
                 HatchPattern::Solid => (1u32, [0.0; 4], 0.0, 0.0, 0.0, 1.0),
-                HatchPattern::Gradient { angle_deg, color2 } => {
-                    let r = angle_deg.to_radians();
-                    // Gradient projection range (proj_min / proj_range) —
-                    // computed at upload time, identical to per-hatch path.
-                    let (gmin, gmax) = boundary_projection_range(&h.boundary, r);
-                    let grange = (gmax - gmin).max(1.0);
-                    (2u32, *color2, r.cos(), r.sin(), gmin, grange)
+                HatchPattern::Gradient { angle_deg, color2, kind, invert } => {
+                    grad_kind = kind.shader_kind() | if *invert { 16 } else { 0 };
+                    if kind.radial() {
+                        // Radial fill: the boundary is stored relative to its
+                        // centre (`world_origin`), so the centre is the local
+                        // origin; radius = the farthest boundary vertex. mode 3.
+                        let radius = radial_radius(&h.boundary);
+                        (3u32, *color2, 0.0, 0.0, 0.0, radius)
+                    } else {
+                        let r = angle_deg.to_radians();
+                        // Gradient projection range (proj_min / proj_range) —
+                        // computed at upload time, identical to per-hatch path.
+                        let (gmin, gmax) = boundary_projection_range(&h.boundary, r);
+                        let grange = (gmax - gmin).max(1.0);
+                        (2u32, *color2, r.cos(), r.sin(), gmin, grange)
+                    }
                 }
                 HatchPattern::Pattern(fams) => {
                     for fam in fams {
@@ -311,7 +322,7 @@ impl HatchGpu {
                     family_count,
                     draw_depth: h.draw_depth,
                     poly_test: 1,
-                    _pad1: 0,
+                    grad_kind,
                     _pad2: 0,
                 });
                 continue;
@@ -359,7 +370,7 @@ impl HatchGpu {
                 // boundary complexity, so a hatch-dense drawing can't overflow
                 // the device buffer limit. Each instance draws its AABB quad.
                 poly_test: 1,
-                _pad1: 0,
+                grad_kind,
                 _pad2: 0,
             });
         }
@@ -557,6 +568,18 @@ fn boundary_projection_range(boundary: &[[f32; 2]], theta: f32) -> (f32, f32) {
         return (0.0, 1.0);
     }
     (lo, hi)
+}
+
+/// Radius of a radial gradient — the distance from the boundary centre (the
+/// local origin, since vertices are stored relative to it) to the farthest
+/// vertex, so `t = 1` (the end colour) reaches the corners.
+fn radial_radius(boundary: &[[f32; 2]]) -> f32 {
+    boundary
+        .iter()
+        .filter(|p| p[0].is_finite() && p[1].is_finite())
+        .map(|p| (p[0] * p[0] + p[1] * p[1]).sqrt())
+        .fold(0.0_f32, f32::max)
+        .max(1.0)
 }
 
 // PatFamily is re-exported by hatch_model so we don't need to import

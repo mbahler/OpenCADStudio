@@ -139,6 +139,51 @@ impl OpenCADStudio {
                         }
                     }
 
+                    // Uniform-scale checkbox for block references (#427):
+                    // while the three scale factors are equal (and the user
+                    // hasn't opted into per-axis editing) the panel shows one
+                    // Scale row plus a checked "Uniform scale" box; unchecking
+                    // expands the familiar Scale X/Y/Z rows.
+                    if let acadrust::EntityType::Insert(ins) = entity {
+                        let eq = (ins.x_scale() - ins.y_scale()).abs() < 1e-12
+                            && (ins.x_scale() - ins.z_scale()).abs() < 1e-12;
+                        let uniform =
+                            eq && !self.props_asym_scale.contains(&handle.value());
+                        for section in sections.iter_mut() {
+                            let Some(xi) =
+                                section.props.iter().position(|p| p.field == "x_scale")
+                            else {
+                                continue;
+                            };
+                            let toggle = crate::scene::model::object::Property {
+                                label: "Uniform scale".into(),
+                                field: "ins_uniform",
+                                value: crate::scene::model::object::PropValue::BoolToggle {
+                                    field: "ins_uniform",
+                                    value: uniform,
+                                },
+                            };
+                            if uniform {
+                                section
+                                    .props
+                                    .retain(|p| p.field != "y_scale" && p.field != "z_scale");
+                                let xi = section
+                                    .props
+                                    .iter()
+                                    .position(|p| p.field == "x_scale")
+                                    .unwrap_or(xi.min(section.props.len()));
+                                section.props[xi] = crate::entities::common::edit_prop(
+                                    "Scale",
+                                    "u_scale",
+                                    ins.x_scale(),
+                                );
+                                section.props.insert(xi, toggle);
+                            } else {
+                                section.props.insert(xi, toggle);
+                            }
+                        }
+                    }
+
                     // In named plot-style mode (PSTYLEMODE=1) the Plot style row
                     // picks a named style from the drawing's plot style table. In
                     // the color-dependent mode it stays read-only (the object's
@@ -1042,6 +1087,10 @@ impl OpenCADStudio {
     pub(super) fn invalidate_property_targets(&mut self, i: usize, handles: &[Handle]) {
         for &handle in handles {
             self.tabs[i].scene.mark_entity_dirty(handle);
+            // Hatch / SOLID fills render from prebuilt cached models; rebuild
+            // them or pattern edits (scale, background, …) stay invisible
+            // (#415).
+            self.tabs[i].scene.refresh_fill_model(handle);
         }
         // Solid (ACIS) meshes bake their colour into the mesh, so a colour /
         // layer change needs an explicit recolour — re-tessellating wires

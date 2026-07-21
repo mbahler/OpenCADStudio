@@ -28,8 +28,41 @@ pub fn prop_current_vertex() -> usize {
     PROP_CURRENT_VERTEX.with(|c| c.get())
 }
 
+/// Extrusion normal of a planar (OCS-stored) entity when it isn't the
+/// default +Z. `None` = the entity stores WCS coordinates (LINE, POINT,
+/// ELLIPSE, MTEXT, ...) or maps its own OCS internally (INSERT) — grips pass
+/// through untouched. Per-entity grip code works in raw field space, so the
+/// dispatch layer converts: display grips OCS→WCS, incoming edits WCS→OCS.
+fn planar_ocs_normal(entity: &EntityType) -> Option<(f64, f64, f64)> {
+    let n = match entity {
+        EntityType::Arc(e) => e.normal,
+        EntityType::Circle(e) => e.normal,
+        EntityType::LwPolyline(e) => e.normal,
+        EntityType::Polyline2D(e) => e.normal,
+        EntityType::Solid(e) => e.normal,
+        EntityType::Text(e) => e.normal,
+        EntityType::AttributeDefinition(e) => e.normal,
+        EntityType::Hatch(e) => e.normal,
+        EntityType::Shape(e) => e.normal,
+        _ => return None,
+    };
+    if n.x == 0.0 && n.y == 0.0 && n.z == 1.0 {
+        None
+    } else {
+        Some((n.x, n.y, n.z))
+    }
+}
+
 pub fn grips(entity: &EntityType) -> Vec<GripDef> {
-    EntityTypeOps::grips(entity)
+    let mut grips = EntityTypeOps::grips(entity);
+    if let Some(n) = planar_ocs_normal(entity) {
+        for g in &mut grips {
+            let (x, y, z) =
+                super::transform::ocs_point_to_wcs((g.world.x, g.world.y, g.world.z), n);
+            g.world = glam::DVec3::new(x, y, z);
+        }
+    }
+    grips
 }
 
 pub fn properties_sectioned(
@@ -193,6 +226,21 @@ pub fn apply_geom_prop(entity: &mut EntityType, field: &str, value: &str) {
 }
 
 pub fn apply_grip(entity: &mut EntityType, grip_id: usize, apply: crate::scene::model::object::GripApply) {
+    use crate::scene::model::object::GripApply;
+    // Grip drags arrive in world space; per-entity apply code writes raw
+    // fields, which for planar entities live in OCS — convert first (the
+    // pure-rotation map handles points and deltas alike).
+    let apply = match (planar_ocs_normal(entity), apply) {
+        (Some(n), GripApply::Absolute(p)) => {
+            let (x, y, z) = super::transform::wcs_point_to_ocs((p.x, p.y, p.z), n);
+            GripApply::Absolute(glam::DVec3::new(x, y, z))
+        }
+        (Some(n), GripApply::Translate(d)) => {
+            let (x, y, z) = super::transform::wcs_point_to_ocs((d.x, d.y, d.z), n);
+            GripApply::Translate(glam::DVec3::new(x, y, z))
+        }
+        (None, a) => a,
+    };
     EntityTypeOps::apply_grip(entity, grip_id, apply);
 }
 

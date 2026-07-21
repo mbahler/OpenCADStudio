@@ -42,23 +42,25 @@ struct Uniforms {
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
+// Scalars are packed into vec4 attributes: WebGL2 / WebGPU cap vertex
+// attributes at 16, and the unpacked layout had grown to 17 — the wire
+// pipeline failed to build and the web viewport drew no lines at all (#414).
 struct InstanceIn {
     @location(0) pos_a:          vec3<f32>,
     @location(1) pos_b:          vec3<f32>,
     @location(2) color:          vec4<f32>,
-    @location(3) distance_a:     f32,
-    @location(4) distance_b:     f32,
-    @location(5) half_width:     f32,
-    @location(6) pattern_length: f32,
-    @location(7) pat0:           vec4<f32>,
-    @location(8) pat1:           vec4<f32>,
-    @location(9) draw_depth:     f32,
+    // distance_a, distance_b, half_width, pattern_length
+    @location(3) dists:          vec4<f32>,
+    @location(4) pat0:           vec4<f32>,
+    @location(5) pat1:           vec4<f32>,
+    // draw_depth, align_end ("A"-type end-dash length), align_total (total
+    // wire length), world_half_width (wide-polyline band; 0 = normal wire)
+    @location(6) misc:           vec4<f32>,
     // Double-single low residuals of the endpoints.
-    @location(10) pos_a_low:     vec3<f32>,
-    @location(11) pos_b_low:     vec3<f32>,
-    // "A"-type endpoint alignment: end-dash length + total wire length.
-    @location(12) align_end:     f32,
-    @location(13) align_total:   f32,
+    @location(7) pos_a_low:      vec3<f32>,
+    @location(8) pos_b_low:      vec3<f32>,
+    // Per-endpoint world half-width for a tapered band (0 = use the constant).
+    @location(9) taper:          vec2<f32>,
 }
 
 // Draw-order depth bias: shifts clip-space z so 2D entities of different
@@ -82,6 +84,21 @@ struct VertexOut {
     @location(5) @interpolate(flat) min_elem:       f32,
     @location(6) @interpolate(flat) align_end:      f32,
     @location(7) @interpolate(flat) align_total:    f32,
+    // Round-cap support: (along, across) of this fragment in screen pixels,
+    // where `along` runs -hw_a … seg_len+hw_b over the extended quad and
+    // `across` is the signed distance from the centreline.
+    @location(8)                    cap:            vec2<f32>,
+    // (segment pixel length, end half-width at A, end half-width at B).
+    @location(9) @interpolate(flat) cap_ends:       vec3<f32>,
+}
+
+// Half-width of one segment end: a tapered band's own end width wins, then a
+// constant world-unit band, then the screen-pixel lineweight (LWDISPLAY off
+// collapses to a hairline).
+fn resolve_hw(taper: f32, world_hw: f32, px_hw: f32) -> f32 {
+    if taper > 0.0 { return max(taper / u.world_per_pixel, 0.5); }
+    if world_hw > 0.0 { return max(world_hw / u.world_per_pixel, 0.5); }
+    return select(0.5, px_hw, u.lwdisplay_enable > 0.5);
 }
 
 @vertex fn vs_main(@builtin(vertex_index) vid: u32, in: InstanceIn) -> VertexOut {
@@ -112,34 +129,44 @@ struct VertexOut {
     let screen_a = ndc_a * u.viewport_size * 0.5;
     let screen_b = ndc_b * u.viewport_size * 0.5;
 
-    // Screen-space perpendicular to segment direction.
+    // Screen-space direction / perpendicular of the segment.
     let seg = screen_b - screen_a;
     let seg_len = length(seg);
-    var perp: vec2<f32>;
+    var dir: vec2<f32>;
     if seg_len > 1e-4 {
-        let dir = seg / seg_len;
-        perp = vec2<f32>(-dir.y, dir.x);
+        dir = seg / seg_len;
     } else {
-        perp = vec2<f32>(0.0, 1.0);
+        dir = vec2<f32>(1.0, 0.0);
     }
-
-    // Convert perpendicular from screen pixels to NDC offset.
-    let perp_ndc = perp / (u.viewport_size * 0.5);
+    let perp = vec2<f32>(-dir.y, dir.x);
 
     // Select the clip-space position for this vertex's endpoint.
     let clip_pos = mix(clip_a, clip_b, which_end);
 
-    // LWDISPLAY off → collapse to a 1-pixel-wide line (half_width = 0.5).
-    let hw = select(0.5, in.half_width, u.lwdisplay_enable > 0.5);
+    // A wide polyline carries its band width in world units: expand the quad by
+    // `world_half_width / world_per_pixel` (pixels) so the band tracks zoom. A
+    // normal wire (world_half_width == 0) uses the screen-pixel half-width,
+    // honouring the LWDISPLAY toggle (off → collapse to a 1-pixel line).
+    // A tapered band interpolates a per-endpoint world half-width across the
+    // segment; a constant band uses `world_half_width`. Both clamp to a
+    // half-pixel so a zoomed-out band stays a hairline instead of vanishing.
+    let hw_a = resolve_hw(in.taper.x, in.misc.w, in.dists.z);
+    let hw_b = resolve_hw(in.taper.y, in.misc.w, in.dists.z);
+    let hw = mix(hw_a, hw_b, which_end);
 
-    // Offset in clip space (multiply by w to un-apply perspective division).
-    let ndc_offset = perp_ndc * hw * side;
+    // Extend the quad longitudinally by the end half-width and let the
+    // fragment stage round the overhang off: adjoining segments then meet in
+    // overlapping round joints, closing the wedge gaps a perpendicular-only
+    // expansion leaves on the outside of corners and along tessellated arcs.
+    let ext = which_end * 2.0 - 1.0; // -1 at the A end, +1 at the B end
+    let offset_px = perp * hw * side + dir * hw * ext;
+    let ndc_offset = offset_px / (u.viewport_size * 0.5);
     let final_clip = clip_pos + vec4<f32>(ndc_offset * clip_pos.w, 0.0, 0.0);
 
     // Smallest non-zero dash / gap element, in world units. Used by
     // the fragment stage to decide when the pattern's finest feature
     // would render below one pixel and should collapse to a solid line.
-    var min_elem: f32 = in.pattern_length;
+    var min_elem: f32 = in.dists.w;
     let elems = array<f32, 8>(
         in.pat0.x, in.pat0.y, in.pat0.z, in.pat0.w,
         in.pat1.x, in.pat1.y, in.pat1.z, in.pat1.w,
@@ -151,15 +178,20 @@ struct VertexOut {
 
     var out: VertexOut;
     out.clip_pos       = final_clip;
-    out.clip_pos.z     = out.clip_pos.z - in.draw_depth * DRAW_ORDER_BIAS * out.clip_pos.w;
+    out.clip_pos.z     = out.clip_pos.z - in.misc.x * DRAW_ORDER_BIAS * out.clip_pos.w;
     out.color          = in.color;
-    out.distance       = mix(in.distance_a, in.distance_b, which_end);
-    out.pattern_length = in.pattern_length;
+    // Dash arc-length, extrapolated over the cap overhang so the pattern
+    // stays continuous through a joint.
+    out.distance       = mix(in.dists.x, in.dists.y, which_end)
+        + ext * hw * u.world_per_pixel;
+    out.cap            = vec2<f32>(which_end * seg_len + ext * hw, hw * side);
+    out.cap_ends       = vec3<f32>(seg_len, hw_a, hw_b);
+    out.pattern_length = in.dists.w;
     out.pat0           = in.pat0;
     out.pat1           = in.pat1;
     out.min_elem       = min_elem;
-    out.align_end      = in.align_end;
-    out.align_total    = in.align_total;
+    out.align_end      = in.misc.y;
+    out.align_total    = in.misc.z;
     return out;
 }
 
@@ -214,7 +246,22 @@ fn in_dash(dist: f32, pat_len: f32, p0: vec4<f32>, p1: vec4<f32>, align_end: f32
     return false;
 }
 
+// Round the cap overhang off: outside the segment span only pixels within
+// the end's half-width radius survive, giving round joints and end caps.
+fn cap_clipped(cap: vec2<f32>, cap_ends: vec3<f32>) -> bool {
+    if cap.x < 0.0 {
+        return length(cap) > cap_ends.y;
+    }
+    if cap.x > cap_ends.x {
+        return length(vec2<f32>(cap.x - cap_ends.x, cap.y)) > cap_ends.z;
+    }
+    return false;
+}
+
 @fragment fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    if cap_clipped(in.cap, in.cap_ends) {
+        discard;
+    }
     if in.pattern_length > 0.0 {
         // LOD: once the pattern's smallest feature drops below ~1 px
         // on screen, dash gaps alias / shimmer (or vanish completely)
@@ -236,6 +283,9 @@ fn in_dash(dist: f32, pat_len: f32, p0: vec4<f32>, p1: vec4<f32>, align_end: f32
 // mesh reads as a shaded surface framed by black edges. Keeps the dash/LOD
 // logic identical to `fs_main`; only the RGB is forced to black.
 @fragment fn fs_black(in: VertexOut) -> @location(0) vec4<f32> {
+    if cap_clipped(in.cap, in.cap_ends) {
+        discard;
+    }
     if in.pattern_length > 0.0 {
         if in.min_elem >= u.world_per_pixel {
             if !in_dash(in.distance, in.pattern_length, in.pat0, in.pat1, in.align_end, in.align_total) {

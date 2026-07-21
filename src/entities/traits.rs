@@ -142,6 +142,9 @@ pub fn entity_type_name(et: &EntityType) -> &'static str {
         EntityType::Seqend(_) => "Seqend",
         EntityType::Ole2Frame(_) => "Ole2Frame",
         EntityType::PolygonMesh(_) => "PolygonMesh",
+        EntityType::Light(_) => "Light",
+        EntityType::SectionSymbol(_) => "SectionSymbol",
+        EntityType::ViewBorder(_) => "ViewBorder",
         EntityType::Unknown(_) => "Unknown",
     }
 }
@@ -272,7 +275,7 @@ impl EntityTypeOps for EntityType {
                 Wipeout, AttributeDefinition, AttributeEntity, MLine,
                 Tolerance, Solid, Face3D, PolygonMesh, PolyfaceMesh, Mesh,
                 Table, Text, MText, Leader, MultiLeader, Underlay, Shape,
-                Ole2Frame, Helix,
+                Ole2Frame, Helix, Light,
             ],
             _ => None,
         )
@@ -288,7 +291,7 @@ impl EntityTypeOps for EntityType {
                 Solid, Solid3D, Region, Body, Face3D, PolygonMesh,
                 PolyfaceMesh, Mesh, Table, Point, Spline, Text, MText,
                 Viewport, Insert, Leader, MultiLeader, Dimension, Hatch,
-                Underlay, Shape, Ole2Frame, Helix,
+                Underlay, Shape, Ole2Frame, Helix, Light,
             ],
             _ => vec![],
         )
@@ -304,7 +307,7 @@ impl EntityTypeOps for EntityType {
                 Solid, Solid3D, Region, Body, Face3D, PolygonMesh,
                 PolyfaceMesh, Mesh, Table, Hatch, Point, Spline, Text, MText,
                 Viewport, Insert, Dimension, Leader, MultiLeader, Underlay,
-                Shape, Ole2Frame, Helix,
+                Shape, Ole2Frame, Helix, Light,
             ],
             _ => vec![],
         )
@@ -320,7 +323,7 @@ impl EntityTypeOps for EntityType {
                 Solid, Solid3D, Region, Body, Face3D, PolygonMesh,
                 PolyfaceMesh, Mesh, Table, Hatch, Point, Spline, Text, MText,
                 Viewport, Insert, Dimension, Leader, MultiLeader, Underlay,
-                Shape, Ole2Frame, Helix,
+                Shape, Ole2Frame, Helix, Light,
             ],
             _ => {},
         )
@@ -336,7 +339,7 @@ impl EntityTypeOps for EntityType {
                 Solid, Solid3D, Region, Body, Face3D, PolygonMesh,
                 PolyfaceMesh, Mesh, Table, Point, Spline, Text, MText,
                 Viewport, Insert, Leader, MultiLeader, Dimension, Hatch,
-                Underlay, Shape, Ole2Frame, Helix,
+                Underlay, Shape, Ole2Frame, Helix, Light,
             ],
             _ => {},
         )
@@ -425,7 +428,7 @@ impl EntityTypeOps for EntityType {
                 Tolerance, Solid, Face3D, PolygonMesh, PolyfaceMesh, Mesh,
                 Table, MText, Point, Spline, Text, Viewport, Dimension,
                 Leader, MultiLeader, Underlay, Shape, Ole2Frame,
-                Solid3D, Region, Body, Surface, Helix,
+                Solid3D, Region, Body, Surface, Helix, Light,
             ],
             _ => {},
         )

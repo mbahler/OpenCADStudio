@@ -10,6 +10,7 @@
 // with arcball orbit at all angles.
 
 use bytemuck::{Pod, Zeroable};
+use glam::camera::rh::proj::directx::orthographic;
 use glam::{Mat4, Vec3, Vec4};
 use iced::wgpu;
 use iced::{Rectangle, Size};
@@ -208,7 +209,7 @@ impl CubeUniforms {
         let inset = cube_half * NAV_INSET_F;
         let cx = hw - inset - VIEWCUBE_PAD;
         let cy = hh - inset - VIEWCUBE_PAD;
-        let view_proj = Mat4::orthographic_rh(-hw, hw, -hh, hh, -2000.0, 2000.0)
+        let view_proj = orthographic(-hw, hw, -hh, hh, -2000.0, 2000.0)
             * Mat4::from_translation(Vec3::new(cx, cy, 0.0))
             * Mat4::from_scale(Vec3::splat(cube_px as f32 * VIEWCUBE_SCALE));
         Self {
@@ -580,7 +581,7 @@ impl ViewCubeText {
         let cube_half = cube_px as f32 * VIEWCUBE_SCALE;
         let inset = cube_half * NAV_INSET_F;
         let (hw, hh) = (vw * 0.5, vh * 0.5);
-        let view_proj = Mat4::orthographic_rh(-hw, hw, -hh, hh, -2000.0, 2000.0)
+        let view_proj = orthographic(-hw, hw, -hh, hh, -2000.0, 2000.0)
             * Mat4::from_translation(Vec3::new(
                 hw - inset - VIEWCUBE_PAD,
                 hh - inset - VIEWCUBE_PAD,
@@ -1186,7 +1187,7 @@ impl ViewCubePipeline {
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
+                format: wgpu::TextureFormat::Depth24PlusStencil8,
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
@@ -1318,7 +1319,7 @@ fn create_depth_texture(device: &wgpu::Device, size: Size<u32>) -> wgpu::Texture
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Depth32Float,
+        format: wgpu::TextureFormat::Depth24PlusStencil8,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     })
@@ -1349,7 +1350,7 @@ pub fn hit_test(
     }
 
     let (hw, hh) = (vp_w * 0.5, vp_h * 0.5);
-    let vp = Mat4::orthographic_rh(-hw, hw, -hh, hh, -2000.0, 2000.0)
+    let vp = orthographic(-hw, hw, -hh, hh, -2000.0, 2000.0)
         * Mat4::from_translation(Vec3::new(
             hw - inset - VIEWCUBE_PAD,
             hh - inset - VIEWCUBE_PAD,
@@ -1431,7 +1432,7 @@ pub fn hit_test_cardinal(
     }
 
     let (hw, hh) = (vp_w * 0.5, vp_h * 0.5);
-    let vp = Mat4::orthographic_rh(-hw, hw, -hh, hh, -2000.0, 2000.0)
+    let vp = orthographic(-hw, hw, -hh, hh, -2000.0, 2000.0)
         * Mat4::from_translation(Vec3::new(
             hw - inset - VIEWCUBE_PAD,
             hh - inset - VIEWCUBE_PAD,

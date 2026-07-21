@@ -119,6 +119,13 @@ pub fn format_angle(value_rad: f64) -> String {
     }
 }
 
+/// Two interior triangles covering a quad (flat list, 6 vertices) — the
+/// click-anywhere pick surface for frame-like entities (image, OLE frame,
+/// underlay, wipeout). Corners in ring order.
+pub fn quad_pick_tris(c: &[[f64; 3]; 4]) -> Vec<[f64; 3]> {
+    vec![c[0], c[1], c[2], c[0], c[2], c[3]]
+}
+
 pub fn square_grip(id: usize, world: glam::DVec3) -> GripDef {
     GripDef {
         id,
@@ -311,6 +318,128 @@ impl BulgeArc {
     }
 }
 
+/// Triangulate the solid bands a `wide_fills` returns into the flat WCS f64
+/// triangle list `TruckEntity::pick_tris` carries, so a wide polyline is
+/// selectable across the band it draws and not just along its centreline.
+///
+/// `origin` and `fills` are that function's own pair: 2-D offsets from the
+/// first vertex, which is the exact frame the band's `HatchModel` renders in
+/// (`world_origin` + boundary, no elevation). Building the pick geometry from
+/// the same numbers keeps hit-testing on whatever the fill actually drew.
+///
+/// An arc band is an annular sector — concave on its inner edge — so this ear
+/// clips rather than fans.
+pub(crate) fn wide_band_tris(origin: [f64; 2], fills: &[Vec<[f32; 2]>]) -> Vec<[f64; 3]> {
+    let mut out = Vec::new();
+    for poly in fills {
+        let ring: Vec<[f64; 3]> = poly
+            .iter()
+            .map(|&[x, y]| [origin[0] + x as f64, origin[1] + y as f64, 0.0])
+            .collect();
+        out.extend(crate::entities::mesh::triangulate_planar(&ring));
+    }
+    out
+}
+
+/// Extrude a wide-polyline band (from `wide_fills`) into a solid tube for a DXF
+/// thickness (code 39): a vertical wall between every band-boundary point and
+/// its `thickness`-along-`normal` copy, plus triangulated bottom and top caps.
+/// Returns `(fill_tris, edge_lines)` as flat WCS f64 lists — the caller wraps
+/// them in a `TruckEntity` (object = `Lines(edge_lines)`, `fill_tris`, and
+/// `pick_tris = fill_tris`). Shared by LwPolyline and Polyline2D so both wide
+/// polyline kinds extrude the same solid instead of just their centre-line.
+///
+/// `polyline_segment_fill` emits each band loop as the outer boundary forward
+/// then the inner boundary back, so its two transition edges (`half-1 → half`
+/// and `n-1 → 0`) are radial cap ends inside the band — no wall is drawn there.
+pub(crate) fn thick_band_tube(
+    origin: [f64; 2],
+    fills: &[Vec<[f32; 2]>],
+    thickness: f64,
+    normal: (f64, f64, f64),
+    to_wcs: &dyn Fn(f64, f64) -> (f64, f64, f64),
+) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
+    let (nx, ny, nz) = normal;
+    let t = thickness;
+    let off = |p: [f64; 3]| -> [f64; 3] { [p[0] + t * nx, p[1] + t * ny, p[2] + t * nz] };
+    let push_seg = |lines: &mut Vec<[f64; 3]>, a: [f64; 3], b: [f64; 3]| {
+        lines.push(a);
+        lines.push(b);
+        lines.push([f64::NAN; 3]);
+    };
+    let mut lines: Vec<[f64; 3]> = Vec::new();
+    let mut fill_tris: Vec<[f64; 3]> = Vec::new();
+    for poly in fills {
+        let n = poly.len();
+        if n < 4 {
+            continue;
+        }
+        let half = n / 2;
+        let bot: Vec<[f64; 3]> = poly
+            .iter()
+            .map(|&[x, y]| {
+                let (wx, wy, wz) = to_wcs(origin[0] + x as f64, origin[1] + y as f64);
+                [wx, wy, wz]
+            })
+            .collect();
+        let top: Vec<[f64; 3]> = bot.iter().map(|&p| off(p)).collect();
+        for k in 0..n {
+            push_seg(&mut lines, bot[k], top[k]);
+            if k == half - 1 || k == n - 1 {
+                continue;
+            }
+            let kn = (k + 1) % n;
+            push_seg(&mut lines, bot[k], bot[kn]);
+            push_seg(&mut lines, top[k], top[kn]);
+            fill_tris.extend_from_slice(&[bot[k], bot[kn], top[kn], bot[k], top[kn], top[k]]);
+        }
+        fill_tris.extend(crate::entities::mesh::triangulate_planar(&bot));
+        fill_tris.extend(crate::entities::mesh::triangulate_planar(&top));
+    }
+    (fill_tris, lines)
+}
+
+/// Build a continuous WCS point list + a per-point FULL band width for a
+/// tapered wide polyline, so the wire shader can interpolate each segment's two
+/// endpoint widths. Each `verts` entry is `(location_xy, bulge_to_next,
+/// start_width, end_width)` — the effective full widths at that vertex's segment
+/// start and end (already resolved against the polyline's constant width). Arcs
+/// are sampled in 16 steps with the width interpolated linearly along the arc.
+/// A shared vertex is emitted once (carrying the previous segment's end width),
+/// which is exact for the usual continuous taper.
+pub(crate) fn tapered_band_points(
+    verts: &[([f64; 2], f64, f64, f64)],
+    is_closed: bool,
+    to_wcs: &dyn Fn(f64, f64) -> (f64, f64, f64),
+) -> (Vec<[f64; 3]>, Vec<f32>) {
+    let n = verts.len();
+    let seg_count = if is_closed { n } else { n.saturating_sub(1) };
+    let mut pts: Vec<[f64; 3]> = Vec::new();
+    let mut widths: Vec<f32> = Vec::new();
+    let mut push = |x: f64, y: f64, w: f32| {
+        let (wx, wy, wz) = to_wcs(x, y);
+        pts.push([wx, wy, wz]);
+        widths.push(w);
+    };
+    for i in 0..seg_count {
+        let (p0, bulge, sw0, ew0) = verts[i];
+        let (p1, _, _, _) = verts[(i + 1) % n];
+        if i == 0 {
+            push(p0[0], p0[1], sw0 as f32);
+        }
+        if bulge.abs() < 1e-9 {
+            push(p1[0], p1[1], ew0 as f32);
+        } else if let Some(arc) = BulgeArc::from_bulge(p0, p1, bulge) {
+            for j in 1..=16usize {
+                let t = j as f64 / 16.0;
+                let s = arc.sample(t);
+                push(s[0], s[1], (sw0 + (ew0 - sw0) * t) as f32);
+            }
+        }
+    }
+    (pts, widths)
+}
+
 /// Compute the filled boundary polygon for one polyline segment.
 /// For straight segments: a rectangle/trapezoid.
 /// For arc segments: an arc band (outer arc + reversed inner arc).
@@ -392,3 +521,4 @@ pub(crate) fn polyline_segment_fill(
         Some(boundary)
     }
 }
+

@@ -54,6 +54,9 @@ pub fn ui_name(e: &EntityType) -> &'static str {
         EntityType::AttributeDefinition(_) => "Attribute Definition",
         EntityType::AttributeEntity(_) => "Attribute",
         EntityType::Ole2Frame(_) => "OLE Frame",
+        EntityType::Light(_) => "Light",
+        EntityType::SectionSymbol(_) => "Section Symbol",
+        EntityType::ViewBorder(_) => "View Border",
         EntityType::Seqend(_) => "Seqend",
         EntityType::Unknown(_) => "Unknown",
     }
@@ -101,6 +104,9 @@ pub fn dxf_name(e: &EntityType) -> &'static str {
         EntityType::Body(_) => "BODY",
         EntityType::Surface(_) => "SURFACE",
         EntityType::Mesh(_) => "MESH",
+        EntityType::Light(_) => "LIGHT",
+        EntityType::SectionSymbol(_) => "SECTIONLINE",
+        EntityType::ViewBorder(_) => "DRAWINGVIEW",
         _ => "ENTITY",
     }
 }

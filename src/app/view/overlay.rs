@@ -261,11 +261,13 @@ impl iced::widget::canvas::Program<Message> for MTextPreview {
         let collapsed = self.caret_on && self.sel.map(|(a, b)| a == b).unwrap_or(true);
         if collapsed && self.boxes.is_empty() {
             // Empty text: show a caret at the top-left so the user can type.
+            // Its height matches the preview's constant em (see EM_PX) so the
+            // empty-editor caret isn't tiny.
             let path = Path::new(|p| {
                 p.move_to(iced::Point::new(MTEXT_PREVIEW_PAD, MTEXT_PREVIEW_PAD));
                 p.line_to(iced::Point::new(
                     MTEXT_PREVIEW_PAD,
-                    (MTEXT_PREVIEW_PAD + 22.0).min(self.content_h),
+                    (MTEXT_PREVIEW_PAD + 40.0).min(self.content_h),
                 ));
             });
             frame.stroke(
@@ -349,16 +351,12 @@ pub(super) fn mtext_editor_overlay<'a>(
     ed: &'a super::super::mtext_editor::MTextEditorState,
     styles: Vec<String>,
     canvas_size: (f32, f32),
+    modal_offset: iced::Vector,
+    modal_resize: iced::Vector,
 ) -> Element<'a, Message> {
     use super::super::mtext_editor::{JustifyChoice, MTextFmt, ParaAlign};
     use iced::widget::{canvas, svg};
 
-    const PANEL_BG: Color = Color {
-        r: 0.16,
-        g: 0.16,
-        b: 0.16,
-        a: 0.98,
-    };
     const BORDER: Color = Color {
         r: 0.40,
         g: 0.40,
@@ -548,22 +546,13 @@ pub(super) fn mtext_editor_overlay<'a>(
             .on_press(Message::MTextLineSpacing(2.0))
             .padding(3)
             .style(btn_style),
-        iced::widget::Space::new().width(Fill),
-        icon_btn(
-            include_bytes!("../../../assets/icons/mt_ok.svg"),
-            Message::MTextOk
-        ),
-        icon_btn(
-            include_bytes!("../../../assets/icons/mt_cancel.svg"),
-            Message::MTextCancel
-        ),
     ]
     .spacing(4)
     .align_y(iced::Alignment::Center);
 
-    // ── Segmented Edit | Preview toggle (between toolbar and body) ────────
-    // ── Body: the rendered preview (the editor is preview-only) ─────────
-    const VIEW_H: f32 = 150.0;
+    // ── Body: the rendered preview (the editor is preview-only). It fills the
+    // space left by the toolbars, so the resizable modal's extra height flows
+    // into the text area. ─────────────────────────────────────────────────
     let body: Element<'a, Message> = {
         let segments = mtext_preview_segments(ed);
         let (mut minx, mut miny, mut maxx, mut maxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
@@ -583,12 +572,55 @@ pub(super) fn mtext_editor_overlay<'a>(
             maxx = maxx.max(b.xmax);
             maxy = maxy.max(b.ymax);
         }
-        let h_unit = ed.height_value() as f32;
-        // Real text size: fixed pixels per em so more/taller text grows the
-        // canvas (and scrolls) instead of shrinking to fit.
-        let scale = (22.0 / h_unit.max(1e-3)).clamp(2.0, 600.0);
+        // Normalize the display by the DOMINANT rendered text height — the run
+        // height the most glyphs share (the body) — NOT the entity's base height
+        // field. That field can be many times the visible text: `\H…x;` runs
+        // compound, so an entity of height 1 whose body is `\H0.2x` renders at
+        // 0.2, and normalizing by 1 would shrink everything 5×. The mode lands
+        // the body at EM_PX while headings / fine print keep their proportions
+        // (one uniform factor, so no height is distorted). Zero-width boxes —
+        // the empty-line caret slots, which carry the raw entity height — are
+        // skipped so they can't skew it.
+        let h_unit = {
+            let mut heights: Vec<f32> = ed
+                .glyph_boxes
+                .iter()
+                .filter(|b| b.xmax - b.xmin > 1e-6)
+                .map(|b| b.ymax - b.ymin)
+                .filter(|h| h.is_finite() && *h > 1e-6)
+                .collect();
+            if heights.is_empty() {
+                ed.height_value() as f32
+            } else {
+                heights.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                // Largest cluster of near-equal heights (within 5%) = the body.
+                let (mut best_h, mut best_n, mut i) = (heights[0], 0usize, 0usize);
+                while i < heights.len() {
+                    let mut j = i;
+                    while j < heights.len() && heights[j] <= heights[i] * 1.05 {
+                        j += 1;
+                    }
+                    if j - i > best_n {
+                        best_n = j - i;
+                        best_h = heights[(i + j - 1) / 2];
+                    }
+                    i = j;
+                }
+                best_h
+            }
+        };
+        const EM_PX: f32 = 15.0;
+        let scale = (EM_PX / h_unit.max(1e-6)).clamp(1e-4, 1e6);
         let content_h = if maxx >= minx {
             ((maxy - miny) * scale + 2.0 * MTEXT_PREVIEW_PAD).max(40.0)
+        } else {
+            40.0
+        };
+        // Multi-column MTEXT lays its columns out side by side, so the content
+        // can be wider than the editor; size the canvas to the real content
+        // width and let the scroll area pan horizontally to reach later columns.
+        let content_w = if maxx >= minx {
+            (maxx - minx) * scale + 2.0 * MTEXT_PREVIEW_PAD
         } else {
             40.0
         };
@@ -604,9 +636,21 @@ pub(super) fn mtext_editor_overlay<'a>(
             content_h,
         };
         let cv = canvas(prog)
-            .width(Fill)
+            .width(iced::Length::Fixed(content_w))
             .height(iced::Length::Fixed(content_h));
-        container(iced::widget::scrollable(cv).height(iced::Length::Fixed(VIEW_H)))
+        // The preview fills the space the toolbars leave; it scrolls in BOTH
+        // directions so a taller-than-view text scrolls vertically and a
+        // wider-than-view multi-column text scrolls horizontally.
+        use iced::widget::scrollable::{Direction, Scrollbar};
+        container(
+            iced::widget::scrollable(cv)
+                .direction(Direction::Both {
+                    vertical: Scrollbar::default(),
+                    horizontal: Scrollbar::default(),
+                })
+                .width(Fill)
+                .height(Fill),
+        )
             .style(move |_: &Theme| container::Style {
                 background: Some(Background::Color(FIELD_BG)),
                 border: Border {
@@ -618,33 +662,51 @@ pub(super) fn mtext_editor_overlay<'a>(
             })
             .padding(2)
             .width(Fill)
+            .height(Fill)
             .into()
     };
 
-    let panel = container(column![row1, row2, body].spacing(5))
-        .style(move |_: &Theme| container::Style {
-            background: Some(Background::Color(PANEL_BG)),
-            border: Border {
-                color: BORDER,
-                width: 1.0,
-                radius: 5.0.into(),
-            },
-            ..Default::default()
-        })
-        .padding(6)
-        .width(iced::Length::Fixed(640.0));
+    // ── Top action bar: Apply on the right, exactly like the style managers'
+    // toolbar strip. Closing (the modal ✕) without applying discards the
+    // buffer, so there is no separate Cancel.
+    let action_bar = container(
+        row![
+            iced::widget::Space::new().width(Fill),
+            crate::ui::style::style_manager::tb_button("Apply", Message::MTextApply, true),
+        ]
+        .align_y(iced::Alignment::Center),
+    )
+    .style(|_: &Theme| container::Style {
+        background: Some(Background::Color(crate::ui::style::style_manager::TB)),
+        ..Default::default()
+    })
+    .width(Fill)
+    .padding([5, 8]);
 
-    // Keep the whole panel on-screen: clamp the anchor so it never spills past
-    // the right/bottom edge (where its toolbar buttons would be unclickable).
-    // Width is fixed; height is the toolbar rows + the fixed VIEW_H body.
-    const PANEL_W: f32 = 640.0 + 14.0; // fixed width + padding/border
-    const PANEL_H: f32 = VIEW_H + 150.0; // body + toolbars/toggle/padding
-    let (cw, ch) = canvas_size;
-    let anchor = iced::Point::new(
-        (ed.screen_anchor.x - 10.0).clamp(0.0, (cw - PANEL_W).max(0.0)),
-        (ed.screen_anchor.y - 90.0).clamp(0.0, (ch - PANEL_H).max(0.0)),
-    );
-    position_canvas_overlay(anchor, panel.into())
+    // The shared modal frame supplies the panel background, drag title bar,
+    // ✕ (which also cancels) and the resize grip. The content is a Fill column
+    // wrapped here in a fixed box (natural 660×480, grown by the shared resize
+    // delta) so the modal frame shrinks to it and the corner grip can drag it.
+    let content = container(
+        column![action_bar, row1, row2, body]
+            .spacing(6)
+            .width(Fill)
+            .height(Fill),
+    )
+    .width(iced::Length::Fixed(660.0 + modal_resize.x))
+    .height(iced::Length::Fixed(480.0 + modal_resize.y));
+
+    let _ = canvas_size; // positioned & sized by the modal frame now
+    // `modal` sizes its stack from the base layer, so the base must fill the
+    // area (a zero-size base collapses the whole overlay to nothing). The
+    // transparent fill lets the dimmed viewport show through beneath.
+    crate::ui::modal::modal(
+        iced::widget::Space::new().width(Fill).height(Fill),
+        content,
+        Message::MTextCancel,
+        modal_offset,
+        true,
+    )
 }
 
 // ── Viewport right-click context menu ──────────────────────────────────────
@@ -873,7 +935,7 @@ pub(super) fn viewport_context_menu_overlay(
 
 /// A small right-click context menu rendered above the status bar.
 /// The `name` is the layout tab that was right-clicked.
-pub(super) fn layout_context_menu_overlay(name: &str) -> Element<'_, Message> {
+pub(super) fn layout_context_menu_overlay(name: &str, win: (f32, f32)) -> Element<'_, Message> {
     const MENU_BG: Color = Color {
         r: 0.17,
         g: 0.17,
@@ -947,16 +1009,12 @@ pub(super) fn layout_context_menu_overlay(name: &str) -> Element<'_, Message> {
     .on_press(Message::LayoutContextMenuClose)
     .on_right_press(Message::LayoutContextMenuClose);
 
-    // Position the menu above the status bar at the left.
-    let positioned = container(menu)
-        .align_bottom(Fill)
-        .align_left(Fill)
-        .padding(iced::Padding {
-            top: 0.0,
-            right: 0.0,
-            bottom: 30.0,
-            left: 8.0,
-        });
+    // Anchor the menu above the status bar next to the right-clicked tab —
+    // its bounds were recorded by the tab's PosReport wrapper (#428). A
+    // missing report (shouldn't happen) falls back to the left edge.
+    let pill = crate::ui::wrap_bar::dropdown_bounds(&format!("SB_LAYOUT_TAB:{name}"));
+    let positioned =
+        crate::ui::popup::position_statusbar_popup(menu.into(), pill, win, 160.0, false);
 
     stack![catcher, positioned].into()
 }

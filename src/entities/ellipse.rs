@@ -96,6 +96,7 @@ fn to_truck(ell: &Ellipse) -> TruckEntity {
             (q(0.0, -r_minor), SnapHint::Quadrant),
         ];
         TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Contour(wire),
             snap_pts,
             tangent_geoms: vec![],
@@ -128,6 +129,7 @@ fn to_truck(ell: &Ellipse) -> TruckEntity {
             [pt_end.x, pt_end.y, pt_end.z],
         ];
         TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Curve(edge),
             snap_pts: vec![(center_v3, SnapHint::Center)],
             tangent_geoms: vec![],

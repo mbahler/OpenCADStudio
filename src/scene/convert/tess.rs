@@ -17,13 +17,278 @@ fn fade_if_locked(
     }
 }
 
+/// The section mark's viewing direction (paper-space, unit), derived entirely
+/// from the decoded model-documentation view graph:
+///
+/// 1. `symbol.view_rep_handle` → the parent view's `AcDbViewRep`.
+/// 2. The parent's refs name the section view's `AcDbViewRep` (any ref that
+///    owns an `AcDbViewRepSectionDefinition`), falling back to the document's
+///    section views.
+/// 3. Each view's refs include its `AcDbViewBorder` entity, which carries the
+///    view's *active* viewport — the entity holding the real camera.
+/// 4. The section camera's sight (−view_direction) is projected onto the parent
+///    camera's right/up basis (same convention as `camera_from_view`), giving
+///    the on-paper arrow direction.
+///
+/// `None` when any link is missing (DXF files, older DWGs) — the caller then
+/// falls back to a geometric heuristic.
+fn section_arrow_dir_from_views(
+    document: &acadrust::CadDocument,
+    s: &acadrust::entities::SectionSymbol,
+) -> Option<[f64; 2]> {
+    use acadrust::types::Handle as AHandle;
+    if s.view_rep_handle == 0 {
+        return None;
+    }
+    // A view's active viewport, via its border entity among the ViewRep refs.
+    let border_vp = |h: &AHandle| -> Option<AHandle> {
+        match document.get_entity(*h)? {
+            EntityType::ViewBorder(b) if !b.active_viewport.is_null() => Some(b.active_viewport),
+            _ => None,
+        }
+    };
+    let parent_vr = AHandle::from(s.view_rep_handle);
+    let parent_refs = document.view_rep_refs.get(&parent_vr)?;
+    let parent_vp_h = parent_refs.iter().find_map(border_vp)?;
+    let sect_vr = parent_refs
+        .iter()
+        .find(|h| **h != parent_vr && document.section_view_reps.contains(h))
+        .or_else(|| document.section_view_reps.iter().find(|&&h| h != parent_vr))
+        .copied()?;
+    let sect_refs = document.view_rep_refs.get(&sect_vr)?;
+    let sect_vp_h = sect_refs.iter().find_map(border_vp)?;
+
+    let viewport = |h: &AHandle| {
+        document.entities().find_map(|e| match e {
+            EntityType::Viewport(v) if v.common.handle == *h => Some(v),
+            _ => None,
+        })
+    };
+    let pvp = viewport(&parent_vp_h)?;
+    let svp = viewport(&sect_vp_h)?;
+
+    // Section sight: view_direction points target→camera, sight is its inverse.
+    let sight = -glam::DVec3::new(
+        svp.view_direction.x,
+        svp.view_direction.y,
+        svp.view_direction.z,
+    )
+    .try_normalize()?;
+
+    // Parent camera basis — the same yaw/pitch/roll convention the viewport
+    // renderer uses (`camera_from_view`), so the arrow lands exactly where the
+    // view content does.
+    let vd = glam::Vec3::new(
+        pvp.view_direction.x as f32,
+        pvp.view_direction.y as f32,
+        pvp.view_direction.z as f32,
+    )
+    .normalize_or(glam::Vec3::Z);
+    let pitch = vd.z.clamp(-1.0, 1.0).asin();
+    let yaw = if vd.x.abs() < 1e-6 && vd.y.abs() < 1e-6 {
+        0.0_f32
+    } else {
+        vd.x.atan2(-vd.y)
+    };
+    let rotation = view::camera::yaw_pitch_to_quat(yaw, pitch, -(pvp.twist_angle as f32));
+    let right = (rotation * glam::Vec3::X).as_dvec3();
+    let up = (rotation * glam::Vec3::Y).as_dvec3();
+
+    let d = glam::DVec2::new(sight.dot(right), sight.dot(up));
+    let len = d.length();
+    (len > 1e-6).then(|| [d.x / len, d.y / len])
+}
+
+/// Build the display wires for a decoded `AcDbSectionSymbol` (the "A-A" cut
+/// mark on a Model-Documentation view), styled from its `AcDbSectionViewStyle`.
+///
+/// Everything drawn here is decoded from the file:
+/// - Endpoints, end-tick lengths and the identifier come from the symbol.
+/// - Whether the full cutting line is drawn (`show_plane_line` — off gives the
+///   familiar broken line), the end segments (`show_end_lines`), the arrows
+///   (`show_arrows`), and all sizes come from the section-view style's flags.
+/// - The arrowhead shape resolves through the style's arrow block handle via
+///   the shared dimension/leader arrow table (`arrow_from_block`); a null
+///   handle is the standard ClosedFilled default.
+/// - The arrow direction comes from the view graph
+///   ([`section_arrow_dir_from_views`]); only when that chain is unavailable
+///   does it fall back to the 90°-CCW rotation of END-A→END-B.
+fn section_symbol_wires(
+    document: &acadrust::CadDocument,
+    s: &acadrust::entities::SectionSymbol,
+    style: Option<&acadrust::entities::SectionViewStyle>,
+    h: Handle,
+    color: [f32; 4],
+    sel: bool,
+    lw_px: f32,
+) -> Vec<WireModel> {
+    use crate::scene::convert::tessellate::{append_arrow, arrow_from_block, ArrowKind, DimGeom};
+
+    let nan = [f64::NAN; 3];
+    let (ax, ay) = (s.end_a[0], s.end_a[1]);
+    let (bx, by) = (s.end_b[0], s.end_b[1]);
+    // Unit along the cut, pointing from END-B toward END-A (each end's tick
+    // extends *outward*, away from the other end).
+    let (dx, dy) = (ax - bx, ay - by);
+    let clen = (dx * dx + dy * dy).sqrt().max(1e-9);
+    let (ux, uy) = (dx / clen, dy / clen);
+    // Viewing direction: from the decoded view graph when the chain resolves,
+    // else the 90°-CCW rotation of (END-A → END-B).
+    let [vx, vy] = section_arrow_dir_from_views(document, s).unwrap_or_else(|| {
+        let (vx0, vy0) = (ay - by, bx - ax);
+        let vlen = (vx0 * vx0 + vy0 * vy0).sqrt().max(1e-9);
+        [vx0 / vlen, vy0 / vlen]
+    });
+
+    let (show_arrows, show_plane_line, show_end_lines, arrow_size, arrow_ext, label_h) =
+        match style {
+            Some(st) => (
+                st.show_arrows,
+                st.show_plane_line,
+                st.show_end_lines,
+                st.arrow_size,
+                st.arrow_extension,
+                st.label_height,
+            ),
+            None => {
+                let t = s.tick_a.abs().max(s.tick_b.abs());
+                (true, false, true, (t * 0.66).max(2.5), t.max(5.0), t.max(2.5))
+            }
+        };
+    // Arrowhead via the shared dimension/leader arrow table: the style's arrow
+    // block handle (null → ClosedFilled), sized from the style.
+    let arrow_kind = match style {
+        Some(st) if st.arrow_start_handle != 0 => arrow_from_block(
+            document,
+            acadrust::types::Handle::from(st.arrow_start_handle),
+            arrow_size as f32,
+        ),
+        _ => ArrowKind::Triangle {
+            size: arrow_size as f32,
+            filled: true,
+            size_mul: 1.0,
+        },
+    };
+
+    let mut lines: Vec<[f64; 3]> = Vec::new();
+    let mut fill: Vec<[f64; 3]> = Vec::new();
+
+    // Full cutting-plane line through the view, only when the style asks.
+    if show_plane_line {
+        lines.push([bx, by, 0.0]);
+        lines.push([ax, ay, 0.0]);
+    }
+
+    // Each end: (endpoint, tick length, outward sign along the cut).
+    for (ex, ey, tick, osign) in [(ax, ay, s.tick_a.abs(), 1.0), (bx, by, s.tick_b.abs(), -1.0)] {
+        let (ox, oy) = (ux * osign, uy * osign); // outward along the cut
+        let tip = [ex + ox * tick, ey + oy * tick, 0.0]; // outer tick tip
+        // End segment: the short drawn extension past the end (the "broken"
+        // section line when show_plane_line is off).
+        if show_end_lines && tick > 1e-9 {
+            lines.push(nan);
+            lines.push([ex, ey, 0.0]);
+            lines.push(tip);
+        }
+
+        if show_arrows {
+            // Arrowhead at the end of a short shaft along the viewing
+            // direction, apex landing `arrow_ext` out from the tick tip. The
+            // shared `append_arrow` takes the apex and the tip→base direction.
+            let apex = [tip[0] + vx * arrow_ext, tip[1] + vy * arrow_ext, 0.0];
+            let mut g = DimGeom::new();
+            append_arrow(
+                &mut g,
+                glam::Vec3::new(apex[0] as f32, apex[1] as f32, 0.0),
+                glam::Vec3::new(-vx as f32, -vy as f32, 0.0),
+                &arrow_kind,
+            );
+            // Shaft from the tick tip to the arrowhead base.
+            let a_len = match arrow_kind {
+                ArrowKind::Triangle { size, size_mul, .. } => (size * size_mul) as f64,
+                _ => arrow_size,
+            };
+            let base = [apex[0] - vx * a_len, apex[1] - vy * a_len, 0.0];
+            lines.push(nan);
+            lines.push(tip);
+            lines.push(base);
+            let mut it = g.dim_lines.chunks_exact(2);
+            while let Some([p0, p1]) = it.next() {
+                lines.push(nan);
+                lines.push([p0[0] as f64, p0[1] as f64, 0.0]);
+                lines.push([p1[0] as f64, p1[1] as f64, 0.0]);
+            }
+            for t in g.arrow_fill.chunks_exact(3) {
+                for p in t {
+                    fill.push([p[0] as f64, p[1] as f64, 0.0]);
+                }
+            }
+        }
+
+        // Identifier glyph outboard of the tick tip, centred on the cut line.
+        if !s.label.trim().is_empty() && label_h > 1e-6 {
+            let approx_w = label_h * 0.7 * s.label.chars().count().max(1) as f64;
+            // Gap past the tip along the outward direction — the style's
+            // `identifier_offset` when decoded; for the far (negative-outward)
+            // end drop a text height so the glyph clears the tick. Centre the
+            // run on the cut line's X.
+            let gap = style
+                .map(|st| st.label_offset)
+                .filter(|v| *v > 1e-9)
+                .unwrap_or(label_h * 0.35);
+            let drop = if osign < 0.0 { label_h } else { 0.0 };
+            let base = [ex - approx_w * 0.5, tip[1] + oy * gap - drop];
+            let (strokes, _) = crate::scene::text::lff::tessellate_text_ex(
+                [0.0, 0.0],
+                label_h as f32,
+                0.0,
+                1.0,
+                0.0,
+                "standard",
+                &s.label,
+            );
+            let mut tp: Vec<[f64; 3]> = Vec::new();
+            for stroke in &strokes {
+                if stroke.len() < 2 {
+                    continue;
+                }
+                if !tp.is_empty() {
+                    tp.push(nan);
+                }
+                for &[gx, gy] in stroke {
+                    tp.push([base[0] + gx as f64, base[1] + gy as f64, 0.0]);
+                }
+            }
+            lines.push(nan);
+            lines.extend(tp);
+        }
+    }
+
+    let mut wires = Vec::new();
+    // Lines (ticks + shafts + glyphs): a fill-free wire so the strokes render.
+    let (lp, lp_low) = convert::tessellate::points_to_ds(lines);
+    let mut lw = WireModel::solid(h.value().to_string(), lp, color, sel);
+    lw.points_low = lp_low;
+    lw.line_weight_px = lw_px;
+    wires.push(lw);
+    // Filled arrowheads: a separate wire carrying only triangles.
+    if !fill.is_empty() {
+        let (fp, fp_low) = convert::tessellate::points_to_ds(fill);
+        let mut fw = WireModel::solid(h.value().to_string(), Vec::new(), color, sel);
+        fw.fill_tris = fp;
+        fw.fill_tris_low = fp_low;
+        fw.line_weight_px = lw_px;
+        wires.push(fw);
+    }
+    wires
+}
+
 // ── Parallel tessellation free function ──────────────────────────────────────
 //
 // Takes only the `Send + Sync` data needed for tessellation so that
 // `wires_for_block` can dispatch work across rayon's thread pool without
 // requiring `Scene` (which contains `Rc<RefCell<...>>` and is `!Send`) to
 // cross thread boundaries.
-
 
 /// Tessellate a synthesised dimension-text entity through `tessellate_entity`
 /// so it picks up the standard text LOD ladder (baseline / greek / full),
@@ -41,8 +306,15 @@ pub(crate) fn tessellate_entity_dim_text(
     text_color: [f32; 4],
 ) -> Vec<WireModel> {
     let mut wires = tessellate_entity(
-        document, selected, active_viewport, bg_color,
-        anno_scale, e, None, view_aabb, world_per_pixel,
+        document,
+        selected,
+        active_viewport,
+        bg_color,
+        anno_scale,
+        e,
+        None,
+        view_aabb,
+        world_per_pixel,
     );
     for w in &mut wires {
         // Synth dim text carries no real entity colour — paint everything
@@ -208,7 +480,7 @@ pub(crate) fn tessellate_entity(
         );
         let ab = entity_aabb(e);
         for w in &mut wires {
-            w.aabb = ab;
+            set_wire_aabb(w, ab);
         }
         return wires;
     }
@@ -228,6 +500,191 @@ pub(crate) fn tessellate_entity(
     let pattern_length = pattern_length * pslt_factor;
     let pattern = pattern.map(|v| v * pslt_factor);
 
+    // ── Proxy entity: draw its cached preview ───────────────────────────────
+    //
+    // An entity from an application we have no reader for (e.g. an Autodesk
+    // Raster Design embedded raster image) arrives as `Unknown`. Its own data is
+    // a private format we cannot decode — but it usually ships a proxy-graphics
+    // blob, the vector preview its author cached for exactly this case. AutoCAD
+    // draws that when the object enabler is missing; draw it too, so the entity
+    // occupies its real place instead of silently disappearing.
+    if let EntityType::Unknown(_) = e {
+        if let Some(blob) = e.common().graphic_data.as_ref() {
+            let dec = convert::proxy_graphics::decode(blob);
+            if !dec.polylines.is_empty() || !dec.texts.is_empty() {
+                use crate::scene::convert::proxy_graphics::ProxyColor;
+                use std::collections::BTreeMap;
+                let nan = [f64::NAN; 3];
+                // A specific ACI / RGB overrides the entity colour; ByLayer /
+                // ByBlock inherit it.
+                let resolve = |pc: ProxyColor| -> ([f32; 4], u8) {
+                    match pc {
+                        ProxyColor::Aci(a) => (
+                            view::render::adapt_to_bg(
+                                convert::tess_util::aci_to_rgba(&acadrust::types::Color::Index(a)),
+                                bg_color,
+                            ),
+                            a,
+                        ),
+                        ProxyColor::Rgb(r, g, b) => (
+                            view::render::adapt_to_bg(
+                                [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0],
+                                bg_color,
+                            ),
+                            0,
+                        ),
+                        ProxyColor::Inherit => (entity_color, aci),
+                    }
+                };
+                let mut wires = Vec::new();
+                // Lines / shells: group by (colour, lineweight), one wire each.
+                let mut groups: BTreeMap<(ProxyColor, i16), Vec<[f64; 3]>> = BTreeMap::new();
+                for poly in &dec.polylines {
+                    let buf = groups.entry((poly.color, poly.lineweight)).or_default();
+                    if !buf.is_empty() {
+                        buf.push(nan);
+                    }
+                    buf.extend_from_slice(&poly.points);
+                }
+                for ((pcolor, plw), pts64) in groups {
+                    let (col, w_aci) = resolve(pcolor);
+                    let lw_px = if plw >= 0 {
+                        view::render::lineweight_to_px(&acadrust::types::LineWeight::Value(plw))
+                    } else {
+                        line_weight_px
+                    };
+                    let (pts, pts_low) = convert::tessellate::points_to_ds(pts64);
+                    let mut w = WireModel::solid(h.value().to_string(), pts, col, sel);
+                    w.points_low = pts_low;
+                    w.line_weight_px = lw_px;
+                    w.aci = w_aci;
+                    wires.push(w);
+                }
+                // Text labels: draw the glyph strokes (simplex.shx etc. are
+                // single-stroke fonts, so the outline is the character).
+                for t in &dec.texts {
+                    let font = t.font.trim().trim_end_matches(".shx").trim_end_matches(".SHX");
+                    let font = if font.is_empty() { "standard" } else { font };
+                    let (strokes, _) = crate::scene::text::lff::tessellate_text_ex(
+                        [0.0, 0.0],
+                        t.height as f32,
+                        t.rotation as f32,
+                        1.0,
+                        0.0,
+                        font,
+                        &t.text,
+                    );
+                    let mut pts64: Vec<[f64; 3]> = Vec::new();
+                    for stroke in &strokes {
+                        if stroke.len() < 2 {
+                            continue;
+                        }
+                        if !pts64.is_empty() {
+                            pts64.push(nan);
+                        }
+                        for &[x, y] in stroke {
+                            pts64.push([
+                                t.position[0] + x as f64,
+                                t.position[1] + y as f64,
+                                t.position[2],
+                            ]);
+                        }
+                    }
+                    if pts64.len() >= 2 {
+                        let (col, w_aci) = resolve(t.color);
+                        let (pts, pts_low) = convert::tessellate::points_to_ds(pts64);
+                        let mut w = WireModel::solid(h.value().to_string(), pts, col, sel);
+                        w.points_low = pts_low;
+                        w.line_weight_px = line_weight_px;
+                        w.aci = w_aci;
+                        wires.push(w);
+                    }
+                }
+                if !wires.is_empty() {
+                    return wires;
+                }
+            }
+        }
+    }
+
+    // ── Section symbol (AcDbSectionSymbol): draw the "A-A" cut mark ──────────
+    //
+    // The DWG reader decodes the two cut-line endpoints, the signed end ticks
+    // and the identifier. Synthesize the end ticks + arrowheads + label glyphs
+    // so the mark is visible on the layout, the way AutoCAD draws it. The raw
+    // record is still preserved for lossless write-back.
+    if let EntityType::SectionSymbol(s) = e {
+        return section_symbol_wires(
+            document,
+            s,
+            document.section_view_style.as_ref(),
+            h,
+            entity_color,
+            sel,
+            line_weight_px,
+        );
+    }
+    // Drawing-view borders are non-plotting aids: nothing is drawn normally,
+    // but the view must still be click-selectable anywhere inside its
+    // rectangle — emit an invisible pick-only wire carrying the border rect as
+    // its interior pick surface. When selected, the rect outline is drawn so
+    // the selection has visible feedback.
+    if let EntityType::ViewBorder(b) = e {
+        let (x0, y0) = (b.min[0], b.min[1]);
+        let (x1, y1) = (b.max[0], b.max[1]);
+        if !(x1 > x0 && y1 > y0) {
+            return vec![];
+        }
+        let (pick_tris, pick_tris_low) =
+            super::tessellate::points_to_ds(crate::entities::common::quad_pick_tris(&[
+                [x0, y0, 0.0],
+                [x1, y0, 0.0],
+                [x1, y1, 0.0],
+                [x0, y1, 0.0],
+            ]));
+        let points: Vec<[f32; 3]> = if sel {
+            vec![
+                [x0 as f32, y0 as f32, 0.0],
+                [x1 as f32, y0 as f32, 0.0],
+                [x1 as f32, y1 as f32, 0.0],
+                [x0 as f32, y1 as f32, 0.0],
+                [x0 as f32, y0 as f32, 0.0],
+            ]
+        } else {
+            Vec::new()
+        };
+        return vec![WireModel {
+            taper_widths: Vec::new(),
+            world_width: 0.0,
+            depth_override: None,
+            fill_is_3d: false,
+            pick_tris,
+            pick_tris_low,
+            dash_from_start: false,
+            dash_align_end: None,
+            text_verts: Vec::new(),
+            name: h.value().to_string(),
+            points,
+            points_low: Vec::new(),
+            color: WireModel::SELECTED,
+            selected: sel,
+            aci: 0,
+            pattern_length: 0.0,
+            pattern: [0.0; 8],
+            line_weight_px: 1.0,
+            snap_pts: vec![],
+            tangent_geoms: vec![],
+            key_vertices: vec![
+                [x0, y0, 0.0],
+                [x1, y1, 0.0],
+            ],
+            aabb: [x0 as f32, y0 as f32, x1 as f32, y1 as f32],
+            plinegen: true,
+            fill_tris: vec![],
+            fill_tris_low: Vec::new(),
+        }];
+    }
+
     // ── Dimension baked-block fast path ─────────────────────────────────────
     //
     // AutoCAD bakes each dimension's final geometry (extension lines, dim
@@ -245,8 +702,7 @@ pub(crate) fn tessellate_entity(
                 .find(|br| br.name.eq_ignore_ascii_case(block_name))
             {
                 if !br.entity_handles.is_empty() {
-                    let mut wires: Vec<WireModel> =
-                        Vec::with_capacity(br.entity_handles.len());
+                    let mut wires: Vec<WireModel> = Vec::with_capacity(br.entity_handles.len());
                     // The Dimension's own layer style — layer-0 inheritance
                     // target for baked sub-entities on layer "0" (#221).
                     let dim_l0_color = view::render::adapt_to_bg(
@@ -262,7 +718,18 @@ pub(crate) fn tessellate_entity(
                         })
                         .unwrap_or(0);
                     for &eh in &br.entity_handles {
-                        let Some(sub) = document.get_entity(eh) else { continue };
+                        let Some(sub) = document.get_entity(eh) else {
+                            continue;
+                        };
+                        // A dimension's definition points are baked into the
+                        // block as POINTs on the Defpoints layer. AutoCAD never
+                        // draws them as PDMODE glyphs — they're grip markers, not
+                        // geometry — so rendering them adds a stray tick at each
+                        // measured point that makes the extension lines look like
+                        // they run past the geometry. Skip them.
+                        if matches!(sub, EntityType::Point(_)) {
+                            continue;
+                        }
                         // Sub-entities inside *D### / DIMBLOCK## blocks
                         // typically use ByBlock color/linetype/lineweight —
                         // they should inherit from the Dimension entity.
@@ -271,10 +738,17 @@ pub(crate) fn tessellate_entity(
                         let sub_is_l0_bylayer = sub.common().layer == "0"
                             && sub.common().color == acadrust::types::Color::ByLayer;
                         let sub_wires = tessellate_entity(
-                            document, selected, active_viewport, bg_color,
+                            document,
+                            selected,
+                            active_viewport,
+                            bg_color,
                             // Block contents are baked at the final WCS size —
                             // don't let downstream paths re-apply anno_scale.
-                            1.0, sub, block_cache, view_aabb, world_per_pixel,
+                            1.0,
+                            sub,
+                            block_cache,
+                            view_aabb,
+                            world_per_pixel,
                         );
                         for mut w in sub_wires {
                             w.name = h.value().to_string();
@@ -284,7 +758,11 @@ pub(crate) fn tessellate_entity(
                             // fallback that render_style_for produces. A layer-0
                             // sub inherits the dim's layer colour instead.
                             if sub_color_is_byblock {
-                                w.color = if sel { WireModel::SELECTED } else { entity_color };
+                                w.color = if sel {
+                                    WireModel::SELECTED
+                                } else {
+                                    entity_color
+                                };
                                 w.aci = aci;
                             } else if sub_is_l0_bylayer && !sel {
                                 w.color = dim_l0_color;
@@ -300,7 +778,7 @@ pub(crate) fn tessellate_entity(
                             // AABB; only stroke/fill wires take the whole-block
                             // box as a broad-phase pick hint.
                             if !w.points.is_empty() || !w.fill_tris.is_empty() {
-                                w.aabb = aabb;
+                                set_wire_aabb(w, aabb);
                             }
                         }
                         return wires;
@@ -335,7 +813,7 @@ pub(crate) fn tessellate_entity(
             // text — clicking empty space inside the dimension selects nothing,
             // only the lines or the text do.
             if !w.points.is_empty() || !w.fill_tris.is_empty() {
-                w.aabb = aabb;
+                set_wire_aabb(w, aabb);
             }
         }
         return wires;
@@ -359,7 +837,7 @@ pub(crate) fn tessellate_entity(
             // As with dimensions: keep the whole-leader box only on stroke/fill
             // wires; empty SDF-text wires keep their tight glyph-box AABB.
             if !w.points.is_empty() || !w.fill_tris.is_empty() {
-                w.aabb = aabb;
+                set_wire_aabb(w, aabb);
             }
         }
         return wires;
@@ -376,14 +854,9 @@ pub(crate) fn tessellate_entity(
     // Dimension's `block_name`.
     if let EntityType::Table(tab) = e {
         if let Some(br_h) = tab.block_record_handle {
-            if let Some(br) = document
-                .block_records
-                .iter()
-                .find(|br| br.handle == br_h)
-            {
+            if let Some(br) = document.block_records.iter().find(|br| br.handle == br_h) {
                 if !br.entity_handles.is_empty() {
-                    let mut wires: Vec<WireModel> =
-                        Vec::with_capacity(br.entity_handles.len());
+                    let mut wires: Vec<WireModel> = Vec::with_capacity(br.entity_handles.len());
                     // The Table's own layer style — layer-0 inheritance target
                     // for baked sub-entities on layer "0" (#221).
                     let tab_l0_color = view::render::adapt_to_bg(
@@ -398,20 +871,54 @@ pub(crate) fn tessellate_entity(
                             _ => 0,
                         })
                         .unwrap_or(0);
+                    // The *T block is laid out in block-local space (origin at
+                    // the table's top-left corner); the Table entity carries the
+                    // world placement in `insertion_point` + `horizontal_direction`
+                    // (like an INSERT). Place each baked sub-entity there before
+                    // tessellating — without it the whole table renders at the
+                    // origin. Rotating about the local origin then translating
+                    // gives world = insertion + R·local; tessellate_entity then
+                    // handles the UTM-scale relative-to-eye split as usual.
+                    let ins = tab.insertion_point;
+                    let angle = tab.horizontal_direction.y.atan2(tab.horizontal_direction.x);
                     for &eh in &br.entity_handles {
-                        let Some(sub) = document.get_entity(eh) else { continue };
+                        let Some(sub) = document.get_entity(eh) else {
+                            continue;
+                        };
                         let sub_color_is_byblock =
                             sub.common().color == acadrust::types::Color::ByBlock;
                         let sub_is_l0_bylayer = sub.common().layer == "0"
                             && sub.common().color == acadrust::types::Color::ByLayer;
+                        let mut placed = sub.clone();
+                        {
+                            let ent = placed.as_entity_mut();
+                            if angle.abs() > 1e-9 {
+                                ent.apply_rotation(
+                                    acadrust::types::Vector3::new(0.0, 0.0, 1.0),
+                                    angle,
+                                );
+                            }
+                            ent.translate(ins);
+                        }
                         let sub_wires = tessellate_entity(
-                            document, selected, active_viewport, bg_color,
-                            anno_scale, sub, block_cache, view_aabb, world_per_pixel,
+                            document,
+                            selected,
+                            active_viewport,
+                            bg_color,
+                            anno_scale,
+                            &placed,
+                            block_cache,
+                            view_aabb,
+                            world_per_pixel,
                         );
                         for mut w in sub_wires {
                             w.name = h.value().to_string();
                             if sub_color_is_byblock {
-                                w.color = if sel { WireModel::SELECTED } else { entity_color };
+                                w.color = if sel {
+                                    WireModel::SELECTED
+                                } else {
+                                    entity_color
+                                };
                                 w.aci = aci;
                             } else if sub_is_l0_bylayer && !sel {
                                 w.color = tab_l0_color;
@@ -427,7 +934,7 @@ pub(crate) fn tessellate_entity(
                             // AABB; only stroke/fill wires take the whole-block
                             // box as a broad-phase pick hint.
                             if !w.points.is_empty() || !w.fill_tris.is_empty() {
-                                w.aabb = aabb;
+                                set_wire_aabb(w, aabb);
                             }
                         }
                         return wires;
@@ -447,7 +954,12 @@ pub(crate) fn tessellate_entity(
             1.0
         };
         let mut wires = crate::entities::table::tessellate_table(
-            tab, document, sel, entity_color, line_weight_px, table_anno,
+            tab,
+            document,
+            sel,
+            entity_color,
+            line_weight_px,
+            table_anno,
         );
         if !wires.is_empty() {
             let aabb = entity_aabb(e);
@@ -457,7 +969,7 @@ pub(crate) fn tessellate_entity(
                 // stroke/fill wires take the whole-table box as a broad-phase
                 // pick hint (matches the dim / mleader / baked-block paths).
                 if !w.points.is_empty() || !w.fill_tris.is_empty() {
-                    w.aabb = aabb;
+                    set_wire_aabb(w, aabb);
                 }
             }
             return wires;
@@ -466,7 +978,8 @@ pub(crate) fn tessellate_entity(
 
     if let EntityType::Insert(ins) = e {
         // Resolve the INSERT's own style so ByBlock sub-entities can inherit it.
-        let (ins_color, ins_pat_len, ins_pat, ins_lw_px, _) = view::render::render_style_for(document, e);
+        let (ins_color, ins_pat_len, ins_pat, ins_lw_px, _) =
+            view::render::render_style_for(document, e);
         let ins_color = view::render::adapt_to_bg(ins_color, bg_color);
         // Resolve the INSERT's *layer* style — the layer-0 inheritance target
         // for sub-entities on layer "0" with ByLayer properties (#221).
@@ -481,6 +994,14 @@ pub(crate) fn tessellate_entity(
             (ins.insert_point.z) as f32,
         );
         let marker = WireModel {
+            taper_widths: Vec::new(),
+            world_width: 0.0,
+            depth_override: None,
+            fill_is_3d: false,
+            pick_tris: Vec::new(),
+            pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: h.value().to_string(),
             points: vec![],
@@ -496,7 +1017,6 @@ pub(crate) fn tessellate_entity(
             key_vertices: vec![],
             aabb: WireModel::UNBOUNDED_AABB,
             plinegen: true,
-            vp_scissor: None,
             fill_tris: vec![],
             fill_tris_low: Vec::new(),
         };
@@ -617,11 +1137,12 @@ pub(crate) fn tessellate_entity(
                     // (UNBOUNDED) — otherwise it never culls and stalls snapping on
                     // block-heavy drawings.
                     if w.text_verts.is_empty() {
-                        w.aabb = if sub_aabb == WireModel::UNBOUNDED_AABB {
+                        let box_ = if sub_aabb == WireModel::UNBOUNDED_AABB {
                             wire_points_aabb(w)
                         } else {
                             sub_aabb
                         };
+                        set_wire_aabb(w, box_);
                     }
                 }
                 wires
@@ -673,7 +1194,7 @@ pub(crate) fn tessellate_entity(
         // in the Text arm; entity_aabb would mis-place the pick box for MTEXT,
         // so don't clobber it. Every other wire takes the entity AABB.
         if b.text_verts.is_empty() {
-            b.aabb = aabb;
+            set_wire_aabb(b, aabb);
         }
     }
 
@@ -692,12 +1213,125 @@ pub(crate) fn tessellate_entity(
                 entity_color,
                 sel,
                 base.line_weight_px,
+                // Single (non-MLINE) entity: keep the from-start tiling (no shared
+                // A-type reference — there are no sibling elements to align with).
+                None,
             );
             if !wires.is_empty() {
                 for w in &mut wires {
-                    w.aabb = aabb;
+                    set_wire_aabb(w, aabb);
                 }
                 return wires;
+            }
+        }
+    }
+
+    // DGN line-style: the linetype's real pattern lives in DGN line-style objects
+    // (empty standard LTYPE), so `resolve_complex_lt` sees nothing. Render its
+    // symbol blocks (e.g. a pipe's end circles) at the polyline endpoints. First
+    // pass — exact dash pattern / placement need the undecoded leaf data.
+    let dgn_syms = convert::dgn_linestyle::symbol_blocks(document, lt_name);
+    if !dgn_syms.is_empty() {
+        let verts = convert::dgn_linestyle::polyline_points(e);
+        if verts.len() >= 2 {
+            // The pipe body is drawn as two parallel walls, not a single centre
+            // line: offset the host polyline by ±(symbol radius) so each wall
+            // sits tangent to the end circles, and replace the centre line with
+            // them. The radius is the rendered symbol extent (block / scale).
+            let radius = dgn_syms
+                .iter()
+                .map(|s| convert::dgn_linestyle::symbol_radius(document, s.block, s.scale))
+                .fold(0.0_f64, f64::max);
+            if radius > 1e-6 {
+                // The walls carry the line style's dash pattern. Its native
+                // lengths scale to drawing units by f = radius / symbol-scale
+                // (the same factor that turns the compound's native offset into
+                // the measured wall offset). Sign-alternate: dash, gap, dash…
+                let scale = dgn_syms
+                    .iter()
+                    .map(|s| s.scale)
+                    .find(|s| *s > 1e-9)
+                    .unwrap_or(1.0);
+                let f = radius / scale;
+                // The wall stroke's dash length (`wall_dashes[0]`) renders as an
+                // equal dash/gap: dash-first `[+dash, -dash]`. Combined with the
+                // `dash_from_start` flag set below, each wall tiles from its own
+                // start vertex with a dash, no A-type end alignment.
+                let native = convert::dgn_linestyle::wall_dashes(document, lt_name);
+                let (wall_pat, wall_pat_len) = if f > 1e-9 && !native.is_empty() {
+                    let dash = (native[0] * f) as f32;
+                    if dash > 1e-6 {
+                        let mut pat = [0.0_f32; 8];
+                        pat[0] = dash;
+                        pat[1] = -dash;
+                        (pat, 2.0 * dash)
+                    } else {
+                        ([0.0_f32; 8], 0.0)
+                    }
+                } else {
+                    ([0.0_f32; 8], 0.0)
+                };
+                let mut rails = Vec::new();
+                for sgn in [1.0_f64, -1.0] {
+                    if let Some(off) = convert::dgn_linestyle::offset_host_entity(e, sgn * radius) {
+                        let mut w = convert::tessellate::tessellate(
+                            document,
+                            h,
+                            &off,
+                            sel,
+                            entity_color,
+                            pattern_length,
+                            pattern,
+                            line_weight_px,
+                            anno_scale,
+                            world_per_pixel,
+                            bg_color,
+                            false,
+                        );
+                        for x in &mut w {
+                            x.aci = aci;
+                            set_wire_aabb(x, aabb);
+                            if wall_pat_len > 1e-6 {
+                                x.pattern = wall_pat;
+                                x.pattern_length = wall_pat_len;
+                                // DGN: draw the dash from this wall's own start
+                                // vertex, no A-type end forcing. Each wall is a
+                                // separate wire, so the two tile independently.
+                                x.dash_from_start = true;
+                            }
+                        }
+                        rails.append(&mut w);
+                    }
+                }
+                if !rails.is_empty() {
+                    bases = rails;
+                }
+            }
+            let last = *verts.last().unwrap();
+            for (i, sym) in dgn_syms.iter().enumerate() {
+                let at = if i == 0 { verts[0] } else { last };
+                let mut wires = convert::dgn_linestyle::place_block_wires(
+                    document,
+                    sym.block,
+                    sym.scale,
+                    at,
+                    entity_color,
+                    line_weight_px,
+                    anno_scale,
+                    world_per_pixel,
+                    bg_color,
+                );
+                // The symbol wires come back named after the anonymous block's
+                // internal entity handle. Re-key them to the host entity (like the
+                // walls above) so the whole DET pipe picks/selects as one entity
+                // instead of the symbols acting as separate phantom entities.
+                let host_name = h.value().to_string();
+                for w in &mut wires {
+                    w.name = host_name.clone();
+                    w.aci = aci;
+                    set_wire_aabb(w, aabb);
+                }
+                bases.extend(wires);
             }
         }
     }
@@ -742,7 +1376,15 @@ fn lod_stub_wire(
     // LOD boundary. #19.
     let stored_color = if selected { WireModel::SELECTED } else { color };
     WireModel {
-            text_verts: Vec::new(),
+        taper_widths: Vec::new(),
+        world_width: 0.0,
+        depth_override: None,
+        fill_is_3d: false,
+        pick_tris: Vec::new(),
+        pick_tris_low: Vec::new(),
+        dash_from_start: false,
+        dash_align_end: None,
+        text_verts: Vec::new(),
         name,
         // Diagonal of the entity's 3D AABB so depth tests against
         // shaded / hidden-line geometry are correct — the stub doesn't
@@ -762,7 +1404,6 @@ fn lod_stub_wire(
         key_vertices: vec![[cx as f64, cy as f64, cz as f64]],
         aabb,
         plinegen: true,
-        vp_scissor: None,
         fill_tris: vec![],
         fill_tris_low: Vec::new(),
     }
@@ -784,16 +1425,35 @@ fn lod_stub_wire_3d(
     z_max: f32,
 ) -> WireModel {
     let [x0, y0, x1, y1] = aabb;
-    let (z0, z1) = if z_min <= z_max { (z_min, z_max) } else { (z_max, z_min) };
+    let (z0, z1) = if z_min <= z_max {
+        (z_min, z_max)
+    } else {
+        (z_max, z_min)
+    };
     let p = [
-        [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
-        [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
+        [x0, y0, z0],
+        [x1, y0, z0],
+        [x1, y1, z0],
+        [x0, y1, z0],
+        [x0, y0, z1],
+        [x1, y0, z1],
+        [x1, y1, z1],
+        [x0, y1, z1],
     ];
     // 12 edges = 4 bottom-face + 4 top-face + 4 vertical connectors.
     const EDGES: [(usize, usize); 12] = [
-        (0, 1), (1, 2), (2, 3), (3, 0),
-        (4, 5), (5, 6), (6, 7), (7, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7),
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
     ];
     let mut points: Vec<[f32; 3]> = Vec::with_capacity(EDGES.len() * 3);
     for (a, b) in EDGES {
@@ -805,7 +1465,15 @@ fn lod_stub_wire_3d(
     }
     let stored_color = if selected { WireModel::SELECTED } else { color };
     WireModel {
-            text_verts: Vec::new(),
+        taper_widths: Vec::new(),
+        world_width: 0.0,
+        depth_override: None,
+        fill_is_3d: false,
+        pick_tris: Vec::new(),
+        pick_tris_low: Vec::new(),
+        dash_from_start: false,
+        dash_align_end: None,
+        text_verts: Vec::new(),
         name,
         points,
         points_low: Vec::new(),
@@ -823,7 +1491,6 @@ fn lod_stub_wire_3d(
         key_vertices: vec![],
         aabb,
         plinegen: true,
-        vp_scissor: None,
         fill_tris: vec![],
         fill_tris_low: Vec::new(),
     }
@@ -859,6 +1526,37 @@ pub(crate) fn wire_points_aabb(w: &WireModel) -> [f32; 4] {
     } else {
         WireModel::UNBOUNDED_AABB
     }
+}
+
+/// Assign `entity_box` as `w`'s cullable box, widened to cover the wire's
+/// pick-only geometry.
+///
+/// `entity_aabb`'s box comes from acadrust's `bounding_box()`, which for a
+/// polyline is the box of its stored vertices — it knows nothing about the band
+/// a width paints around them, nor the wall a thickness extrudes. Hit-testing
+/// rejects on this box before it looks at `pick_tris`, so a box that stops short
+/// of them makes them silently unpickable: a donut's vertices are two points on
+/// one horizontal line, giving a zero-height box that rejects every click on the
+/// disc it draws.
+///
+/// A no-op for the entities that have no `pick_tris`, which is nearly all.
+pub(crate) fn set_wire_aabb(w: &mut WireModel, entity_box: [f32; 4]) {
+    if w.pick_tris.is_empty() || entity_box == WireModel::UNBOUNDED_AABB {
+        w.aabb = entity_box;
+        return;
+    }
+    let [mut x0, mut y0, mut x1, mut y1] = entity_box;
+    for (i, p) in w.pick_tris.iter().enumerate() {
+        let lo = w.pick_tris_low.get(i).copied().unwrap_or([0.0; 3]);
+        let (x, y) = (p[0] + lo[0], p[1] + lo[1]);
+        if x.is_finite() && y.is_finite() {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    }
+    w.aabb = [x0, y0, x1, y1];
 }
 
 pub(crate) fn entity_aabb(e: &acadrust::EntityType) -> [f32; 4] {

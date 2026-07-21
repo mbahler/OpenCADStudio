@@ -80,6 +80,11 @@ pub struct WireInstance {
     pub distance_b: f32,
     /// Index into the per-wire `WireConst` storage buffer (group 1).
     pub wire_id: u32,
+    /// World-space half-width at each endpoint for a TAPERED band. `0.0` =
+    /// use the per-wire constant (`WireConst.world_half_width`). The shader
+    /// interpolates between the two so the band tapers across the segment.
+    pub world_hw_a: f32,
+    pub world_hw_b: f32,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -94,6 +99,8 @@ impl WireInstance {
             wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, distance_a) as u64, shader_location: 4, format: wgpu::VertexFormat::Float32   },
             wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, distance_b) as u64, shader_location: 5, format: wgpu::VertexFormat::Float32   },
             wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, wire_id) as u64,    shader_location: 6, format: wgpu::VertexFormat::Uint32    },
+            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, world_hw_a) as u64, shader_location: 7, format: wgpu::VertexFormat::Float32   },
+            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, world_hw_b) as u64, shader_location: 8, format: wgpu::VertexFormat::Float32   },
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<WireInstance>() as u64,
@@ -119,7 +126,11 @@ pub struct WireConst {
     pub draw_depth: f32,
     pub align_end: f32,
     pub align_total: f32,
-    pub _pad0: f32,
+    /// World-space half-width for a wide-polyline band. `0.0` = a normal wire
+    /// (uses `half_width`, screen pixels). Non-zero = the vertex shader expands
+    /// the quad by `world_half_width / world_per_pixel` so the band tracks zoom
+    /// in drawing units.
+    pub world_half_width: f32,
     pub _pad1: f32,
     pub _pad2: f32,
 }
@@ -171,29 +182,38 @@ pub struct WireInstance {
     /// and the total wire length. `align_total == 0.0` = not aligned.
     pub align_end: f32,
     pub align_total: f32,
+    /// World-space half-width for a wide-polyline band (see `WireConst`). `0.0`
+    /// = a normal wire (uses `half_width`, screen pixels).
+    pub world_half_width: f32,
+    /// Per-endpoint world half-width for a tapered band (0 = use the constant
+    /// `world_half_width`). The shader interpolates across the segment.
+    pub world_hw_a: f32,
+    pub world_hw_b: f32,
 }
 
 #[cfg(target_arch = "wasm32")]
 impl WireInstance {
     pub fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
         // Offsets come from the struct layout (must match the shader location
-        // indices in wire.wgsl). The low residuals are appended at locations
-        // 10/11 so the existing 0-9 stay stable.
+        // indices in wire.wgsl). Scalars ride in PACKED vec4/vec2 attributes —
+        // WebGL2 / WebGPU cap vertex attributes at 16 and the one-scalar-per-
+        // location layout had grown to 17, so the pipeline failed to build and
+        // the web viewport drew no lines at all (#414). The struct fields are
+        // laid out so each packed group is contiguous.
         const ATTRS: &[wgpu::VertexAttribute] = &[
             wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, pos_a) as u64,          shader_location: 0,  format: wgpu::VertexFormat::Float32x3 },
             wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, pos_b) as u64,          shader_location: 1,  format: wgpu::VertexFormat::Float32x3 },
             wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, color) as u64,          shader_location: 2,  format: wgpu::VertexFormat::Unorm8x4  },
-            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, distance_a) as u64,     shader_location: 3,  format: wgpu::VertexFormat::Float32   },
-            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, distance_b) as u64,     shader_location: 4,  format: wgpu::VertexFormat::Float32   },
-            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, half_width) as u64,     shader_location: 5,  format: wgpu::VertexFormat::Float32   },
-            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, pattern_length) as u64, shader_location: 6,  format: wgpu::VertexFormat::Float32   },
-            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, pat0) as u64,           shader_location: 7,  format: wgpu::VertexFormat::Float32x4 },
-            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, pat1) as u64,           shader_location: 8,  format: wgpu::VertexFormat::Float32x4 },
-            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, draw_depth) as u64,     shader_location: 9,  format: wgpu::VertexFormat::Float32   },
-            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, pos_a_low) as u64,      shader_location: 10, format: wgpu::VertexFormat::Float32x3 },
-            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, pos_b_low) as u64,      shader_location: 11, format: wgpu::VertexFormat::Float32x3 },
-            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, align_end) as u64,      shader_location: 12, format: wgpu::VertexFormat::Float32   },
-            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, align_total) as u64,    shader_location: 13, format: wgpu::VertexFormat::Float32   },
+            // dists = (distance_a, distance_b, half_width, pattern_length)
+            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, distance_a) as u64,     shader_location: 3,  format: wgpu::VertexFormat::Float32x4 },
+            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, pat0) as u64,           shader_location: 4,  format: wgpu::VertexFormat::Float32x4 },
+            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, pat1) as u64,           shader_location: 5,  format: wgpu::VertexFormat::Float32x4 },
+            // misc = (draw_depth, align_end, align_total, world_half_width)
+            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, draw_depth) as u64,     shader_location: 6,  format: wgpu::VertexFormat::Float32x4 },
+            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, pos_a_low) as u64,      shader_location: 7,  format: wgpu::VertexFormat::Float32x3 },
+            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, pos_b_low) as u64,      shader_location: 8,  format: wgpu::VertexFormat::Float32x3 },
+            // taper = (world_hw_a, world_hw_b)
+            wgpu::VertexAttribute { offset: std::mem::offset_of!(WireInstance, world_hw_a) as u64,     shader_location: 9,  format: wgpu::VertexFormat::Float32x2 },
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<WireInstance>() as u64,
@@ -208,9 +228,6 @@ impl WireInstance {
 pub struct WireGpu {
     pub instance_buffer: wgpu::Buffer,
     pub instance_count: u32,
-    /// Paper-space bbox [x0, y0, x1, y1] for GPU scissor clipping.
-    /// Set only for viewport-projected wires; None for regular wires.
-    pub vp_scissor: Option<[f32; 4]>,
     /// `true` when the source `WireModel` also carries `fill_tris`
     /// (i.e. it is a 3D mesh face — PolyfaceMesh / PolygonMesh — whose
     /// outline lives in `points`). The wire pass skips these instances
@@ -258,22 +275,30 @@ fn wire_distances(wire: &WireModel) -> (Vec<f32>, f32, f32) {
     let n = wire.points.len();
     let mut dists = vec![0.0_f32; n];
     let mut has_break = false;
+    // Accumulate arc-length in f64 from double-single deltas (high + low). An
+    // f32-high-only delta `q[0] - p[0]` quantises ~0.1 at UTM coordinates
+    // (−1.2M), which shifts the dash phase and drifts parallel lines out of sync
+    // — the reason MLINE elements were CPU-dashed. `points_low` may be empty for
+    // non-RTE wires → treat the low half as zero (same as the old behaviour).
+    let mut acc = 0.0_f64;
     for i in 1..n {
         let p = wire.points[i - 1];
         let q = wire.points[i];
         if !p[0].is_finite() || !q[0].is_finite() {
             has_break = true;
             // plinegen=false: reset to 0 at the first real point after a NaN separator.
-            dists[i] = if !wire.plinegen && !p[0].is_finite() && q[0].is_finite() {
-                0.0
-            } else {
-                dists[i - 1]
-            };
+            if !wire.plinegen && !p[0].is_finite() && q[0].is_finite() {
+                acc = 0.0;
+            }
+            dists[i] = acc as f32;
         } else {
-            let dx = q[0] - p[0];
-            let dy = q[1] - p[1];
-            let dz = q[2] - p[2];
-            dists[i] = dists[i - 1] + (dx * dx + dy * dy + dz * dz).sqrt();
+            let pl = wire.points_low.get(i - 1).copied().unwrap_or([0.0; 3]);
+            let ql = wire.points_low.get(i).copied().unwrap_or([0.0; 3]);
+            let dx = (q[0] as f64 - p[0] as f64) + (ql[0] as f64 - pl[0] as f64);
+            let dy = (q[1] as f64 - p[1] as f64) + (ql[1] as f64 - pl[1] as f64);
+            let dz = (q[2] as f64 - p[2] as f64) + (ql[2] as f64 - pl[2] as f64);
+            acc += (dx * dx + dy * dy + dz * dz).sqrt();
+            dists[i] = acc as f32;
         }
     }
 
@@ -284,6 +309,29 @@ fn wire_distances(wire: &WireModel) -> (Vec<f32>, f32, f32) {
     let total = dists[n - 1];
     if total <= 1e-6 {
         return (dists, 0.0, 0.0);
+    }
+
+    // DGN line styles draw the pattern from the START vertex with continuous
+    // phase and are NOT end-aligned. The raw arc-length distances already put
+    // dist 0 at the first vertex, so a dash-first pattern begins a dash exactly
+    // there. Return before the A-type / centring logic that standard linetypes
+    // use (see `WireModel::dash_from_start`).
+    if wire.dash_from_start {
+        return (dists, 0.0, 0.0);
+    }
+
+    // Shared "A"-type for MLINE elements: the caller fixes the begin/end
+    // solid-dash length (`dash_align_end`, derived once from the multiline's
+    // centre-line length) so every parallel element runs the SAME interior phase
+    // — the shader's interior walk depends on `align_end`, not on the wire's own
+    // length — while `align_total` stays this wire's own length, so each element
+    // still ends on a dash at its own endpoint.
+    if let Some(ae) = wire.dash_align_end {
+        if total <= pat_len {
+            // Shorter than one full period → solid (matches the per-wire path).
+            return (dists, total, total);
+        }
+        return (dists, ae.clamp(1e-4, total * 0.5), total);
     }
 
     // Align only a proper alternating pattern that BEGINS with a dash followed
@@ -353,6 +401,7 @@ fn emit_wire_instances(wire: &WireModel, color: [f32; 4], draw_depth: f32) -> Ve
     }
     let (dists, align_end, align_total) = wire_distances(wire);
     let low = |i: usize| -> [f32; 3] { wire.points_low.get(i).copied().unwrap_or([0.0; 3]) };
+    let tw = |i: usize| -> f32 { wire.taper_widths.get(i).copied().unwrap_or(0.0) * 0.5 };
     let mut instances: Vec<WireInstance> = Vec::with_capacity(seg_count);
     for i in 0..seg_count {
         let a = wire.points[i];
@@ -375,6 +424,9 @@ fn emit_wire_instances(wire: &WireModel, color: [f32; 4], draw_depth: f32) -> Ve
             draw_depth,
             align_end,
             align_total,
+            world_half_width: wire.world_width * 0.5,
+            world_hw_a: tw(i),
+            world_hw_b: tw(i + 1),
         });
     }
     instances
@@ -399,7 +451,7 @@ pub(crate) fn emit_wire_native(
         draw_depth,
         align_end,
         align_total,
-        _pad0: 0.0,
+        world_half_width: wire.world_width * 0.5,
         _pad1: 0.0,
         _pad2: 0.0,
     };
@@ -409,6 +461,9 @@ pub(crate) fn emit_wire_native(
         return (Vec::new(), cst);
     }
     let low = |i: usize| -> [f32; 3] { wire.points_low.get(i).copied().unwrap_or([0.0; 3]) };
+    // Per-point half-width for a tapered band (empty ⇒ 0 ⇒ shader uses the
+    // per-wire constant width).
+    let tw = |i: usize| -> f32 { wire.taper_widths.get(i).copied().unwrap_or(0.0) * 0.5 };
     let mut instances: Vec<WireInstance> = Vec::with_capacity(seg_count);
     for i in 0..seg_count {
         let a = wire.points[i];
@@ -424,6 +479,8 @@ pub(crate) fn emit_wire_native(
             distance_a: dists[i],
             distance_b: dists[i + 1],
             wire_id,
+            world_hw_a: tw(i),
+            world_hw_b: tw(i + 1),
         });
     }
     (instances, cst)
@@ -431,17 +488,23 @@ pub(crate) fn emit_wire_native(
 
 /// Looks up a wire's draw-order depth from the per-entity map using the
 /// handle encoded in its `name`. Falls back to 0.0 (transient / preview
-/// wires that carry no document handle).
+/// wires that carry no document handle). A wire carrying a block-local
+/// `depth_override` (a wide-polyline band inside a block) composes it into
+/// the insert's own sub-range so the band orders against its block siblings.
 pub(crate) fn wire_draw_depth(
     wire: &WireModel,
-    depth_map: &rustc_hash::FxHashMap<u64, f32>,
+    depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
 ) -> f32 {
-    wire
+    let base = wire
         .name
         .parse::<u64>()
         .ok()
-        .and_then(|h| depth_map.get(&h).copied())
-        .unwrap_or(0.0)
+        .and_then(|h| depth_map.get(&h).copied());
+    match (base, wire.depth_override) {
+        (Some([d, half]), Some(local)) => d + local * half,
+        (Some([d, _]), None) => d,
+        (None, _) => 0.0,
+    }
 }
 
 /// Build the shared per-wire `WireConst` storage buffer and its bind group
@@ -489,8 +552,7 @@ impl WireGpu {
     pub fn from_run(
         device: &wgpu::Device,
         wires: &[WireModel],
-        depth_map: &rustc_hash::FxHashMap<u64, f32>,
-        scissor: Option<[f32; 4]>,
+        depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
         mesh_edge: bool,
         const_bgl: Option<&wgpu::BindGroupLayout>,
     ) -> Vec<Self> {
@@ -531,7 +593,6 @@ impl WireGpu {
                     Self {
                         instance_buffer: buf,
                         instance_count: chunk.len() as u32,
-                        vp_scissor: scissor,
                         is_3d_mesh_edge: mesh_edge,
                         const_bind_group: bg.clone(),
                     }
@@ -563,7 +624,6 @@ impl WireGpu {
                     Self {
                         instance_buffer: buf,
                         instance_count: chunk.len() as u32,
-                        vp_scissor: scissor,
                         is_3d_mesh_edge: mesh_edge,
                         const_bind_group: None,
                     }
@@ -578,7 +638,7 @@ impl WireGpu {
     pub fn from_batch(
         device: &wgpu::Device,
         wires: &[WireModel],
-        depth_map: &rustc_hash::FxHashMap<u64, f32>,
+        depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
         const_bgl: Option<&wgpu::BindGroupLayout>,
     ) -> Vec<Self> {
         let total_segs: usize = wires.iter().map(|w| w.points.len().saturating_sub(1)).sum();
@@ -621,7 +681,6 @@ impl WireGpu {
                     Self {
                         instance_buffer,
                         instance_count: chunk.len() as u32,
-                        vp_scissor: None,
                         is_3d_mesh_edge: false,
                         const_bind_group: bg.clone(),
                     }
@@ -647,7 +706,6 @@ impl WireGpu {
                     Self {
                         instance_buffer,
                         instance_count: chunk.len() as u32,
-                        vp_scissor: None,
                         is_3d_mesh_edge: false,
                         const_bind_group: None,
                     }

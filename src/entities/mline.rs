@@ -162,6 +162,7 @@ impl TruckConvertible for MLine {
             .collect();
 
         Some(TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Lines(pts),
             snap_pts,
             tangent_geoms: vec![],

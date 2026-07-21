@@ -40,7 +40,7 @@ const PHASE_FINALIZING: u8 = 3;
 /// the parser thread starts.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn pick_open_path() -> Option<(PathBuf, u64)> {
-    let handle = rfd::AsyncFileDialog::new()
+    let handle = crate::sys::file_dialog()
         .set_title("Open CAD file")
         .add_filter("CAD Files", &["dwg", "dxf", "bak", "sv$", "DWG", "DXF", "BAK"])
         .add_filter("DWG Files", &["dwg", "DWG"])
@@ -103,7 +103,7 @@ pub async fn open_path_with_phase(
 #[cfg(target_arch = "wasm32")]
 pub async fn pick_and_load_web(
 ) -> Result<(String, PathBuf, CadDocument, DerivedCaches), String> {
-    let handle = rfd::AsyncFileDialog::new()
+    let handle = crate::sys::file_dialog()
         .set_title("Open CAD file")
         .add_filter("CAD Files", &["dwg", "dxf", "DWG", "DXF"])
         .add_filter("All Files", &["*"])
@@ -338,7 +338,12 @@ pub fn dropped_on_save_count(
         })
         .count();
     for e in doc.entities() {
-        if matches!(e, acadrust::EntityType::Unknown(_)) {
+        if matches!(
+            e,
+            acadrust::EntityType::Unknown(_)
+                | acadrust::EntityType::SectionSymbol(_)
+                | acadrust::EntityType::ViewBorder(_)
+        ) {
             n += 1;
         }
     }
@@ -359,7 +364,7 @@ pub fn write_backup(path: &std::path::Path) {
 
 /// Show a file-open dialog and load the selected CTB or STB file.
 pub async fn pick_plot_style() -> Option<plot_style::PlotStyleTable> {
-    let handle = rfd::AsyncFileDialog::new()
+    let handle = crate::sys::file_dialog()
         .set_title("Load Plot Style Table")
         .add_filter("Plot Style Tables", &["ctb", "stb", "CTB", "STB"])
         .add_filter("CTB Files", &["ctb", "CTB"])
@@ -375,7 +380,7 @@ pub async fn pick_plot_style() -> Option<plot_style::PlotStyleTable> {
 /// Show a file-open dialog for raster images and decode the selected file.
 /// Returns `(path, pixel_width, pixel_height)` or an error string.
 pub async fn pick_image_file() -> Result<(PathBuf, u32, u32), String> {
-    let handle = rfd::AsyncFileDialog::new()
+    let handle = crate::sys::file_dialog()
         .set_title("Select Image File")
         .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tiff", "tif"])
         .add_filter("PNG", &["png"])

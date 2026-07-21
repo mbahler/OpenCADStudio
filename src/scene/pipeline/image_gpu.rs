@@ -62,9 +62,10 @@ struct ImageParams {
 
 pub struct ImageGpu {
     pub vertex_buffer: wgpu::Buffer,
+    /// Number of triangle vertices in `vertex_buffer` — 6 for a plain quad, or
+    /// more when the raster is clipped to a triangulated polygon.
+    pub vertex_count: u32,
     pub bind_group: wgpu::BindGroup,
-    /// Mirrors `ImageModel.vp_scissor` — see `HatchGpu.vp_scissor`.
-    pub vp_scissor: Option<[f32; 4]>,
     _texture: wgpu::Texture,
     _sampler: wgpu::Sampler,
     _params_buf: wgpu::Buffer,
@@ -157,19 +158,22 @@ impl ImageGpu {
             ],
         });
 
-        // ── Vertex buffer — two triangles ─────────────────────────────────
-        // corners: [p0=BL, p1=BR, p2=TR, p3=TL]
-        // UV: BL=(0,1), BR=(1,1), TR=(1,0), TL=(0,0)
-        let [p0, p1, p2, p3] = model.corners;
-        let [l0, l1, l2, l3] = model.corners_low;
-        let verts = [
-            ImageVertex { pos: p0, uv: [0.0, 1.0], pos_low: l0 },
-            ImageVertex { pos: p1, uv: [1.0, 1.0], pos_low: l1 },
-            ImageVertex { pos: p2, uv: [1.0, 0.0], pos_low: l2 },
-            ImageVertex { pos: p0, uv: [0.0, 1.0], pos_low: l0 },
-            ImageVertex { pos: p2, uv: [1.0, 0.0], pos_low: l2 },
-            ImageVertex { pos: p3, uv: [0.0, 0.0], pos_low: l3 },
-        ];
+        // ── Vertex buffer — the image's visible triangles ─────────────────
+        // `model.verts` already holds either the full quad or the triangulated
+        // clip polygon, each vertex carrying an RTE-split position and its UV.
+        let verts: Vec<ImageVertex> = model
+            .verts
+            .iter()
+            .map(|v| ImageVertex {
+                pos: v.pos,
+                uv: v.uv,
+                pos_low: v.pos_low,
+            })
+            .collect();
+        if verts.is_empty() {
+            return None;
+        }
+        let vertex_count = verts.len() as u32;
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("image.vbuf"),
             contents: bytemuck::cast_slice(&verts),
@@ -178,8 +182,8 @@ impl ImageGpu {
 
         Some(Self {
             vertex_buffer,
+            vertex_count,
             bind_group,
-            vp_scissor: model.vp_scissor,
             _texture: texture,
             _sampler,
             _params_buf,

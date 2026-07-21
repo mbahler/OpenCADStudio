@@ -47,7 +47,11 @@ pub type FallbackGeometry = (
 /// must therefore store mirrored angles, not geometric ones.
 pub fn arc_signed_span(start: f64, end: f64, ccw: bool) -> (f64, f64) {
     const TAU: f64 = std::f64::consts::TAU;
-    let (sa, ea) = if ccw { (start, end) } else { (TAU - start, TAU - end) };
+    let (sa, ea) = if ccw {
+        (start, end)
+    } else {
+        (TAU - start, TAU - end)
+    };
     (sa, ea - sa)
 }
 
@@ -63,13 +67,21 @@ pub fn arc_signed_span(start: f64, end: f64, ccw: bool) -> (f64, f64) {
 ///   from the per-frame override set by `Scene::wires_for_block` so
 ///   far-out arcs collapse to a handful of segments.
 pub fn arc_segments(radius: f64, span_abs: f64, chord_tol_world: f64) -> u32 {
+    arc_segments_floored(radius, span_abs, chord_tol_world, 8)
+}
+
+/// Like [`arc_segments`] but with a caller-chosen segment floor. The 2-D wire
+/// wants floor 8 so a circle reads as round; a curved-surface grid patch or a
+/// short arc wants a lower floor so a small span isn't forced to 8 steps. Cap
+/// stays 512.
+pub fn arc_segments_floored(radius: f64, span_abs: f64, chord_tol_world: f64, floor: u32) -> u32 {
     if span_abs < 1e-9 || radius < 1e-9 {
-        return 1;
+        return floor.max(1);
     }
     let tol = chord_tol_world.max(1e-9).min(radius * 0.99);
     // θ where r * (1 - cos(θ/2)) = tol  →  θ = 2 * acos(1 - tol/r).
     let max_step = (2.0 * (1.0 - tol / radius).acos()).max(1e-6);
-    ((span_abs / max_step).ceil() as u32).clamp(8, 512)
+    ((span_abs / max_step).ceil() as u32).clamp(floor, 512)
 }
 
 /// Chord tolerance for the load-time fill polygon: 0.1% of radius,

@@ -29,6 +29,7 @@ impl TruckConvertible for Ray {
         ];
         let start: [f64; 3] = [bp.x, bp.y, bp.z];
         Some(TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Lines(vec![start, far]),
             snap_pts: vec![],
             tangent_geoms: vec![],
@@ -169,6 +170,7 @@ impl TruckConvertible for XLine {
             bp.z - nz * DISPLAY_EXTENT,
         ];
         Some(TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Lines(vec![far_neg, far_pos]),
             snap_pts: vec![],
             tangent_geoms: vec![],

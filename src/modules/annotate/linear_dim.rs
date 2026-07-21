@@ -218,6 +218,14 @@ fn v3(pt: DVec3) -> Vector3 {
 
 fn preview_wire(points: Vec<DVec3>) -> WireModel {
     WireModel {
+        taper_widths: Vec::new(),
+        world_width: 0.0,
+        depth_override: None,
+        fill_is_3d: false,
+        pick_tris: Vec::new(),
+        pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
         name: "dimlinear_preview".to_string(),
         points: points
@@ -236,7 +244,6 @@ fn preview_wire(points: Vec<DVec3>) -> WireModel {
         key_vertices: vec![],
         aabb: WireModel::UNBOUNDED_AABB,
         plinegen: true,
-        vp_scissor: None,
         fill_tris: vec![],
         fill_tris_low: Vec::new(),
     }

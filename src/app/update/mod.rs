@@ -130,8 +130,9 @@ impl OpenCADStudio {
             _ => {}
         }
         self.active_modal = None;
-        // Recentre the next dialog and drop any in-progress drag.
+        // Recentre / reset the size of the next dialog and drop any drag.
         self.modal_offset = iced::Vector::ZERO;
+        self.modal_resize = iced::Vector::ZERO;
         self.modal_drag_last = None;
         self.modal_dragging = false;
     }
@@ -407,7 +408,7 @@ impl OpenCADStudio {
 
             Message::XAttachPick => Task::perform(
                 async {
-                    let handle = rfd::AsyncFileDialog::new()
+                    let handle = crate::sys::file_dialog()
                         .set_title("Select External Reference File")
                         .add_filter("CAD Files", &["dwg", "dxf", "bak", "DWG", "DXF", "BAK"])
                         .add_filter("DWG Files", &["dwg", "DWG"])
@@ -445,7 +446,7 @@ impl OpenCADStudio {
                 let name = block_name.clone();
                 Task::perform(
                     async move {
-                        let path = rfd::AsyncFileDialog::new()
+                        let path = crate::sys::file_dialog()
                             .set_title("Save Block As")
                             .set_file_name("block.dwg")
                             .add_filter("DWG Files", &["dwg"])
@@ -468,7 +469,7 @@ impl OpenCADStudio {
                 let csv_clone = csv.clone();
                 Task::perform(
                     async move {
-                        let path = rfd::AsyncFileDialog::new()
+                        let path = crate::sys::file_dialog()
                             .set_title("Save Data Extraction")
                             .set_file_name("extraction.csv")
                             .add_filter("CSV", &["csv"])
@@ -511,7 +512,7 @@ impl OpenCADStudio {
                 }
                 Task::perform(
                     async {
-                        rfd::AsyncFileDialog::new()
+                        crate::sys::file_dialog()
                             .set_title("Export STL")
                             .set_file_name("export.stl")
                             .add_filter("STL Files", &["stl"])
@@ -538,7 +539,7 @@ impl OpenCADStudio {
                 }
                 Task::perform(
                     async {
-                        rfd::AsyncFileDialog::new()
+                        crate::sys::file_dialog()
                             .set_title("Export STEP AP203")
                             .set_file_name("export.step")
                             .add_filter("STEP Files", &["step", "stp"])
@@ -558,7 +559,7 @@ impl OpenCADStudio {
             // ── OBJ import ────────────────────────────────────────────────
             Message::ObjImport => Task::perform(
                 async {
-                    rfd::AsyncFileDialog::new()
+                    crate::sys::file_dialog()
                         .set_title("Import OBJ Mesh")
                         .add_filter("Wavefront OBJ", &["obj", "OBJ"])
                         .add_filter("All Files", &["*"])
@@ -769,7 +770,7 @@ impl OpenCADStudio {
                 // the submit path, which tokenises multi-token lines — so a typed
                 // token, a pasted `LINE 0,0 10,10`, or API-fed text all run their
                 // spaces as step separators. A leading `>` keeps spaces literal.
-                if !s.starts_with('>') && s.contains(' ') {
+                if !self.command_line.literal_spaces && !s.starts_with('>') && s.contains(' ') {
                     self.command_line.input = s;
                     return self.update(Message::CommandSubmit);
                 }
@@ -855,6 +856,12 @@ impl OpenCADStudio {
                 Task::none()
             }
 
+            Message::CommandLiteralToggle => {
+                self.command_line.literal_spaces = !self.command_line.literal_spaces;
+                self.save_config();
+                self.focus_cmd_input()
+            }
+
             Message::CommandHistoryToggle => {
                 self.command_line.toggle_history();
                 // On open, snapshot the current log into the read-only editor
@@ -923,10 +930,11 @@ impl OpenCADStudio {
                     self.mtext_type(" ");
                     return Task::none();
                 }
-                // A leading `>` puts the command line in "literal space" mode so
-                // the user can type arguments that contain spaces; otherwise
-                // Space works like Enter. The `>` is stripped on submit.
-                if self.command_line.input.starts_with('>') {
+                // A leading `>` (or the persistent `>` toggle) puts the command
+                // line in "literal space" mode so the user can type arguments
+                // that contain spaces; otherwise Space works like Enter. The
+                // typed `>` is stripped on submit.
+                if self.command_line.literal_spaces || self.command_line.input.starts_with('>') {
                     self.command_line.input.push(' ');
                     return Task::none();
                 }
@@ -1540,6 +1548,7 @@ impl OpenCADStudio {
             Message::ToggleSnapEnabled => {
                 self.snapper.toggle_global();
                 self.sync_vport_display(self.active_tab);
+                self.persist_settings_if_changed();
                 Task::none()
             }
             Message::ToggleGridSnap => {
@@ -2040,6 +2049,7 @@ impl OpenCADStudio {
             }
             Message::ToggleSnap(t) => {
                 self.snapper.toggle(t);
+                self.persist_settings_if_changed();
                 Task::none()
             }
             Message::ToggleSnapPopup => {
@@ -2268,6 +2278,10 @@ impl OpenCADStudio {
             Message::MTextOk => {
                 let committed = self.mtext_commit();
                 self.post_editor_closed(committed)
+            }
+            Message::MTextApply => {
+                self.mtext_apply();
+                Task::none()
             }
             Message::MTextCancel => {
                 self.mtext_cancel();
@@ -2615,6 +2629,32 @@ impl OpenCADStudio {
                                     self.tabs[i].scene.document.get_entity_mut(handle)
                                 {
                                     crate::scene::view::dispatch::toggle_invisible(entity);
+                                }
+                            }
+                            // Uniform-scale checkbox on a block reference
+                            // (#427): checking collapses Y/Z onto X; unchecking
+                            // only switches the panel to per-axis rows.
+                            "ins_uniform" => {
+                                let scales = match self.tabs[i].scene.document.get_entity(handle) {
+                                    Some(acadrust::EntityType::Insert(ins)) => {
+                                        Some((ins.x_scale(), ins.y_scale(), ins.z_scale()))
+                                    }
+                                    _ => None,
+                                };
+                                let Some((sx, sy, sz)) = scales else { continue };
+                                let eq = (sx - sy).abs() < 1e-12 && (sx - sz).abs() < 1e-12;
+                                let checked =
+                                    eq && !self.props_asym_scale.contains(&handle.value());
+                                if checked {
+                                    self.props_asym_scale.insert(handle.value());
+                                } else {
+                                    self.props_asym_scale.remove(&handle.value());
+                                    if let Some(acadrust::EntityType::Insert(ins)) =
+                                        self.tabs[i].scene.document.get_entity_mut(handle)
+                                    {
+                                        ins.set_y_scale(sx);
+                                        ins.set_z_scale(sx);
+                                    }
                                 }
                             }
                             _ => {
@@ -3200,11 +3240,33 @@ impl OpenCADStudio {
                 self.modal_drag_last = None;
                 Task::none()
             }
+            Message::ModalResizeGrab => {
+                // Start a resize; the first ModalDragMove seeds the reference.
+                self.modal_resizing = true;
+                self.modal_drag_last = None;
+                Task::none()
+            }
             Message::ModalDragMove(p) => {
-                if self.modal_dragging {
-                    if let Some(last) = self.modal_drag_last {
-                        self.modal_offset.x += p.x - last.x;
-                        self.modal_offset.y += p.y - last.y;
+                if let Some(last) = self.modal_drag_last {
+                    let (dx, dy) = (p.x - last.x, p.y - last.y);
+                    if self.modal_resizing {
+                        // The grip sits bottom-right, so dragging out grows the
+                        // box. The delta is added to each dialog's natural size,
+                        // so clamp it at zero — dragging in past the natural size
+                        // does nothing (the natural size is the floor).
+                        let nx = (self.modal_resize.x + dx).max(0.0);
+                        let ny = (self.modal_resize.y + dy).max(0.0);
+                        let (rx, ry) = (nx - self.modal_resize.x, ny - self.modal_resize.y);
+                        self.modal_resize.x = nx;
+                        self.modal_resize.y = ny;
+                        // The box is centred, so shift the centre by half the
+                        // growth to pin the top-left corner — the grip then
+                        // tracks the cursor instead of drifting at half speed.
+                        self.modal_offset.x += rx * 0.5;
+                        self.modal_offset.y += ry * 0.5;
+                    } else if self.modal_dragging {
+                        self.modal_offset.x += dx;
+                        self.modal_offset.y += dy;
                         // Clamp so the dialog stops at the window edge instead
                         // of being squeezed (the off-centre padding shrinks the
                         // dialog once it overlaps a border).
@@ -3217,12 +3279,15 @@ impl OpenCADStudio {
                             self.modal_offset.y = self.modal_offset.y.clamp(-max_y, max_y);
                         }
                     }
+                }
+                if self.modal_dragging || self.modal_resizing {
                     self.modal_drag_last = Some(p);
                 }
                 Task::none()
             }
             Message::ModalDragRelease => {
                 self.modal_dragging = false;
+                self.modal_resizing = false;
                 self.modal_drag_last = None;
                 Task::none()
             }
@@ -3330,6 +3395,22 @@ impl OpenCADStudio {
             // (Start page shows a "Support on Patreon" prompt when empty).
             Message::PatronsFetched(Err(_)) => {
                 self.patrons = crate::patreon::merge_manual(Vec::new());
+                Task::none()
+            }
+            Message::VideosFetched(Ok(videos)) => {
+                self.videos_loading = false;
+                self.set_videos(videos);
+                Task::none()
+            }
+            // Offline / markup change: keep whatever the on-disk cache seeded.
+            Message::VideosFetched(Err(_)) => {
+                self.videos_loading = false;
+                Task::none()
+            }
+            Message::RecentThumbsLoaded(thumbs) => {
+                for (path, handle) in thumbs {
+                    self.recent_thumbs.insert(path, handle);
+                }
                 Task::none()
             }
             Message::PluginReleasesFetched(repo, Ok(tags)) => {

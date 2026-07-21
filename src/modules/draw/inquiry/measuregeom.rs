@@ -67,6 +67,14 @@ impl MeasureGeomCommand {
     /// Build a cyan preview wire connecting the picked points and the cursor.
     fn preview_wire(name: &str, pts: Vec<[f32; 3]>) -> WireModel {
         WireModel {
+            taper_widths: Vec::new(),
+            world_width: 0.0,
+            depth_override: None,
+            fill_is_3d: false,
+            pick_tris: Vec::new(),
+            pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: name.to_string(),
             points: pts,
@@ -82,7 +90,6 @@ impl MeasureGeomCommand {
             key_vertices: vec![],
             aabb: WireModel::UNBOUNDED_AABB,
             plinegen: true,
-            vp_scissor: None,
             fill_tris: vec![],
             fill_tris_low: Vec::new(),
         }

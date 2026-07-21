@@ -19,10 +19,20 @@ fn to_truck(spl: &Spline) -> TruckEntity {
         // polyline so it still draws.
         if spl.fit_points.len() >= 2 {
             let closed = spl.flags.closed || spl.flags.periodic;
-            let pts = catmull_rom_polyline(&spl.fit_points, closed);
+            // A fit spline is a C² cubic through its fit points honouring the
+            // stored end tangents. Catmull-Rom ignores those tangents (its ends
+            // use local slopes), so an open curve peels away from the true shape
+            // at the ends; interpolate properly instead. Closed splines wrap,
+            // which the clamped solve doesn't model, so they keep Catmull-Rom.
+            let pts = if closed {
+                catmull_rom_polyline(&spl.fit_points, true)
+            } else {
+                fit_spline_polyline(spl)
+            };
             let key_vertices: Vec<[f64; 3]> =
                 spl.fit_points.iter().map(|p| [p.x, p.y, p.z]).collect();
             return TruckEntity {
+                pick_tris: Vec::new(),
                 object: TruckObject::Lines(pts),
                 snap_pts: vec![],
                 tangent_geoms: vec![],
@@ -31,6 +41,7 @@ fn to_truck(spl: &Spline) -> TruckEntity {
             };
         }
         return TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Point(builder::vertex(Point3::new(0.0, 0.0, 0.0))),
             snap_pts: vec![],
             tangent_geoms: vec![],
@@ -106,6 +117,7 @@ fn to_truck(spl: &Spline) -> TruckEntity {
     };
 
     TruckEntity {
+        pick_tris: Vec::new(),
         object,
         snap_pts: vec![],
         tangent_geoms: vec![],
@@ -139,18 +151,30 @@ fn catmull_rom_polyline(pts: &[acadrust::types::Vector3], closed: bool) -> Vec<[
         let p2 = get(seg as isize + 1);
         // Reflect at open ends so the tangent isn't pulled toward a clamped dup.
         let p0 = if !closed && seg == 0 {
-            [2.0 * p1[0] - p2[0], 2.0 * p1[1] - p2[1], 2.0 * p1[2] - p2[2]]
+            [
+                2.0 * p1[0] - p2[0],
+                2.0 * p1[1] - p2[1],
+                2.0 * p1[2] - p2[2],
+            ]
         } else {
             get(seg as isize - 1)
         };
         let p3 = if !closed && seg == seg_count - 1 {
-            [2.0 * p2[0] - p1[0], 2.0 * p2[1] - p1[1], 2.0 * p2[2] - p1[2]]
+            [
+                2.0 * p2[0] - p1[0],
+                2.0 * p2[1] - p1[1],
+                2.0 * p2[2] - p1[2],
+            ]
         } else {
             get(seg as isize + 2)
         };
         // Emit t in [0, 1); the final segment also emits t = 1 so the curve
         // closes onto the last point (no duplicate shared vertices otherwise).
-        let last = if seg == seg_count - 1 { STEPS } else { STEPS - 1 };
+        let last = if seg == seg_count - 1 {
+            STEPS
+        } else {
+            STEPS - 1
+        };
         for s in 0..=last {
             let t = s as f64 / STEPS as f64;
             let (t2, t3) = (t * t, t * t * t);
@@ -168,9 +192,139 @@ fn catmull_rom_polyline(pts: &[acadrust::types::Vector3], closed: bool) -> Vec<[
     out
 }
 
+/// Interpolate an open fit-point spline into a dense polyline: the C² cubic that
+/// passes through every fit point, clamped to the stored start/end tangents when
+/// present (natural end otherwise). This is what a fit spline *is* — the same
+/// interpolation AutoCAD-family tools draw — so its ends follow the specified
+/// tangents instead of the local slopes Catmull-Rom would use.
+fn fit_spline_polyline(spl: &Spline) -> Vec<[f64; 3]> {
+    let p: Vec<[f64; 3]> = spl.fit_points.iter().map(|q| [q.x, q.y, q.z]).collect();
+    let n = p.len();
+    if n < 3 {
+        // A single segment can't be C²-fit; a straight chord is the honest draw.
+        return p;
+    }
+
+    // Parameterise the fit points (unnormalised, so a unit end tangent — how the
+    // tangents are stored — is a consistent dP/dt). Match the spline's knot
+    // parameterisation: 2 = uniform, 1 = centripetal (√chord), else chord.
+    let dist = |a: [f64; 3], b: [f64; 3]| {
+        let (dx, dy, dz) = (b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    };
+    let mut t = vec![0.0f64; n];
+    for i in 1..n {
+        let d = dist(p[i - 1], p[i]).max(1e-9);
+        let step = match spl.knot_parameterization {
+            2 => 1.0,
+            1 => d.sqrt(),
+            _ => d,
+        };
+        t[i] = t[i - 1] + step;
+    }
+    let h: Vec<f64> = (0..n - 1).map(|i| (t[i + 1] - t[i]).max(1e-9)).collect();
+
+    let nonzero = |v: &acadrust::types::Vector3| v.x * v.x + v.y * v.y + v.z * v.z > 1e-18;
+    let begin = nonzero(&spl.begin_tangent).then(|| {
+        [
+            spl.begin_tangent.x,
+            spl.begin_tangent.y,
+            spl.begin_tangent.z,
+        ]
+    });
+    let end = nonzero(&spl.end_tangent)
+        .then(|| [spl.end_tangent.x, spl.end_tangent.y, spl.end_tangent.z]);
+
+    // Solve for the knot slopes m_i = dP/dt per coordinate. The tridiagonal is
+    // the C² continuity system; the end rows are the clamped tangent (m fixed)
+    // or the natural condition (S'' = 0) when no tangent is stored.
+    let mut slopes = [vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n]];
+    for k in 0..3 {
+        let seg_slope = |i: usize| (p[i + 1][k] - p[i][k]) / h[i];
+        let (mut a, mut b, mut c, mut d) = (vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+        match begin {
+            Some(bt) => {
+                b[0] = 1.0;
+                d[0] = bt[k];
+            }
+            None => {
+                b[0] = 2.0;
+                c[0] = 1.0;
+                d[0] = 3.0 * seg_slope(0);
+            }
+        }
+        for i in 1..n - 1 {
+            a[i] = h[i];
+            b[i] = 2.0 * (h[i - 1] + h[i]);
+            c[i] = h[i - 1];
+            d[i] = 3.0 * (h[i] * seg_slope(i - 1) + h[i - 1] * seg_slope(i));
+        }
+        match end {
+            Some(et) => {
+                b[n - 1] = 1.0;
+                d[n - 1] = et[k];
+            }
+            None => {
+                a[n - 1] = 1.0;
+                b[n - 1] = 2.0;
+                d[n - 1] = 3.0 * seg_slope(n - 2);
+            }
+        }
+        thomas_solve(&a, &b, &c, &mut d);
+        slopes[k] = d;
+    }
+
+    // Evaluate each segment as a cubic Hermite (dP/du = slope · h_i).
+    const STEPS: usize = 32;
+    let mut out = Vec::with_capacity((n - 1) * STEPS + 1);
+    for i in 0..n - 1 {
+        let last = if i == n - 2 { STEPS } else { STEPS - 1 };
+        for s in 0..=last {
+            let u = s as f64 / STEPS as f64;
+            let (u2, u3) = (u * u, u * u * u);
+            let h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+            let h10 = u3 - 2.0 * u2 + u;
+            let h01 = -2.0 * u3 + 3.0 * u2;
+            let h11 = u3 - u2;
+            let mut q = [0.0f64; 3];
+            for k in 0..3 {
+                let m0 = slopes[k][i] * h[i];
+                let m1 = slopes[k][i + 1] * h[i];
+                q[k] = h00 * p[i][k] + h10 * m0 + h01 * p[i + 1][k] + h11 * m1;
+            }
+            out.push(q);
+        }
+    }
+    out
+}
+
+/// In-place Thomas solve for a tridiagonal system (`a` sub-, `b` main-, `c`
+/// super-diagonal; `d` right-hand side, overwritten with the solution).
+fn thomas_solve(a: &[f64], b: &[f64], c: &[f64], d: &mut [f64]) {
+    let n = d.len();
+    let mut cp = vec![0.0f64; n];
+    cp[0] = c[0] / b[0];
+    d[0] /= b[0];
+    for i in 1..n {
+        let m = b[i] - a[i] * cp[i - 1];
+        cp[i] = c[i] / m;
+        d[i] = (d[i] - a[i] * d[i - 1]) / m;
+    }
+    for i in (0..n - 1).rev() {
+        d[i] -= cp[i] * d[i + 1];
+    }
+}
+
 fn grips(spline: &Spline) -> Vec<GripDef> {
-    spline
-        .control_points
+    // A fit-point spline carries no control points, so its editable points — and
+    // therefore its grips — are the fit points it interpolates. A CV spline
+    // grips its control vertices.
+    let source = if spline.control_points.is_empty() {
+        &spline.fit_points
+    } else {
+        &spline.control_points
+    };
+    source
         .iter()
         .enumerate()
         .map(|(i, p)| square_grip(i, glam::DVec3::new(p.x, p.y, p.z)))
@@ -263,21 +417,9 @@ fn properties(spline: &Spline) -> Vec<PropSection> {
                     spline.fit_points.len().to_string(),
                 ),
                 ro("Fit Point", "fit_pt_index", "0"),
-                edit(
-                    "Fit Point X",
-                    "fit_pt_x",
-                    fp0.map(|p| p.x).unwrap_or(0.0),
-                ),
-                edit(
-                    "Fit Point Y",
-                    "fit_pt_y",
-                    fp0.map(|p| p.y).unwrap_or(0.0),
-                ),
-                edit(
-                    "Fit Point Z",
-                    "fit_pt_z",
-                    fp0.map(|p| p.z).unwrap_or(0.0),
-                ),
+                edit("Fit Point X", "fit_pt_x", fp0.map(|p| p.x).unwrap_or(0.0)),
+                edit("Fit Point Y", "fit_pt_y", fp0.map(|p| p.y).unwrap_or(0.0)),
+                edit("Fit Point Z", "fit_pt_z", fp0.map(|p| p.z).unwrap_or(0.0)),
                 edit("Fit Tolerance", "fit_tolerance", spline.fit_tolerance),
                 edit("Start Tangent X", "start_tan_x", spline.begin_tangent.x),
                 edit("Start Tangent Y", "start_tan_y", spline.begin_tangent.y),
@@ -349,7 +491,15 @@ fn apply_geom_prop(spline: &mut Spline, field: &str, value: &str) {
 }
 
 fn apply_grip(spline: &mut Spline, grip_id: usize, apply: GripApply) {
-    if let Some(cp) = spline.control_points.get_mut(grip_id) {
+    // Match the grip source: dragging a fit-point spline's grip moves the fit
+    // point (the curve re-fits through it on the next tessellation, keeping the
+    // stored end tangents); a CV spline moves the control vertex.
+    let target = if spline.control_points.is_empty() {
+        spline.fit_points.get_mut(grip_id)
+    } else {
+        spline.control_points.get_mut(grip_id)
+    };
+    if let Some(cp) = target {
         match apply {
             GripApply::Absolute(p) => {
                 cp.x = p.x as f64;
@@ -410,7 +560,11 @@ impl crate::entities::traits::Grippable for Spline {
             },
         ]
     }
-    fn apply_grip_menu(&mut self, grip_id: usize, action: crate::scene::model::object::GripMenuAction) {
+    fn apply_grip_menu(
+        &mut self,
+        grip_id: usize,
+        action: crate::scene::model::object::GripMenuAction,
+    ) {
         use crate::scene::model::object::GripMenuAction as A;
         let n = self.control_points.len();
         let min_cv = (self.degree as usize).saturating_add(1).max(2);
@@ -495,4 +649,3 @@ impl crate::entities::traits::Transformable for Spline {
         apply_transform(self, t);
     }
 }
-

@@ -6,7 +6,7 @@ use crate::entities::common::{
     edit_prop as edit, parse_f64, ro_prop as ro, square_grip, stepper_prop as stepper,
 };
 use crate::entities::traits::{Grippable, PropertyEditable, Transformable, TruckConvertible};
-use crate::scene::convert::acad_to_truck::{TruckEntity, TruckObject};
+use crate::scene::convert::acad_to_truck::{extrusion_wall_tris, TruckEntity, TruckObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 use crate::scene::model::wire_model::TangentGeom;
 
@@ -26,6 +26,7 @@ fn tessellate_polyline(pl: &Polyline) -> TruckEntity {
 
     let key_verts = pts.clone();
     TruckEntity {
+        pick_tris: Vec::new(),
         object: TruckObject::Lines(points),
         snap_pts: vec![],
         tangent_geoms: vec![],
@@ -165,10 +166,40 @@ impl Transformable for Polyline {
 
 // ── Polyline2D (heavy 2D polyline with bulge) ─────────────────────────────────
 
+/// The vertices a curve-/spline-fit 2D polyline actually DRAWS: the
+/// fit-generated points (VertexFlags 8 / 1) plus any unflagged originals,
+/// with the spline-frame CONTROL points (flag 16) dropped — those are editing
+/// scaffolding shown only under SPLFRAME, and chaining through them draws
+/// spokes across the fitted curve (#408). `None` = no fit data, draw the
+/// stored vertices as-is. A fit-flagged polyline whose fit points are missing
+/// falls back to the stored vertices rather than drawing nothing.
+pub fn drawn_vertices2d(
+    pl: &Polyline2D,
+) -> Option<Vec<acadrust::entities::Vertex2D>> {
+    use acadrust::entities::polyline::VertexFlags;
+    let has_fit = pl.vertices.iter().any(|v| {
+        v.flags.bits()
+            & (VertexFlags::SPLINE_VERTEX.bits() | VertexFlags::EXTRA_VERTEX.bits())
+            != 0
+    });
+    if !has_fit {
+        return None;
+    }
+    let kept: Vec<_> = pl
+        .vertices
+        .iter()
+        .filter(|v| v.flags.bits() & VertexFlags::SPLINE_CONTROL.bits() == 0)
+        .cloned()
+        .collect();
+    (kept.len() >= 2).then_some(kept)
+}
+
 fn tessellate_polyline2d(pl: &Polyline2D) -> TruckEntity {
-    let verts = &pl.vertices;
+    let filtered = drawn_vertices2d(pl);
+    let verts: &[acadrust::entities::Vertex2D] = filtered.as_deref().unwrap_or(&pl.vertices);
     if verts.is_empty() {
         return TruckEntity {
+            pick_tris: Vec::new(),
             object: TruckObject::Lines(vec![]),
             snap_pts: vec![],
             tangent_geoms: vec![],
@@ -236,6 +267,28 @@ fn tessellate_polyline2d(pl: &Polyline2D) -> TruckEntity {
             let (wbx, wby, wbz) = to_wcs(ox1, oy1);
             kv.push([wbx, wby, wbz]);
         }
+        // A wide Polyline2D extrudes its whole band into a solid tube (walls +
+        // caps), same as a thickened LwPolyline; a zero-width one falls through
+        // to the centre-line extrusion below.
+        let is_wide = pl.start_width > 1e-9
+            || pl.end_width > 1e-9
+            || pl
+                .vertices
+                .iter()
+                .any(|v| v.start_width > 1e-9 || v.end_width > 1e-9);
+        if is_wide {
+            let (origin, fills) = wide_fills(pl);
+            let (fill_tris, lines) =
+                crate::entities::common::thick_band_tube(origin, &fills, t, normal, &to_wcs);
+            return TruckEntity {
+                pick_tris: fill_tris.clone(),
+                object: TruckObject::Lines(lines),
+                snap_pts: vec![],
+                tangent_geoms: tgs,
+                key_vertices: kv,
+                fill_tris,
+            };
+        }
         let mut pts: Vec<[f64; 3]> = Vec::with_capacity(path.len() * 2 + kv.len() * 3 + 4);
         pts.extend_from_slice(&path);
         pts.push([f64::NAN; 3]);
@@ -253,6 +306,7 @@ fn tessellate_polyline2d(pl: &Polyline2D) -> TruckEntity {
             }
         }
         return TruckEntity {
+            pick_tris: extrusion_wall_tris(&path, [t * nx, t * ny, t * nz]),
             object: TruckObject::Lines(pts),
             snap_pts: vec![],
             tangent_geoms: tgs,
@@ -300,12 +354,54 @@ fn tessellate_polyline2d(pl: &Polyline2D) -> TruckEntity {
         key_verts.push([p1.x, p1.y, p1.z]);
     }
 
+    let (fill_origin, fills) = wide_fills(pl);
+    // A wide Polyline2D whose per-vertex widths VARY renders a smooth taper; a
+    // uniform-width one keeps the constant-band Contour.
+    let object = match tapered_band_verts_2d(pl) {
+        Some(band_verts) => {
+            let (pts, widths) = crate::entities::common::tapered_band_points(
+                &band_verts,
+                pl.is_closed(),
+                &to_wcs,
+            );
+            TruckObject::TaperedLines(pts, widths)
+        }
+        None => TruckObject::Contour(edges.into_iter().collect::<Wire>()),
+    };
     TruckEntity {
-        object: TruckObject::Contour(edges.into_iter().collect::<Wire>()),
+        pick_tris: crate::entities::common::wide_band_tris(fill_origin, &fills),
+        object,
         snap_pts: vec![],
         tangent_geoms: tangents,
         key_vertices: key_verts,
         fill_tris: vec![],
+    }
+}
+
+/// Per-vertex `(location, bulge, start_width, end_width)` band description for a
+/// wide Polyline2D whose width VARIES — `None` when the width is uniform.
+fn tapered_band_verts_2d(
+    pl: &acadrust::entities::Polyline2D,
+) -> Option<Vec<([f64; 2], f64, f64, f64)>> {
+    let d = pl.start_width.max(pl.end_width);
+    let filtered = drawn_vertices2d(pl);
+    let verts: &[acadrust::entities::Vertex2D] = filtered.as_deref().unwrap_or(&pl.vertices);
+    let band: Vec<([f64; 2], f64, f64, f64)> = verts
+        .iter()
+        .map(|v| {
+            let sw = if v.start_width > 1e-9 { v.start_width } else { d };
+            let ew = if v.end_width > 1e-9 { v.end_width } else { d };
+            ([v.location.x, v.location.y], v.bulge, sw, ew)
+        })
+        .collect();
+    let w0 = band.first().map_or(0.0, |v| v.2);
+    let varies = band
+        .iter()
+        .any(|&(_, _, sw, ew)| (sw - w0).abs() > 1e-9 || (ew - w0).abs() > 1e-9);
+    if varies && w0.max(band.iter().map(|v| v.3).fold(0.0, f64::max)) > 1e-9 {
+        Some(band)
+    } else {
+        None
     }
 }
 
@@ -578,6 +674,7 @@ fn tessellate_polyline3d(pl: &Polyline3D) -> TruckEntity {
     }
 
     TruckEntity {
+        pick_tris: Vec::new(),
         object: TruckObject::Lines(points),
         snap_pts: vec![],
         tangent_geoms: vec![],
@@ -765,9 +862,11 @@ impl Transformable for Polyline3D {
 /// relative to (the first vertex). See `lwpolyline::wide_fills` — offsets are
 /// f32 from `origin` so the band stays precise at UTM-scale coordinates.
 pub(crate) fn wide_fills(pl: &acadrust::entities::Polyline2D) -> ([f64; 2], Vec<Vec<[f32; 2]>>) {
-    // Width is applied full to each side of the centreline (not halved).
-    let hw_default = pl.start_width.max(pl.end_width) as f32;
-    let verts = &pl.vertices;
+    // The stored widths are the band's FULL width and `polyline_segment_fill`
+    // offsets ±hw about the centreline — halve them. See `lwpolyline::wide_fills`.
+    let hw_default = pl.start_width.max(pl.end_width) as f32 * 0.5;
+    let filtered = drawn_vertices2d(pl);
+    let verts: &[acadrust::entities::Vertex2D] = filtered.as_deref().unwrap_or(&pl.vertices);
     let n = verts.len();
     if n < 2 {
         return ([0.0; 2], vec![]);
@@ -779,12 +878,12 @@ pub(crate) fn wide_fills(pl: &acadrust::entities::Polyline2D) -> ([f64; 2], Vec<
         let v0 = &verts[i];
         let v1 = &verts[(i + 1) % n];
         let hw0 = if v0.start_width > 1e-9 {
-            v0.start_width as f32
+            v0.start_width as f32 * 0.5
         } else {
             hw_default
         };
         let hw1 = if v0.end_width > 1e-9 {
-            v0.end_width as f32
+            v0.end_width as f32 * 0.5
         } else {
             hw_default
         };

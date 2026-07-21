@@ -39,12 +39,33 @@ pub async fn read_clipboard_text() -> Option<String> {
 /// (a follow-up).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn handle_path(h: &rfd::FileHandle) -> std::path::PathBuf {
-    h.path().to_path_buf()
+    let p = h.path().to_path_buf();
+    // Every dialog result funnels through here — remember its folder so the
+    // next dialog opens where the user left off.
+    crate::config::remember_dialog_dir(&p);
+    p
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn handle_path(h: &rfd::FileHandle) -> std::path::PathBuf {
     std::path::PathBuf::from(h.file_name())
+}
+
+/// New async file dialog seeded with the last directory a dialog was used in.
+/// All pickers should start from this instead of `rfd::AsyncFileDialog::new()`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn file_dialog() -> rfd::AsyncFileDialog {
+    let dlg = rfd::AsyncFileDialog::new();
+    match crate::config::last_dialog_dir() {
+        Some(dir) => dlg.set_directory(dir),
+        None => dlg,
+    }
+}
+
+/// Web: no filesystem paths, nothing to remember.
+#[cfg(target_arch = "wasm32")]
+pub fn file_dialog() -> rfd::AsyncFileDialog {
+    rfd::AsyncFileDialog::new()
 }
 
 /// Trigger a browser download of `bytes` as `name`. Builds a Blob, points a
@@ -102,4 +123,120 @@ pub fn percent_encode(s: &str) -> String {
         }
     }
     out
+}
+
+/// Web renderer-error surface (#414): wgpu / naga report pipeline and shader
+/// failures through the `log` facade and then leave the canvas empty — with no
+/// logger installed the message is lost, so a broken GPU path looks like "the
+/// app draws nothing" with a clean console. Mirror every Error-level record to
+/// the browser console AND into a fixed DOM banner whose text is selectable
+/// (the canvas UI is not), with a one-click Copy button, so a failing user can
+/// paste the exact error into a bug report. Panics land in the same banner via
+/// a chained hook.
+#[cfg(target_arch = "wasm32")]
+pub mod web_diag {
+    use std::sync::Mutex;
+
+    /// Cap on banner entries so a per-frame error can't grow the DOM forever.
+    const MAX_LINES: u32 = 12;
+
+    /// Last banner message + repeat count, for collapsing a hot error loop
+    /// into one line with an `(xN)` suffix.
+    static LAST: Mutex<(String, u32)> = Mutex::new((String::new(), 0));
+
+    struct BannerLogger;
+
+    impl log::Log for BannerLogger {
+        fn enabled(&self, meta: &log::Metadata) -> bool {
+            meta.level() <= log::Level::Error
+        }
+        fn log(&self, record: &log::Record) {
+            if record.level() > log::Level::Error {
+                return;
+            }
+            let msg = format!("[{}] {}", record.target(), record.args());
+            web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(&msg));
+            show_banner(&msg);
+        }
+        fn flush(&self) {}
+    }
+
+    /// Install the logger + panic mirror. Call once at web startup, AFTER
+    /// `console_error_panic_hook::set_once` so the chained hook keeps the
+    /// console stack trace.
+    pub fn init() {
+        let console_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            show_banner(&info.to_string());
+            console_hook(info);
+        }));
+        if log::set_boxed_logger(Box::new(BannerLogger)).is_ok() {
+            log::set_max_level(log::LevelFilter::Error);
+        }
+    }
+
+    /// Append `msg` to the on-page banner, creating the overlay on first use.
+    fn show_banner(msg: &str) {
+        let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+            return;
+        };
+        let pre = match doc.get_element_by_id("ocs-err-text") {
+            Some(pre) => pre,
+            None => {
+                let Some(body) = doc.body() else { return };
+                let Ok(overlay) = doc.create_element("div") else {
+                    return;
+                };
+                overlay.set_id("ocs-err");
+                let _ = overlay.set_attribute(
+                    "style",
+                    "position:fixed;top:0;left:0;right:0;z-index:2147483647;\
+                     background:#5c1a1a;color:#ffdddd;font:12px monospace;\
+                     padding:8px 12px;max-height:40vh;overflow:auto;\
+                     user-select:text;cursor:text;",
+                );
+                // Inline `onclick` keeps this dependency-free (no JS closures):
+                // Copy puts the full error text on the clipboard; Dismiss
+                // removes the overlay so the app stays usable underneath.
+                overlay.set_inner_html(
+                    "<div><b>OpenCADStudio renderer error</b> — please copy \
+                     this into a bug report: \
+                     <button style=\"margin-left:8px\" onclick=\"navigator.clipboard.writeText(\
+                     document.getElementById('ocs-err-text').innerText)\">Copy</button> \
+                     <button onclick=\"document.getElementById('ocs-err').remove()\">\
+                     Dismiss</button></div>\
+                     <pre id=\"ocs-err-text\" style=\"margin:6px 0 0;\
+                     white-space:pre-wrap;user-select:text;\"></pre>",
+                );
+                let _ = body.append_child(&overlay);
+                match doc.get_element_by_id("ocs-err-text") {
+                    Some(pre) => pre,
+                    None => return,
+                }
+            }
+        };
+        // Collapse repeats: an error thrown every frame becomes one line with
+        // a running (xN) counter instead of MAX_LINES copies of itself.
+        let mut last = match LAST.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if last.0 == msg {
+            last.1 += 1;
+            if let Some(line) = pre.last_element_child() {
+                line.set_text_content(Some(&format!("{msg} (x{})", last.1)));
+            }
+            return;
+        }
+        *last = (msg.to_string(), 1);
+        if pre.child_element_count() >= MAX_LINES {
+            if let Some(first) = pre.first_element_child() {
+                first.remove();
+            }
+        }
+        if let Ok(line) = doc.create_element("div") {
+            line.set_text_content(Some(msg));
+            let _ = pre.append_child(&line);
+        }
+    }
 }

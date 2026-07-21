@@ -161,8 +161,13 @@ fn in_polygon(p: vec2<f32>) -> bool {
 
 // ── Per-family hatch test (identical math to wipeout.wgsl) ─────────────────
 
+// `ddx_xz`/`ddy_xz` are screen-space derivatives of `xz`, taken once in
+// fs_main: derivative builtins must run in uniform control flow, and the
+// per-family loop's early return makes later iterations non-uniform.
 fn check_family(
     xz:      vec2<f32>,
+    ddx_xz:  vec2<f32>,
+    ddy_xz:  vec2<f32>,
     fam:     LineFamily,
     cos_off: f32,
     sin_off: f32,
@@ -183,10 +188,15 @@ fn check_family(
     let k      = round(perp / perp_step);
     let dperp  = perp - k * perp_step;
     let d      = abs(dperp);
-    let half_px = length(vec2<f32>(dpdx(perp), dpdy(perp))) * 0.5;
+    // perp is linear in xz (offsets are constant), so its derivatives are the
+    // xz derivatives rotated into the family frame.
+    let half_px = length(vec2<f32>(
+        -ddx_xz.x * sin_a + ddx_xz.y * cos_a,
+        -ddy_xz.x * sin_a + ddy_xz.y * cos_a,
+    )) * 0.5;
 
-    let wpx = length(vec2<f32>(dpdx(xz.x), dpdy(xz.x)));
-    let wpy = length(vec2<f32>(dpdx(xz.y), dpdy(xz.y)));
+    let wpx = length(vec2<f32>(ddx_xz.x, ddy_xz.x));
+    let wpy = length(vec2<f32>(ddx_xz.y, ddy_xz.y));
 
     if d > half_px * 2.0 { return false; }
 
@@ -220,13 +230,40 @@ fn check_family(
 // ── Fragment shader ────────────────────────────────────────────────────────
 
 @fragment fn fs_main(v: VOut) -> @location(0) vec4<f32> {
+    // Taken here, in uniform control flow — see check_family.
+    let ddx_xz = dpdx(v.xz);
+    let ddy_xz = dpdy(v.xz);
+
     if !in_polygon(v.xz) { discard; }
 
-    if h.mode == 1u {
+    let base_mode = h.mode & 0xFFu;
+    let gk = (h.mode >> 8u) & 15u;
+    let ginv = ((h.mode >> 8u) & 16u) != 0u;
+    if base_mode == 1u {
         return h.color;
-    } else if h.mode == 2u {
+    } else if base_mode == 2u {
         let proj = v.xz.x * h.grad_cos + v.xz.y * h.grad_sin;
-        let t    = clamp((proj - h.grad_min) / h.grad_range, 0.0, 1.0);
+        var t    = clamp((proj - h.grad_min) / h.grad_range, 0.0, 1.0);
+        // Shape profile: cylinder mirrors around the middle, curved eases in.
+        if gk == 1u {
+            t = 1.0 - abs(2.0 * t - 1.0);
+        } else if gk == 4u {
+            t = t * t;
+        }
+        if ginv {
+            t = 1.0 - t;
+        }
+        return mix(h.color, h.color2, t);
+    } else if base_mode == 3u {
+        // Radial gradient: centre is (grad_cos, grad_sin), radius is grad_range.
+        let d = length(v.xz - vec2<f32>(h.grad_cos, h.grad_sin));
+        var t = clamp(d / h.grad_range, 0.0, 1.0);
+        if gk == 3u {
+            t = sqrt(t);
+        }
+        if ginv {
+            t = 1.0 - t;
+        }
         return mix(h.color, h.color2, t);
     }
 
@@ -248,7 +285,7 @@ fn check_family(
     let cos_off = cos(h.angle_offset);
     let sin_off = sin(h.angle_offset);
     for (var i = 0u; i < h.n_families; i++) {
-        if check_family(v.xz, load_family(i), cos_off, sin_off, h.scale) {
+        if check_family(v.xz, ddx_xz, ddy_xz, load_family(i), cos_off, sin_off, h.scale) {
             return h.color;
         }
     }

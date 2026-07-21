@@ -391,6 +391,11 @@ impl Scene {
         if let Some(entity) = self.document.get_entity_mut(handle) {
             view::dispatch::apply_grip(entity, grip_id, apply);
         }
+        // A dimension loaded from a file renders through its baked *D block;
+        // the grip only moved a definition point, so the baked graphics are
+        // stale — drop them so tessellation falls back to the live geometry
+        // and the next save re-bakes (no-op for non-dimensions). (#398)
+        crate::modules::draw::modify::explode::invalidate_dim_block(&mut self.document, handle);
 
         // Translate MeshModel vertices by the same delta the grip applied.
         if let Some(old) = old_por {

@@ -186,6 +186,14 @@ impl CadCommand for AlignedDimensionCommand {
         let p1 = p1.as_vec3();
         let p2 = p2.as_vec3();
         Some(WireModel {
+            taper_widths: Vec::new(),
+            world_width: 0.0,
+            depth_override: None,
+            fill_is_3d: false,
+            pick_tris: Vec::new(),
+            pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
             name: "dimaligned_preview".into(),
             points: vec![[p1.x, p1.y, p1.z], [p2.x, p2.y, p2.z]],
@@ -201,7 +209,6 @@ impl CadCommand for AlignedDimensionCommand {
             key_vertices: vec![],
             aabb: WireModel::UNBOUNDED_AABB,
             plinegen: true,
-            vp_scissor: None,
             fill_tris: vec![],
             fill_tris_low: Vec::new(),
         })
@@ -233,6 +240,14 @@ fn preview_aligned(p1: DVec3, p2: DVec3, dim_pt: DVec3) -> WireModel {
     let d1 = d1.as_vec3();
     let d2 = d2.as_vec3();
     WireModel {
+        taper_widths: Vec::new(),
+        world_width: 0.0,
+        depth_override: None,
+        fill_is_3d: false,
+        pick_tris: Vec::new(),
+        pick_tris_low: Vec::new(),
+            dash_from_start: false,
+            dash_align_end: None,
             text_verts: Vec::new(),
         name: "dimaligned_preview".into(),
         points: vec![
@@ -257,7 +272,6 @@ fn preview_aligned(p1: DVec3, p2: DVec3, dim_pt: DVec3) -> WireModel {
         key_vertices: vec![],
         aabb: WireModel::UNBOUNDED_AABB,
         plinegen: true,
-        vp_scissor: None,
         fill_tris: vec![],
         fill_tris_low: Vec::new(),
     }

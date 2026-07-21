@@ -345,6 +345,9 @@ pub(super) fn entity_type_key(entity: &acadrust::EntityType) -> String {
         AttributeDefinition(_) => "attdef",
         AttributeEntity(_) => "attrib",
         Ole2Frame(_) => "ole2frame",
+        Light(_) => "light",
+        SectionSymbol(_) => "sectionsymbol",
+        ViewBorder(_) => "viewborder",
         Seqend(_) => "seqend",
         Unknown(_) => "unknown",
     }

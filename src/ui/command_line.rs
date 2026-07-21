@@ -5,7 +5,7 @@ use iced::time::Instant;
 use crate::app::Message;
 use crate::command::CmdOption;
 use iced::widget::{
-    button, column, container, opaque, row, text, text_editor, text_input, Space,
+    button, column, container, opaque, row, text, text_editor, text_input, tooltip, Space,
 };
 use iced::{Background, Border, Color, Element, Length, Theme};
 
@@ -27,6 +27,10 @@ const MAX_HISTORY: usize = 64;
 #[derive(Clone, Default)]
 pub struct CommandLine {
     pub input: String,
+    /// Persistent literal-space mode (the `>` toggle button): while on, every
+    /// line behaves as if it started with `>` — Space stays in the input
+    /// instead of submitting. Saved in the user config.
+    pub literal_spaces: bool,
     pub history: Vec<HistoryEntry>,
     /// Commands the user has typed (for ↑/↓ recall). Holds the raw typed
     /// strings so the line can be re-edited; distinct from `recent_commands`.
@@ -383,6 +387,64 @@ impl CommandLine {
                 }
             });
         let prompt = container(text("Command:").size(11).color(PROMPT_COLOR)).padding([5, 8]);
+        // Literal-space toggle: while active, every line behaves as if it
+        // started with `>` — Space stays in the line instead of submitting, so
+        // arguments with spaces (text strings, paths, `UCS Z 90` as one line)
+        // can be typed. Persists until toggled off; a hand-typed leading `>`
+        // lights the button too (same mode, one line only).
+        let literal_active = self.literal_spaces || self.input.starts_with('>');
+        let literal_btn = button(text(">").size(11).color(if literal_active {
+            Color::WHITE
+        } else {
+            PROMPT_COLOR
+        }))
+        .on_press(Message::CommandLiteralToggle)
+        .padding([2, 6])
+        .style(move |_: &Theme, status| {
+            let bg = if literal_active {
+                Color {
+                    r: 0.28,
+                    g: 0.40,
+                    b: 0.56,
+                    a: 1.0,
+                }
+            } else if matches!(status, button::Status::Hovered) {
+                Color {
+                    r: 0.22,
+                    g: 0.30,
+                    b: 0.42,
+                    a: 1.0,
+                }
+            } else {
+                INPUT_ROW_BG
+            };
+            button::Style {
+                background: Some(Background::Color(bg)),
+                text_color: Color::WHITE,
+                border: Border {
+                    color: BORDER_COLOR,
+                    width: 1.0,
+                    radius: 3.0.into(),
+                },
+                ..Default::default()
+            }
+        });
+        let literal_tip = container(
+            text("Literal spaces: Space stays in the line instead of running the command (same as typing a leading '>'). Stays on until toggled off.")
+                .size(11)
+                .color(Color::WHITE),
+        )
+        .padding([3, 6])
+        .style(|_: &Theme| container::Style {
+            background: Some(Background::Color(PANEL_BG)),
+            border: Border {
+                color: BORDER_COLOR,
+                width: 1.0,
+                radius: 3.0.into(),
+            },
+            ..Default::default()
+        });
+        let literal_btn = tooltip(literal_btn, literal_tip, tooltip::Position::Top).gap(4);
         // While dynamic input is capturing keystrokes, the command-line
         // text field is left without an `on_input` handler so it can't
         // grab focus or swallow numeric keys — those flow through the
@@ -509,7 +571,7 @@ impl CommandLine {
             ..Default::default()
         })
         .padding([2, 6]);
-        let input_row = row![prompt, input, dropdown_btn]
+        let input_row = row![prompt, literal_btn, input, dropdown_btn]
             .spacing(4)
             .align_y(iced::Center);
 

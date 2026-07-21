@@ -170,8 +170,13 @@ fn in_polygon(p: vec2<f32>) -> bool {
 // `cos_off` / `sin_off` are cos/sin of `h.angle_offset` (precomputed once).
 // `scale` is `h.scale`.
 
+// `ddx_xz`/`ddy_xz` are screen-space derivatives of `xz`, taken once in
+// fs_main: derivative builtins must run in uniform control flow, and the
+// per-family loop's early return makes later iterations non-uniform.
 fn check_family(
     xz:      vec2<f32>,
+    ddx_xz:  vec2<f32>,
+    ddy_xz:  vec2<f32>,
     fam:     LineFamily,
     cos_off: f32,
     sin_off: f32,
@@ -196,13 +201,18 @@ fn check_family(
     let k      = round(perp / perp_step);
     let dperp  = perp - k * perp_step;
     let d      = abs(dperp);
-    let half_px = length(vec2<f32>(dpdx(perp), dpdy(perp))) * 0.5;
+    // perp is linear in xz (offsets are constant), so its derivatives are the
+    // xz derivatives rotated into the family frame.
+    let half_px = length(vec2<f32>(
+        -ddx_xz.x * sin_a + ddx_xz.y * cos_a,
+        -ddy_xz.x * sin_a + ddy_xz.y * cos_a,
+    )) * 0.5;
 
     // World units per screen pixel on each axis — used to light exactly the
     // one pixel that contains a dot's centre (pixel-snapped, so a dot stays a
     // steady single pixel at any pattern angle instead of flickering).
-    let wpx = length(vec2<f32>(dpdx(xz.x), dpdy(xz.x)));
-    let wpy = length(vec2<f32>(dpdx(xz.y), dpdy(xz.y)));
+    let wpx = length(vec2<f32>(ddx_xz.x, ddy_xz.x));
+    let wpy = length(vec2<f32>(ddx_xz.y, ddy_xz.y));
 
     // A fragment within ~1px of a line may be a dot; further out is empty fill.
     if d > half_px * 2.0 { return false; }
@@ -242,6 +252,10 @@ fn check_family(
 // ── Fragment shader ────────────────────────────────────────────────────────
 
 @fragment fn fs_main(v: VOut) -> @location(0) vec4<f32> {
+    // Taken here, in uniform control flow — see check_family.
+    let ddx_xz = dpdx(v.xz);
+    let ddy_xz = dpdy(v.xz);
+
     // 1. Boundary test.
     if !in_polygon(v.xz) { discard; }
 
@@ -282,7 +296,7 @@ fn check_family(
     let cos_off = cos(h.angle_offset);
     let sin_off = sin(h.angle_offset);
     for (var i = 0u; i < f.n_families; i++) {
-        if check_family(v.xz, f.families[i], cos_off, sin_off, h.scale) {
+        if check_family(v.xz, ddx_xz, ddy_xz, f.families[i], cos_off, sin_off, h.scale) {
             return h.color;
         }
     }
