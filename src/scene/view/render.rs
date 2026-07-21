@@ -997,6 +997,7 @@ impl Scene {
         &self,
         wires: &[WireModel],
         wire_content_id: u64,
+        source_key: u64,
     ) -> std::sync::Arc<Vec<crate::scene::pipeline::text_gpu::TextVertex>> {
         use std::sync::Arc;
         {
@@ -1007,11 +1008,13 @@ impl Scene {
         }
         // A new content id (every geometry edit) misses the cache — but if no
         // text-bearing entity changed since the last build, the glyphs are
-        // identical, so reuse them instead of re-walking every wire.
+        // identical, so reuse them instead of re-walking every wire. Reuse is
+        // per `source_key`: another source's glyphs are a different wire set,
+        // not an older build of this one (#403).
         {
             let reuse = {
                 let last = self.last_sdf_text.borrow();
-                match &*last {
+                match last.get(&source_key) {
                     Some((epoch, arc)) if self.text_unchanged(*epoch) => Some(arc.clone()),
                     _ => None,
                 }
@@ -1020,7 +1023,9 @@ impl Scene {
                 self.sdf_text_cache
                     .borrow_mut()
                     .insert(wire_content_id, arc.clone());
-                *self.last_sdf_text.borrow_mut() = Some((self.geometry_epoch, arc.clone()));
+                self.last_sdf_text
+                    .borrow_mut()
+                    .insert(source_key, (self.geometry_epoch, arc.clone()));
                 return arc;
             }
         }
@@ -1039,7 +1044,13 @@ impl Scene {
             }
             cache.insert(wire_content_id, verts.clone());
         }
-        *self.last_sdf_text.borrow_mut() = Some((self.geometry_epoch, verts.clone()));
+        {
+            let mut last = self.last_sdf_text.borrow_mut();
+            if last.len() > 8 {
+                last.clear();
+            }
+            last.insert(source_key, (self.geometry_epoch, verts.clone()));
+        }
         verts
     }
 
@@ -1344,7 +1355,22 @@ impl Scene {
         // internal text and the paper sheet's own annotation alike — each set
         // draws only the text that belongs to it. Cached on the wire content
         // id so an unchanged wire set is not re-walked every frame.
-        let text_verts = self.gather_text_verts(&all_wires, wire_content_id);
+        // The reuse fallback inside the gather is keyed per wire SOURCE — the
+        // sheet, a Model tile, a content viewport and the implicit view carry
+        // different glyph sets even at the same geometry epoch (#403). Tiles
+        // share the resident Model set, so they share one key; the implicit
+        // view mixes in the current layout block (BEDIT swaps sets without a
+        // geometry delta).
+        let text_source_key: u64 = if inst.tile_idx.is_some() {
+            0x1000_0000_0000_0000
+        } else if inst.paper_sheet {
+            0x2000_0000_0000_0000
+        } else if inst.handle == acadrust::Handle::NULL {
+            0x4000_0000_0000_0000 | self.current_layout_block_handle().value()
+        } else {
+            0x3000_0000_0000_0000 | inst.handle.value()
+        };
+        let text_verts = self.gather_text_verts(&all_wires, wire_content_id, text_source_key);
         // Grip-drag / command-preview glyphs, excluded from the epoch-cached base
         // gather above. Two sources, both tiny (one operation's worth) and walked
         // per frame: the overlay wires' own glyphs (MOVE / COPY / ROTATE / SCALE /

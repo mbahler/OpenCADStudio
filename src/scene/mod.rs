@@ -789,12 +789,16 @@ pub struct Scene {
     sdf_text_cache: RefCell<
         HashMap<u64, std::sync::Arc<Vec<crate::scene::pipeline::text_gpu::TextVertex>>>,
     >,
-    /// `(geometry_epoch, gathered text)` of the most recent SDF-text build. When a
-    /// new content id misses the cache but the journal shows no text-bearing
-    /// entity changed since this epoch, the same glyphs are reused instead of
-    /// re-walking every wire — an edit on plain geometry never rebuilds the text.
+    /// Per wire-source `(geometry_epoch, gathered text)` of the most recent
+    /// SDF-text build. When a new content id misses the cache but the journal
+    /// shows no text-bearing entity changed since that epoch, the same glyphs
+    /// are reused instead of re-walking every wire — an edit on plain geometry
+    /// never rebuilds the text. Keyed by the render source (sheet / tile /
+    /// content viewport / implicit view): a paper frame gathers several wire
+    /// sets in one frame, and a single slot handed the sheet's glyphs to the
+    /// content viewports, hiding every model-space text entity (#403).
     last_sdf_text: RefCell<
-        Option<(u64, std::sync::Arc<Vec<crate::scene::pipeline::text_gpu::TextVertex>>)>,
+        HashMap<u64, (u64, std::sync::Arc<Vec<crate::scene::pipeline::text_gpu::TextVertex>>)>,
     >,
     /// pane_grid layout tree for the Model tab — the source of truth for the
     /// tile split layout, resize and focus. `model_tiles` (the renderer's
@@ -1115,7 +1119,7 @@ impl Scene {
             }]),
             active_model_tile: std::cell::Cell::new(0),
             sdf_text_cache: RefCell::new(HashMap::default()),
-            last_sdf_text: RefCell::new(None),
+            last_sdf_text: RefCell::new(HashMap::default()),
             // One pane mapped to tile 0 — matches the single default tile above.
             model_panes: iced::widget::pane_grid::State::new(0).0,
             selection: Rc::new(RefCell::new(SelectionState::default())),
@@ -1394,26 +1398,39 @@ impl Scene {
 
     /// True when no text-bearing entity changed since `last_epoch`, so cached SDF
     /// glyphs stay valid. Text comes from Text / MText / Dimension / MultiLeader /
-    /// Leader / Table / attributes and from block references (their baked text
-    /// moves with the instance) — an edit to any of those, or any removal,
-    /// invalidates it; a plain line / arc / polyline edit does not.
+    /// Leader / Table / Tolerance / attributes (incl. ATTDEF) and from block
+    /// references (their baked text moves with the instance) — an edit to any of
+    /// those, or any removal, invalidates it; a plain line / arc / polyline edit
+    /// does not.
     fn text_unchanged(&self, last_epoch: u64) -> bool {
         match self.replay_since(last_epoch) {
             Some(deltas) => deltas.iter().all(|&(h, k)| {
-                k != ChangeKind::Removed
-                    && !matches!(
-                        self.document.get_entity(h),
-                        Some(
-                            EntityType::Text(_)
-                                | EntityType::MText(_)
-                                | EntityType::Dimension(_)
-                                | EntityType::MultiLeader(_)
-                                | EntityType::Leader(_)
-                                | EntityType::Table(_)
-                                | EntityType::AttributeEntity(_)
-                                | EntityType::Insert(_)
-                        )
-                    )
+                if k == ChangeKind::Removed {
+                    return false;
+                }
+                let Some(e) = self.document.get_entity(h) else {
+                    return true;
+                };
+                if matches!(
+                    e,
+                    EntityType::Text(_)
+                        | EntityType::MText(_)
+                        | EntityType::Dimension(_)
+                        | EntityType::MultiLeader(_)
+                        | EntityType::Leader(_)
+                        | EntityType::Table(_)
+                        | EntityType::Tolerance(_)
+                        | EntityType::AttributeEntity(_)
+                        | EntityType::AttributeDefinition(_)
+                        | EntityType::Insert(_)
+                ) {
+                    return false;
+                }
+                // Complex-linetype glyphs ride the host entity's own wire, so a
+                // plain line/polyline edit still moves text when its linetype
+                // embeds text or shapes.
+                let lt = crate::scene::view::render::linetype_name_for(&self.document, e);
+                crate::io::linetypes::resolve_complex_lt(&self.document, &lt).is_none()
             }),
             None => false,
         }
