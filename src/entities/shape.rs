@@ -57,9 +57,16 @@ fn shape_marker(
 
 impl TruckConvertible for Shape {
     fn to_truck(&self, _document: &acadrust::CadDocument) -> Option<TruckEntity> {
-        let ox = self.insertion_point.x;
-        let oy = self.insertion_point.y;
-        let oz = self.insertion_point.z;
+        // SHAPE insertion point is OCS (planar entity) — map through the
+        // arbitrary axis so a mirrored shape's marker lands where it renders.
+        let (ox, oy, oz) = crate::scene::view::transform::ocs_point_to_wcs(
+            (
+                self.insertion_point.x,
+                self.insertion_point.y,
+                self.insertion_point.z,
+            ),
+            (self.normal.x, self.normal.y, self.normal.z),
+        );
         let size = self.size.abs().max(0.5);
 
         let snap_pt = glam::DVec3::new(ox, oy, oz);

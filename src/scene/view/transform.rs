@@ -134,6 +134,22 @@ pub fn ocs_point_to_wcs(ocs: (f64, f64, f64), normal: (f64, f64, f64)) -> (f64, 
     )
 }
 
+/// Inverse of [`ocs_point_to_wcs`]: express a WCS point (or direction — the
+/// map is a pure rotation, so both use the same math) in the OCS frame of
+/// `normal`. Used when writing user edits made in world space (grip drags)
+/// back into a planar entity's OCS-stored coordinates.
+#[inline]
+pub fn wcs_point_to_ocs(wcs: (f64, f64, f64), normal: (f64, f64, f64)) -> (f64, f64, f64) {
+    let (ax, ay) = ocs_axes(normal);
+    let (wx, wy, wz) = wcs;
+    let (nx, ny, nz) = normal;
+    (
+        wx * ax.0 + wy * ax.1 + wz * ax.2,
+        wx * ay.0 + wy * ay.1 + wz * ay.2,
+        wx * nx + wy * ny + wz * nz,
+    )
+}
+
 #[cfg(test)]
 mod mirror_delegation_tests {
     use super::*;

@@ -1806,11 +1806,20 @@ impl Scene {
         // `hatch_model_from_dxf` uses. Casting the absolute WCS corner straight
         // to f32 costs ~0.06 units of resolution at UTM magnitudes (~1e6), so
         // the quad snapped to a grid and the fill drifted off its outline.
+        // SOLID corners are stored in OCS (like ARC/LWPOLYLINE) — map through
+        // the arbitrary axis so a mirrored solid (normal 0,0,-1) fills on the
+        // correct side of the drawing.
+        let n = (solid.normal.x, solid.normal.y, solid.normal.z);
+        let w = |v: &acadrust::types::Vector3| -> [f64; 2] {
+            let (x, y, _) =
+                crate::scene::view::transform::ocs_point_to_wcs((v.x, v.y, v.z), n);
+            [x, y]
+        };
         let corners: [[f64; 2]; 4] = [
-            [solid.first_corner.x, solid.first_corner.y],
-            [solid.second_corner.x, solid.second_corner.y],
-            [solid.fourth_corner.x, solid.fourth_corner.y],
-            [solid.third_corner.x, solid.third_corner.y],
+            w(&solid.first_corner),
+            w(&solid.second_corner),
+            w(&solid.fourth_corner),
+            w(&solid.third_corner),
         ];
         let mut min = [f64::INFINITY; 2];
         let mut max = [f64::NEG_INFINITY; 2];
