@@ -165,6 +165,12 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                     {
                         entity.apply_grip_menu_value(pending.grip_id, pending.action, v);
                     }
+                    // A typed grip-menu value reshapes dimensions too — drop a
+                    // stale baked *D block (no-op for non-dims). (#398)
+                    crate::modules::draw::modify::explode::invalidate_dim_block(
+                        &mut self.tabs[i].scene.document,
+                        pending.handle,
+                    );
                     self.tabs[i].scene.bump_geometry();
                     self.tabs[i].dirty = true;
                     self.refresh_selected_grips();
@@ -950,6 +956,12 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 if let Some(entity) = self.tabs[i].scene.document.get_entity_mut(popup.handle) {
                     entity.apply_grip_menu(popup.grip_id, item.action);
                 }
+                // Menu actions reshape dimensions too — drop a stale baked *D
+                // block so the edit is visible (no-op for non-dims). (#398)
+                crate::modules::draw::modify::explode::invalidate_dim_block(
+                    &mut self.tabs[i].scene.document,
+                    popup.handle,
+                );
                 self.tabs[i].scene.bump_geometry();
                 self.tabs[i].dirty = true;
                 self.refresh_selected_grips();
