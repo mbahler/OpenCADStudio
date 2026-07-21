@@ -30,11 +30,10 @@ fn pdsize_world(pdsize: f64) -> f64 {
 /// units. Shared by the header-driven path ([`to_truck`]) and the
 /// viewport-aware relative path ([`relative_truck`]).
 fn point_truck(pt: &Point, pdmode: i16, s: f64) -> TruckEntity {
-    let normal = (pt.normal.x, pt.normal.y, pt.normal.z);
-    let (wx, wy, wz) = crate::scene::view::transform::ocs_point_to_wcs(
-        (pt.location.x, pt.location.y, pt.location.z),
-        normal,
-    );
+    // POINT location is stored in WCS (the extrusion normal only orients the
+    // glyph/thickness) — remapping it through the arbitrary-axis OCS moved
+    // mirrored points (normal 0,0,-1) to the wrong side of the drawing.
+    let (wx, wy, wz) = (pt.location.x, pt.location.y, pt.location.z);
     let snap = glam::DVec3::new(wx, wy, wz);
     if pdmode == 0 {
         // Default: a single vertex (driver handles the dot pixel).
